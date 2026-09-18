@@ -11,7 +11,7 @@ license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-    "vaws-diagnostics @ git+https://github.com/vllm-ascend-workspace/vaws-diagnostics@96fcdfaa0f25fa59f12e948eb4e17ead775f3287",
+    "vaws-diagnostics @ git+https://github.com/mindie-agent/diagnostics@96fcdfaa0f25fa59f12e948eb4e17ead775f3287",
     "vaws-remote-dev>=0.9.3",
     "setuptools-scm>=8",
 ]
@@ -23,7 +23,7 @@ test = ["pytest", "jsonschema>=4"]
 vaws-coordinator = "vaws_coordinator.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/vllm-ascend-workspace/vaws-coordinator"
+Homepage = "https://github.com/mindie-agent/coordinator"
 
 [tool.hatch.build.targets.wheel]
 packages = ["vaws_coordinator"]

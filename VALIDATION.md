@@ -4,7 +4,7 @@ Status: dated execution evidence, 2026-09-12.
 
 The current package contract is in [README.md](README.md). The broader consumer
 execution validation is recorded in
-[consumer PR #145](https://github.com/vllm-ascend-workspace/vllm-ascend-workspace/pull/145).
+[consumer PR #145](https://github.com/mindie-agent/mindie-agent/pull/145).
 This document records the native preparation experiment; it does not claim that
 the entire package test suite or every supported environment was exercised.
 

@@ -1,4 +1,4 @@
-# vaws-coordinator
+# coordinator · MindIE Agent
 
 Local-process coordinator for one user's remote Ascend containers and host NPU
 allocation. It is not a hosted multi-user service.
@@ -211,13 +211,13 @@ the existing owner stage duration includes those costs.
 ## Install
 
 ```bash
-uv pip install git+https://github.com/vllm-ascend-workspace/vaws-coordinator@main
+uv pip install git+https://github.com/mindie-agent/coordinator@main
 ```
 
 Or run without a permanent install:
 
 ```bash
-uvx --from git+https://github.com/vllm-ascend-workspace/vaws-coordinator@main vaws-coordinator task-server
+uvx --from git+https://github.com/mindie-agent/coordinator@main vaws-coordinator task-server
 ```
 
 Replace `@main` with a commit or tag when you pin. `python -m vaws_coordinator`
@@ -270,7 +270,7 @@ Example Cursor / Claude `.mcp.json` (or `.cursor/mcp.json`):
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/vllm-ascend-workspace/vaws-coordinator@main",
+        "git+https://github.com/mindie-agent/coordinator@main",
         "vaws-coordinator",
         "task-server"
       ]
@@ -386,7 +386,7 @@ dependencies from an index:
 
 ```bash
 uv venv
-uv pip install "vaws-remote-dev @ git+https://github.com/vllm-ascend-workspace/remote-dev@89d197ef13bcae46f7bea809c22bbb058c4edfbf"
+uv pip install "vaws-remote-dev @ git+https://github.com/mindie-agent/remote-dev@89d197ef13bcae46f7bea809c22bbb058c4edfbf"
 uv pip install pytest "jsonschema>=4" "setuptools-scm>=8"
 uv pip install -e . --no-deps
 .venv/bin/python -m pytest
