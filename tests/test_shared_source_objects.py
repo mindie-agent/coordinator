@@ -4,14 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from vaws_coordinator import parity
-from vaws_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
-from vaws_coordinator.shared_source_objects import export_existing_objects
+from mindie_coordinator import parity
+from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
+from mindie_coordinator.shared_source_objects import export_existing_objects
 
 
 def container(identifier='a'):
-    return {'Id': identifier * 64, 'Name': '/vaws-example', 'Image': 'sha256:' + 'b' * 64,
-            'Config': {'Labels': {'com.vaws.managed': 'true'}}, 'State': {'Running': True},
+    return {'Id': identifier * 64, 'Name': '/mindie-example', 'Image': 'sha256:' + 'b' * 64,
+            'Config': {'Labels': {'com.mindie.managed': 'true'}}, 'State': {'Running': True},
             'Mounts': [{'Type': 'bind', 'Source': '/tmp', 'Destination': '/tmp', 'RW': True}]}
 
 
@@ -133,11 +133,11 @@ def test_container_timeout_is_an_unknown_host_reply():
 
 
 def test_local_snapshot_hints_are_bounded_and_exclude_other_repo_refs(monkeypatch):
-    lines = ['f' * 40 + ' refs/vaws/inputs/current/project',
-             'e' * 40 + ' refs/vaws/inputs/current/project-scm']
+    lines = ['f' * 40 + ' refs/mindie/inputs/current/project',
+             'e' * 40 + ' refs/mindie/inputs/current/project-scm']
     for index in range(100):
         oid = f'{index:040x}'
-        lines.extend([oid + f' refs/vaws/inputs/source-{index}/project',
+        lines.extend([oid + f' refs/mindie/inputs/source-{index}/project',
                       oid + f' refs/parity-transport/owner/{index}/project'])
     monkeypatch.setattr(parity, 'git', lambda *args, **kwargs:
                         SimpleNamespace(returncode=0, stdout='\n'.join(lines)))

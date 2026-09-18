@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from test_native_view_publication import donor
-from vaws_coordinator import parity, parity_support
-from vaws_coordinator.native_publication import NativeViewPublication
+from mindie_coordinator import parity, parity_support
+from mindie_coordinator.native_publication import NativeViewPublication
 
 
 def git(path, *args):
@@ -57,7 +57,7 @@ def materialize_program(request):
     # The materializer's shared-object owner supplies this helper in current
     # composition; older materializers have no cross-container object call.
     try:
-        from vaws_coordinator.shared_source_objects import copy_fixed_objects
+        from mindie_coordinator.shared_source_objects import copy_fixed_objects
     except ImportError:
         pass
     else:
@@ -68,7 +68,7 @@ def materialize_program(request):
 @pytest.mark.parametrize('missing', [False, True])
 def test_actual_bash_argument_composes_materialization_and_fixed_native_proof(donor, missing):
     publication, request = fixed_plan(donor, missing=missing)
-    from vaws_coordinator.preparation_script import preparation_command
+    from mindie_coordinator.preparation_script import preparation_command
     command = preparation_command(publication.wrap_program(materialize_program(request)))
     size = len(command.encode('utf-8'))
     assert size <= 96 * 1024
@@ -81,7 +81,7 @@ def test_actual_bash_argument_composes_materialization_and_fixed_native_proof(do
     else:
         assert result['status'] == 'materialized'
         observed = publication.accept(result['native_view'])
-        marker = Path(request['root']) / '.vaws-runtime/ready-profile.json'
+        marker = Path(request['root']) / '.mindie-runtime/ready-profile.json'
         actual = json.loads(marker.read_text())
         assert observed['runtime_root'] == request['root'] and observed['container_id'] == 'same-container'
         assert actual['files'] == publication.donor['files']
@@ -98,7 +98,7 @@ def test_failed_native_publication_never_returns_a_materialized_only_success(don
     completed = subprocess.run(['/bin/bash', '-c', publication.wrap_program(materialize_program(request))],
                                capture_output=True, text=True)
     assert completed.returncode != 0 and 'native donor manifest changed' in completed.stderr
-    assert not (Path(request['root']) / '.vaws-runtime/ready-profile.json').exists()
+    assert not (Path(request['root']) / '.mindie-runtime/ready-profile.json').exists()
     assert not completed.stdout.strip()
 
 
@@ -188,8 +188,8 @@ def test_backend_prepares_missing_root_before_real_owned_worker_launch_and_quiet
     from remote_dev.processes.client import worker_source
     from remote_dev.processes.worker import control_job
     from test_fixed_materialization import make_record, snapshot
-    from vaws_coordinator.backend import PreparedNativeView, RemoteBackend
-    from vaws_coordinator.preparation_process import stop_preparation_process
+    from mindie_coordinator.backend import PreparedNativeView, RemoteBackend
+    from mindie_coordinator.preparation_process import stop_preparation_process
 
     publication, request = fixed_plan(donor)
     source, root = Path(publication.request['source_root']), Path(request['root'])
@@ -211,7 +211,7 @@ def test_backend_prepares_missing_root_before_real_owned_worker_launch_and_quiet
         control_job({'root': str(root), 'job_id': 'absent-root', 'action': 'status'}, worker)
 
     bootstrap = str(source.parent)
-    monkeypatch.setattr('vaws_coordinator.provision.host_ops.DEFAULT_WORKDIR', bootstrap)
+    monkeypatch.setattr('mindie_coordinator.provision.host_ops.DEFAULT_WORKDIR', bootstrap)
     original_root_script = parity.prepare_isolated_root_script
     monkeypatch.setattr(parity, 'prepare_isolated_root_script',
                         lambda *a, **k: 'hostname() { return 1; }\n' + original_root_script(*a, **k))
@@ -224,7 +224,7 @@ def test_backend_prepares_missing_root_before_real_owned_worker_launch_and_quiet
 
     monkeypatch.setattr('remote_dev.core.ssh_transport.run_rpc_script',
                         lambda *a, **k: pytest.fail('root setup must share the owned job'))
-    monkeypatch.setattr('vaws_coordinator.preparation_process.control', control)
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', control)
     backend = RemoteBackend()
     monkeypatch.setattr(backend, '_prepare_native_view', lambda *a, **k: pytest.fail('publication must share the owned job'))
     monkeypatch.setattr(backend, 'bash', lambda *a, **k: pytest.fail('no extra shell operation'))

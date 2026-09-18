@@ -37,31 +37,31 @@ def _init_git_workspace(path: Path) -> None:
     (path / "README").write_text("pool\n", encoding="utf-8")
     # Match the consumer contract: runtime state is not a source snapshot.
     (path / ".git" / "info" / "exclude").write_text(
-        "manager/\ncoordinator/\nsessions/\nhost/\n.vaws-local/\n", encoding="utf-8"
+        "manager/\ncoordinator/\nsessions/\nhost/\n.mindie-local/\n", encoding="utf-8"
     )
     subprocess.run(["git", "-C", str(path), "add", "README"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True, capture_output=True)
 
-from vaws_coordinator.host_queue import HOST_QUEUE_MODULE_ENV, HostQueueUnavailable, load_host_protocol
+from mindie_coordinator.host_queue import HOST_QUEUE_MODULE_ENV, HostQueueUnavailable, load_host_protocol
 
 try:
     # The suite runs against the bundled host authority, or an explicit
-    # VAWS_HOST_QUEUE_MODULE override. One host still has exactly one
+    # MINDIE_HOST_QUEUE_MODULE override. One host still has exactly one
     # allocator implementation.
     host_protocol = load_host_protocol()
 except HostQueueUnavailable as exc:  # pragma: no cover - configuration guard
     raise unittest.SkipTest(
-        f"{exc}. The bundled host/vaws_npu_coordination.py is missing or "
+        f"{exc}. The bundled host/mindie_npu_coordination.py is missing or "
         f"{HOST_QUEUE_MODULE_ENV} points at a path that does not exist."
     ) from exc
 
-sys.modules.setdefault("vaws_npu_coordination", host_protocol)
+sys.modules.setdefault("mindie_npu_coordination", host_protocol)
 handle_request = host_protocol.handle_request
 _confirmed_free_probe = host_protocol._confirmed_free_probe
 CoordinationError = host_protocol.CoordinationError
-from vaws_coordinator.ready_runtime import RuntimePool
-from vaws_coordinator.execution_sources import capture_sources
-from vaws_coordinator.runtime_profile import capture, digest, publish, restore, verify
+from mindie_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.execution_sources import capture_sources
+from mindie_coordinator.runtime_profile import capture, digest, publish, restore, verify
 
 
 class Backend:
@@ -149,7 +149,7 @@ class Backend:
         host = runtime["host_endpoint"]["host"]
         state = Path(self.state) / host.replace(".", "_")
         state.mkdir(parents=True, exist_ok=True)
-        with self.protocol_lock, mock.patch("vaws_npu_coordination.process_guard_busy", side_effect=guarded):
+        with self.protocol_lock, mock.patch("mindie_npu_coordination.process_guard_busy", side_effect=guarded):
             result = handle_request({**request, "state_dir": str(state), "interval_seconds": 0.001},
                                     clock=self.clock,
                                     probe=lambda: {"status": "ok", "devices": [0, 1],
@@ -196,7 +196,7 @@ def runtime_spec(number, user="alice", python=None, root=None, service_ports=Non
         "endpoint": {"host": host, "port": ssh, "root": root or f"/vllm-workspace/{user}/{number}",
                      "user": "root"},
         "host_endpoint": {"host": host, "port": 22, "user": "root"},
-        "container_name": "vaws-" + user,
+        "container_name": "mindie-" + user,
         "service_ports": service_ports if service_ports is not None else [48000 + number],
     }
     if recipe:
@@ -218,7 +218,7 @@ class FakeShell:
 
 class BackendTests(unittest.TestCase):
     def test_inspect_verifies_selected_python_and_allows_sibling_workers(self):
-        from vaws_coordinator.backend import RemoteBackend
+        from mindie_coordinator.backend import RemoteBackend
 
         backend = RemoteBackend()
         spec = runtime_spec(1, user="alice")
@@ -230,7 +230,7 @@ class BackendTests(unittest.TestCase):
                 return json.dumps({"Id": "container-alice", "State": {"Running": True}})
             return json.dumps({"profile": {"launch_env": {}}, "profile_key": "profile-a", "build_key": "native-a"})
 
-        with mock.patch.object(backend, "bash", side_effect=bash), mock.patch("vaws_coordinator.backend.launch_preamble", return_value=""):
+        with mock.patch.object(backend, "bash", side_effect=bash), mock.patch("mindie_coordinator.backend.launch_preamble", return_value=""):
             observed = backend.inspect(spec, idle=True)
         self.assertEqual(observed["container_id"], "container-alice")
         self.assertTrue(any(spec["python"] in command for command in commands))
@@ -247,7 +247,7 @@ class BackendTests(unittest.TestCase):
                 backend.inspect(spec, idle=True)
 
     def test_bash_failure_carries_outcome_and_bounded_stderr_without_command(self):
-        from vaws_coordinator.backend import RemoteBackend
+        from mindie_coordinator.backend import RemoteBackend
 
         target = {"host": "192.0.2.1", "port": 22, "user": "root"}
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,7 +271,7 @@ class BackendTests(unittest.TestCase):
                 RemoteBackend(shell=FakeShell(blocked)).bash(target, "true")
 
     def test_remote_prepare_refuses_donor_python_and_requires_sources(self):
-        from vaws_coordinator.backend import RemoteBackend
+        from mindie_coordinator.backend import RemoteBackend
 
         backend = RemoteBackend()
         spec = runtime_spec(1, user="alice")
@@ -377,7 +377,7 @@ class PoolTests(unittest.TestCase):
         original = self.backend.inspect
         def inspect(runtime, **kwargs):
             if source.read_text() != "fixed input\n":
-                from vaws_coordinator.parity_support import RemoteCommandError
+                from mindie_coordinator.parity_support import RemoteCommandError
                 raise RemoteCommandError(1, "runtime source differs from pinned snapshot: vllm")
             return original(runtime, **kwargs)
         with mock.patch.object(self.backend, "inspect", side_effect=inspect) as probe:
@@ -642,7 +642,7 @@ class PoolTests(unittest.TestCase):
             return original(runtime, job_id, action, **params)
         with mock.patch.object(self.backend, "job", side_effect=capture):
             job = self.managed("alice", binding)
-        receipt = json.loads(prepared[0]["env"]["VAWS_EXECUTION_OBSERVATION"])
+        receipt = json.loads(prepared[0]["env"]["MINDIE_EXECUTION_OBSERVATION"])
         self.assertEqual(receipt, job["launch_observation"])
         self.assertEqual(receipt["workspace_snapshot"]["vllm_commit"], "a" * 40)
         self.assertEqual(receipt["native_digest"]["build_key"], "native-a")
@@ -894,7 +894,7 @@ class PoolTests(unittest.TestCase):
         original = self.backend.inspect
 
         def inspect(runtime, **kwargs):
-            if runtime.get("container_name") == "vaws-alice":
+            if runtime.get("container_name") == "mindie-alice":
                 entered.set()
                 release.wait(10)
             return original(runtime, **kwargs)
@@ -999,7 +999,7 @@ class PoolTests(unittest.TestCase):
 
         def inspect(runtime, **kwargs):
             observed = original(runtime, **kwargs)
-            if runtime.get("container_name") == "vaws-alice" and runtime["endpoint"]["cwd"].endswith("/1"):
+            if runtime.get("container_name") == "mindie-alice" and runtime["endpoint"]["cwd"].endswith("/1"):
                 observed["build_key"] = "drifted"
             return observed
 
@@ -1065,11 +1065,11 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(ended["state"], "cancelled")
         runtime = next(row for row in self.pool.catalog() if row["runtime_id"] == binding["runtime_id"])
         self.assertEqual(runtime["state"], "bound")
-        self.assertEqual(runtime["container_name"], "vaws-alice")
+        self.assertEqual(runtime["container_name"], "mindie-alice")
         second = self.managed("alice", binding, request_id="run-2")
         self.assertEqual(second["state"], "running")
         self.assertEqual(binding["endpoint"]["port"], binding["endpoint"]["port"])
-        self.assertEqual(binding["container_name"], "vaws-alice")
+        self.assertEqual(binding["container_name"], "mindie-alice")
         self.assertIn((46001, "container_ssh", "ssh.alice"), self._host_ports())
 
     def test_service_stop_releases_port_and_keeps_container_ssh(self):
@@ -1079,7 +1079,7 @@ class PoolTests(unittest.TestCase):
                                       "native-a", [0], 0, "exec python serve.py", {}, None, service_port=0)
         self.assertEqual(job["state"], "running")
         self.assertEqual(job["service_port"], 48001)
-        self.assertEqual(job["environment"]["VAWS_SERVICE_PORT"], "48001")
+        self.assertEqual(job["environment"]["MINDIE_SERVICE_PORT"], "48001")
         self.assertIn((48001, "service", job["request"] and self.pool.status("alice")["runs"][0]["task_id"]), self._host_ports())
         self.assertIn((46001, "container_ssh", "ssh.alice"), self._host_ports())
         self.backend.listening = [48001]
@@ -1132,7 +1132,7 @@ class PoolTests(unittest.TestCase):
             env={**os.environ, **prepared["env"]}, text=True,
         )
         self.assertEqual(json.loads(output), ["bound-vllm", "bound-ascend", "kept-support"])
-        from vaws_coordinator.backend import RemoteBackend
+        from mindie_coordinator.backend import RemoteBackend
 
         shell = FakeShell({"outcome": "success"})
         RemoteBackend(shell=shell).preflight(binding, shlex.join([sys.executable, "-c", code]), {})
@@ -1159,7 +1159,7 @@ class PoolTests(unittest.TestCase):
         live = next(row for row in peer if row["id"] == second["id"])
         self.assertEqual(live["state"], "running")
         self.assertFalse(self.backend.jobs[second["job_id"]]["quiet"])
-        self.assertEqual(second_root["container_name"], "vaws-alice")
+        self.assertEqual(second_root["container_name"], "mindie-alice")
         self.assertIn((46001, "container_ssh", "ssh.alice"), self._host_ports())
 
     def test_wrong_owner_and_stale_fence_cannot_mutate_another_run(self):
@@ -1181,8 +1181,8 @@ class TaskClientOwnershipTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        from vaws_coordinator.agent_session import AgentSessions
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.agent_session import AgentSessions
+        from mindie_coordinator.task_client import TaskClient
         self.TaskClient = TaskClient
         self.store = AgentSessions(self.root / "sessions")
         self.task_a = self.store.attach("codex", "native-task-a", str(self.root))
@@ -1202,12 +1202,12 @@ class TaskClientOwnershipTests(unittest.TestCase):
         for action in ("status", "tail", "stop", "target"):
             with self.subTest(action=action):
                 self.service.reset_mock()
-                with self.assertRaisesRegex(ValueError, "another VAWS task"):
+                with self.assertRaisesRegex(ValueError, "another MindIE task"):
                     self.foreign.observe(self.row["id"], action)
                 self.service.advance.assert_not_called()
                 self.service.finish.assert_not_called()
         self.service.reset_mock()
-        with self.assertRaisesRegex(ValueError, "another VAWS task"):
+        with self.assertRaisesRegex(ValueError, "another MindIE task"):
             self.foreign.target(self.row["id"])
         self.service.advance.assert_not_called()
         with self.store.transaction() as db:
@@ -1245,7 +1245,7 @@ class TaskClientOwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid local execution id"):
             self.owner.observe("not-an-id")
         self.service.advance.assert_not_called()
-        with self.assertRaisesRegex(ValueError, "unknown VAWS execution"):
+        with self.assertRaisesRegex(ValueError, "unknown MindIE execution"):
             self.owner.observe("0" * 64)
         self.service.advance.assert_not_called()
         with self.assertRaisesRegex(ValueError, "invalid local execution id"):
@@ -1261,8 +1261,8 @@ class TaskClientTests(unittest.TestCase):
         self.backend.require_prepared = True
         self.pool = RuntimePool(self.root / "manager", self.backend)
         self._seed(self.pool, "runtime-a", runtime_spec(1, user="alice", recipe="rc"))
-        from vaws_coordinator.agent_session import AgentSessions
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.agent_session import AgentSessions
+        from mindie_coordinator.task_client import TaskClient
         self.store = AgentSessions(self.root / "sessions")
         self.context = self.store.attach("codex", "native-alice", str(self.root))
         self.client = TaskClient(self.context["context_file"], pool=self.pool, user="alice")
@@ -1305,7 +1305,7 @@ class TaskClientTests(unittest.TestCase):
         self.assertEqual(self.backend.calls.count(("job", "stop")), 1)
 
     def test_completed_preparation_failure_is_terminal_without_repeating_work(self):
-        from vaws_coordinator.parity_support import RemoteCommandError
+        from mindie_coordinator.parity_support import RemoteCommandError
         service = self.client.coordinator
         prepare = mock.Mock(side_effect=RemoteCommandError(1, "incompatible torch build"))
         with mock.patch.object(service, "_place_or_prepare", prepare):
@@ -1319,7 +1319,7 @@ class TaskClientTests(unittest.TestCase):
         prepare.assert_called_once()
 
     def test_lost_preparation_transport_keeps_unknown_state(self):
-        from vaws_coordinator.parity_support import RemoteCommandError
+        from mindie_coordinator.parity_support import RemoteCommandError
         with mock.patch.object(self.client.coordinator, "_place_or_prepare",
                                side_effect=RemoteCommandError(255, "connection lost")):
             result = self.client.run("serve-over-unavailable-transport")
@@ -1327,7 +1327,7 @@ class TaskClientTests(unittest.TestCase):
         self.assertFalse(result["resources_released"])
 
     def test_preflight_failure_keeps_full_error_and_never_allocates(self):
-        from vaws_coordinator.managed_execution import ExecutionRequestError
+        from mindie_coordinator.managed_execution import ExecutionRequestError
         message = "unknown CLI option " + "detail " * 200
         self.backend.preflight = mock.Mock(side_effect=ExecutionRequestError(message))
         result = self.client.run("serve", preflight="parse-only")
@@ -1368,13 +1368,13 @@ class TaskClientTests(unittest.TestCase):
         self.assertEqual(reply["state"], "running")
         self.assertTrue(reply["target"]["live"])
         self.assertEqual(reply["target"]["user"], "alice")
-        self.assertEqual(reply["target"]["container_name"], "vaws-alice")
+        self.assertEqual(reply["target"]["container_name"], "mindie-alice")
         prepared = self.backend.prepared[reply["target"]["endpoint"]["cwd"]]
         self.assertEqual(reply["target"]["python"], prepared["python"])
         self.assertNotEqual(reply["target"]["endpoint"]["cwd"], "/vllm-workspace/alice/1")
         observed = self.client.observe(reply["execution_id"], "target")
         self.assertEqual(observed["target"]["runtime_id"], reply["target"]["runtime_id"])
-        self.assertEqual(self.client.target(reply["execution_id"])["container_id"], "cid-vaws-alice")
+        self.assertEqual(self.client.target(reply["execution_id"])["container_id"], "cid-mindie-alice")
 
     def test_running_execution_stays_running_during_background_probe(self):
         started = self.client.run("true")
@@ -1429,14 +1429,14 @@ class TaskClientTests(unittest.TestCase):
         self.assertNotEqual(second["target"]["binding_id"], first["target"]["binding_id"])
         self.assertNotEqual(second["target"]["runtime_id"], first["target"]["runtime_id"])
         other_context = self.store.attach("codex", "native-alice-2", str(self.root))
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.task_client import TaskClient
         other = TaskClient(other_context["context_file"], pool=self.pool, user="alice")
         stolen = other.run("true")
         stolen_cwd = (stolen.get("target") or {}).get("endpoint", {}).get("cwd")
         self.assertNotEqual(stolen_cwd, second["target"]["endpoint"]["cwd"])
 
     def test_queued_execution_advances_after_frontend_is_gone(self):
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.task_client import TaskClient
         empty = RuntimePool(self.root / "manager-empty", self.backend)
         client = TaskClient(self.context["context_file"], pool=empty, user="alice")
         queued = client.run("true")
@@ -1461,7 +1461,7 @@ class TaskClientTests(unittest.TestCase):
         self.assertEqual(len(hosts), 2)
         lone = RuntimePool(self.root / "manager-one-host", self.backend)
         self._seed(lone, "only-a", runtime_spec(1, user="alice", recipe="rc"))
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.task_client import TaskClient
         other_ctx = self.store.attach("codex", "native-alice-group", str(self.root))
         client = TaskClient(other_ctx["context_file"], pool=lone, user="alice")
         neither = client.run("unused", topology={**topology, "distinct_hosts": True})
@@ -1522,7 +1522,7 @@ class TaskClientTests(unittest.TestCase):
         donor_python = first["target"]["python"]
         other_context = self.store.attach("codex", "native-alice-prep", str(self.root))
         self.store.bind_sources(other_context, {"vllm": str(self.root / "vllm"), "vllm-ascend": str(self.root / "vllm-ascend")})
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.task_client import TaskClient
         other = TaskClient(other_context["context_file"], pool=self.pool, user="alice")
         other.coordinator.sync_binding = lambda *args, **kwargs: {"vllm": "a" * 40, "vllm-ascend": "b" * 40}
         prepared = other.run("true")
@@ -1627,7 +1627,7 @@ class TaskClientTests(unittest.TestCase):
             return original(runtime, job_id, action, **params)
 
         self.backend.job = sticky
-        from vaws_coordinator import service as service_mod
+        from mindie_coordinator import service as service_mod
         with mock.patch.object(service_mod, "STOP_WAIT_SECONDS", 0.2):
             reply = self.client.run("serve-vllm", service="vllm", timeout_seconds=None, restart=True)
         self.assertEqual(reply["execution_id"], first["execution_id"])
@@ -1702,7 +1702,7 @@ class TaskClientTests(unittest.TestCase):
         self.assertEqual(len(self.pool.status("alice")["jobs"]), 0)
 
     def test_finish_during_delayed_preparation_completes_on_ticker_without_retry(self):
-        from vaws_coordinator import service as service_mod
+        from mindie_coordinator import service as service_mod
 
         self.client.coordinator._async_progress = True
         started = threading.Event()
@@ -1758,7 +1758,7 @@ class TaskClientTests(unittest.TestCase):
                 ticker.join(timeout=2.5)
 
     def test_persisted_finishing_task_releases_bound_preflight_after_coordinator_restart(self):
-        from vaws_coordinator.service import CoordinatorService
+        from mindie_coordinator.service import CoordinatorService
 
         self.client.coordinator._async_progress = True
         started = threading.Event()
@@ -1825,15 +1825,15 @@ class TaskClientTests(unittest.TestCase):
         # atomic binding. The already persisted execution session owns it.
         row.pop("prepared_bindings")
         self.store.save_execution(row)
-        from vaws_coordinator.service import CoordinatorService
+        from mindie_coordinator.service import CoordinatorService
         restarted = CoordinatorService(service.state_dir, pool=self.pool, backend=self.backend)
         result = restarted.finish(str(self.store.state_dir), "alice", self.context["session"]["id"])
         self.assertEqual(result["state"], "finished")
         self.assertEqual(self.pool.session_bindings("alice", remote), [])
 
     def test_recovered_preparation_reuses_its_binding_without_replacing_sources(self):
-        from vaws_coordinator.provision import prepare_task_environment
-        with mock.patch("vaws_coordinator.provision.prepare_task_environment", wraps=prepare_task_environment) as prepare:
+        from mindie_coordinator.provision import prepare_task_environment
+        with mock.patch("mindie_coordinator.provision.prepare_task_environment", wraps=prepare_task_environment) as prepare:
             reply = self.client.run("true", sources={}, resources={"npu_count": 0})
         self.assertEqual(reply["state"], "running")
         row = self.store.executions(self.context["session"]["id"])[0]
@@ -1885,12 +1885,12 @@ class TaskClientTests(unittest.TestCase):
 
     def test_role_env_cannot_override_reserved_keys(self):
         with self.assertRaisesRegex(ValueError, "managed"):
-            self.client.run("true", topology={"roles": [{"name": "prefill", "env": {"VAWS_PYTHON": "/x"}}]})
+            self.client.run("true", topology={"roles": [{"name": "prefill", "env": {"MINDIE_PYTHON": "/x"}}]})
 
 
 class AggregateStateTests(unittest.TestCase):
     def test_mixed_terminal_is_failed_and_all_succeeded_is_succeeded(self):
-        from vaws_coordinator.service import aggregate_job_states
+        from mindie_coordinator.service import aggregate_job_states
         self.assertEqual(aggregate_job_states(["succeeded", "failed"]), "failed")
         self.assertEqual(aggregate_job_states(["succeeded", "succeeded"]), "succeeded")
         self.assertEqual(aggregate_job_states(["running", "succeeded"]), "running")
@@ -1899,17 +1899,17 @@ class AggregateStateTests(unittest.TestCase):
 
 class DaemonProcessTests(unittest.TestCase):
     def test_short_socket_ping_start_exit_restart_and_session_dirs_persist(self):
-        from vaws_coordinator.agent_session import AgentSessions
-        from vaws_coordinator.service import CoordinatorClient, socket_path
+        from mindie_coordinator.agent_session import AgentSessions
+        from mindie_coordinator.service import CoordinatorClient, socket_path
 
         with tempfile.TemporaryDirectory() as tmp:
-            state = Path(tmp) / "vllm-ascend-workspace" / ".vaws-local" / "closeout" / "daemon-path-check" / "coordinator"
+            state = Path(tmp) / "vllm-ascend-workspace" / ".mindie-local" / "closeout" / "daemon-path-check" / "coordinator"
             state.mkdir(parents=True)
             sessions = Path(tmp) / "overridden-sessions"
             AgentSessions(sessions)
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             proc = subprocess.Popen(
-                [sys.executable, "-m", "vaws_coordinator", "daemon", "--state-dir", str(state)],
+                [sys.executable, "-m", "mindie_coordinator", "daemon", "--state-dir", str(state)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, env=env,
             )
             client = CoordinatorClient(state)
@@ -1917,7 +1917,7 @@ class DaemonProcessTests(unittest.TestCase):
                 deadline = time.time() + 5
                 while time.time() < deadline:
                     try:
-                        self.assertEqual(client.call("ping")["runtime"][0]["loaded"]["package"], "vaws-coordinator")
+                        self.assertEqual(client.call("ping")["runtime"][0]["loaded"]["package"], "mindie-coordinator")
                         break
                     except (RuntimeError, FileNotFoundError, ConnectionError, OSError):
                         time.sleep(0.05)
@@ -1943,7 +1943,7 @@ class DaemonProcessTests(unittest.TestCase):
                 proc.wait(timeout=5)
                 proc.stdout.close()
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "vaws_coordinator", "daemon", "--state-dir", str(state)],
+                    [sys.executable, "-m", "mindie_coordinator", "daemon", "--state-dir", str(state)],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, env=env,
                 )
                 deadline = time.time() + 5
@@ -1976,9 +1976,9 @@ class DaemonProcessTests(unittest.TestCase):
                     sock.unlink()
 
     def test_admit_returns_queued_while_preparation_runs(self):
-        from vaws_coordinator.agent_session import AgentSessions
-        from vaws_coordinator.ready_runtime import RuntimePool
-        from vaws_coordinator.service import CoordinatorClient, CoordinatorService, socket_path
+        from mindie_coordinator.agent_session import AgentSessions
+        from mindie_coordinator.ready_runtime import RuntimePool
+        from mindie_coordinator.service import CoordinatorClient, CoordinatorService, socket_path
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2071,9 +2071,9 @@ class DaemonProcessTests(unittest.TestCase):
                     sock.unlink()
 
     def test_startup_with_pending_prepare_stays_responsive(self):
-        from vaws_coordinator.agent_session import AgentSessions
-        from vaws_coordinator.ready_runtime import RuntimePool
-        from vaws_coordinator.service import CoordinatorClient, CoordinatorService, socket_path
+        from mindie_coordinator.agent_session import AgentSessions
+        from mindie_coordinator.ready_runtime import RuntimePool
+        from mindie_coordinator.service import CoordinatorClient, CoordinatorService, socket_path
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2157,7 +2157,7 @@ class DaemonProcessTests(unittest.TestCase):
 class ProfileTests(unittest.TestCase):
     def test_attestation_requires_populated_pinned_native_submodules(self):
         import subprocess
-        from vaws_coordinator.prepare_runtime import require_clean_sources
+        from mindie_coordinator.prepare_runtime import require_clean_sources
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2195,7 +2195,7 @@ class ProfileTests(unittest.TestCase):
                 require_clean_sources(root)
 
     def test_complete_bundle_hashes_missing_metadata_env_and_cache_reuse(self):
-        from vaws_coordinator.runtime_profile import PROFILE_FIELDS
+        from mindie_coordinator.runtime_profile import PROFILE_FIELDS
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "runtime"
             root.mkdir()
@@ -2208,7 +2208,7 @@ class ProfileTests(unittest.TestCase):
             inputs = {"vllm": "native-a", "vllm-ascend": "native-b"}
             manifest = capture(root, profile, inputs, {"kernels.so": "library", "binary_info_config.json": "metadata"}, {"cann": "cann.txt", "driver": "driver.txt", "smoke": "smoke.txt"})
             verify(root, manifest, check_environment=False)
-            with mock.patch("vaws_coordinator.runtime_profile.importlib.metadata.version", return_value="test-version"), mock.patch("vaws_coordinator.runtime_profile.sysconfig.get_config_var", return_value="test-version"):
+            with mock.patch("mindie_coordinator.runtime_profile.importlib.metadata.version", return_value="test-version"), mock.patch("mindie_coordinator.runtime_profile.sysconfig.get_config_var", return_value="test-version"):
                 bundle = publish(root, Path(tmp) / "bundles", manifest)
                 self.assertEqual(publish(root, Path(tmp) / "bundles", manifest), bundle)
                 (root / "smoke.txt").write_text(json.dumps({'passed': True, 'timestamp': 'new'}))
@@ -2221,7 +2221,7 @@ class ProfileTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "missing required"):
                     verify(root, manifest)
                 restore(root, bundle, manifest["build_key"])
-                with mock.patch("vaws_coordinator.runtime_profile.sysconfig.get_config_var", return_value="different-abi"):
+                with mock.patch("mindie_coordinator.runtime_profile.sysconfig.get_config_var", return_value="different-abi"):
                     with self.assertRaisesRegex(ValueError, "Python ABI changed"):
                         verify(root, manifest)
                 (root / "binary_info_config.json").write_text("corrupt")
@@ -2229,7 +2229,7 @@ class ProfileTests(unittest.TestCase):
                     verify(root, manifest)
             with self.assertRaises(ValueError):
                 capture(root, profile, inputs, {"kernels.so": "library"}, {})
-            from vaws_coordinator.runtime_profile import launch_preamble
+            from mindie_coordinator.runtime_profile import launch_preamble
             import os, subprocess
             profile["launch_env"]["PYTHONPATH"] = "/scoped/source"
             script = "export PYTHONPATH=/base/acl:/base/native-compat\n" + launch_preamble(profile) + '\nprintf "%s" "$PYTHONPATH"'
@@ -2240,21 +2240,21 @@ class ProfileTests(unittest.TestCase):
 
     def test_attest_records_smoke_timeout_as_evidence(self):
         import subprocess
-        from vaws_coordinator import prepare_runtime
-        from vaws_coordinator.runtime_profile import PROFILE_FIELDS
+        from mindie_coordinator import prepare_runtime
+        from mindie_coordinator.runtime_profile import PROFILE_FIELDS
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             profile = {key: "test-version" for key in PROFILE_FIELDS}
             profile.update(build_env={}, launch_env={}, compatibility_evidence="smoke-ref",
                            system_files={name: {"path": str(root / (name + ".txt")), "sha256": "0" * 64} for name in ("cann", "driver")})
-            with mock.patch("vaws_coordinator.prepare_runtime.require_clean_sources"), \
-                    mock.patch("vaws_coordinator.prepare_runtime.runtime_build_inputs", return_value={"vllm": "native-a"}), \
-                    mock.patch("vaws_coordinator.prepare_runtime.subprocess.run",
+            with mock.patch("mindie_coordinator.prepare_runtime.require_clean_sources"), \
+                    mock.patch("mindie_coordinator.prepare_runtime.runtime_build_inputs", return_value={"vllm": "native-a"}), \
+                    mock.patch("mindie_coordinator.prepare_runtime.subprocess.run",
                                side_effect=subprocess.TimeoutExpired(cmd="smoke", timeout=60)):
                 with self.assertRaisesRegex(ValueError, "timed out"):
                     prepare_runtime.attest(root, {"profile": profile, "files": {}})
-            evidence = json.loads((root / ".vaws-runtime/profile-evidence/smoke.json").read_text())
+            evidence = json.loads((root / ".mindie-runtime/profile-evidence/smoke.json").read_text())
             self.assertFalse(evidence["passed"])
             self.assertIn("timed out", evidence["error"])
             self.assertEqual(evidence["build_inputs"], {"vllm": "native-a"})

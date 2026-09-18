@@ -13,11 +13,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator import service, task_server, vaws
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.execution_sources import capture_sources
-from vaws_coordinator.runtime_profile import digest
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator import service, task_server, mindie
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.execution_sources import capture_sources
+from mindie_coordinator.runtime_profile import digest
+from mindie_coordinator.task_client import TaskClient
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def test_wait_is_not_a_client_status_loop_and_rejects_other_task(owned):
     other = store.attach(client="codex", native_session_id="other", cwd=str(store.state_dir))
     other_client = TaskClient(other["context_file"], service=owner, user="alice")
     for action in ("wait", "evidence"):
-        with pytest.raises(ValueError, match="another VAWS task"):
+        with pytest.raises(ValueError, match="another MindIE task"):
             other_client.observe(row["id"], action=action)
     with pytest.raises(PermissionError, match="another principal"):
         owner.wait(str(store.state_dir), "bob", row["id"], timeout_seconds=0)
@@ -197,7 +197,7 @@ def test_script_client_path_mapping_size_bound_and_service_identity(owned, tmp_p
     owner, store, client, row = owned
     script = tmp_path / "script.sh"
     script.write_text("true\n", encoding="utf-8")
-    monkeypatch.setattr("vaws_coordinator.task_client.client_path", lambda path: str(script))
+    monkeypatch.setattr("mindie_coordinator.task_client.client_path", lambda path: str(script))
     owner.admit = Mock(return_value={"execution_id": row["id"], "state": "running"})
     client.run(script_file="/mnt/d/script.sh", sources={})
     spec = owner.admit.call_args.args[3]
@@ -324,12 +324,12 @@ def test_corrupt_receipt_reports_local_error_and_ref(owned):
 
 def test_cli_local_script_and_existing_execution_wait(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr(vaws, "vaws_call", lambda name, args: calls.append((name, args)) or {"result": {"outcome": "success"}})
-    monkeypatch.setattr("sys.argv", ["vaws", "run", "--script-file", "case.sh", "--no-sources", "--wait", "released", "--wait-timeout-seconds", "180"])
-    assert vaws.main() == 0
+    monkeypatch.setattr(mindie, "mindie_call", lambda name, args: calls.append((name, args)) or {"result": {"outcome": "success"}})
+    monkeypatch.setattr("sys.argv", ["mindie", "run", "--script-file", "case.sh", "--no-sources", "--wait", "released", "--wait-timeout-seconds", "180"])
+    assert mindie.main() == 0
     assert calls[-1][1] == {"script_file": "case.sh", "sources": {}, "wait_until": "released", "wait_timeout_seconds": 180.0}
-    monkeypatch.setattr("sys.argv", ["vaws", "execution", "--execution-id", "e" * 64, "--wait", "running"])
-    assert vaws.main() == 0
+    monkeypatch.setattr("sys.argv", ["mindie", "execution", "--execution-id", "e" * 64, "--wait", "running"])
+    assert mindie.main() == 0
     assert calls[-1][1] == {"execution_id": "e" * 64, "action": "wait", "until": "running"}
     assert len(capsys.readouterr().out.splitlines()) == 2
 
@@ -353,9 +353,9 @@ def test_mcp_wait_saturation_keeps_stop_ping_and_ids_responsive(monkeypatch, fra
         return {"structuredContent": {"state": arguments["action"]}, "content": []}
     monkeypatch.setattr(task_server, "call_tool", call)
     messages = [{"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {
-                    "name": "vaws_execution", "arguments": {"action": "wait", "execution_id": "e" * 64}}} for i in range(8)]
+                    "name": "mindie_execution", "arguments": {"action": "wait", "execution_id": "e" * 64}}} for i in range(8)]
     messages += [{"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": {
-                    "name": "vaws_execution", "arguments": {"action": "stop", "execution_id": "e" * 64}}},
+                    "name": "mindie_execution", "arguments": {"action": "stop", "execution_id": "e" * 64}}},
                  {"jsonrpc": "2.0", "id": 100, "method": "ping"}]
     raw = b""
     for message in messages:

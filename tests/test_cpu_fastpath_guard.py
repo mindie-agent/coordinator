@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from vaws_coordinator.host.vaws_npu_coordination import CoordinationError, NpuCoordinator, handle_request
+from mindie_coordinator.host.mindie_npu_coordination import CoordinationError, NpuCoordinator, handle_request
 
 
 FREE = {'status': 'ok', 'devices': [0], 'busy': {}, 'free': [0]}

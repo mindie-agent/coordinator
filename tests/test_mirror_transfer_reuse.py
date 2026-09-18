@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vaws_coordinator import parity
+from mindie_coordinator import parity
 
 
 def run_git(repo, *args):

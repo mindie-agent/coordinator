@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaws_coordinator.parity import (
+from mindie_coordinator.parity import (
     DEFAULT_MARKER_DIRNAME,
     DEFAULT_ROOT_PRESERVE_PATHS,
     build_snapshot_records,
@@ -22,7 +22,7 @@ from vaws_coordinator.parity import (
     runtime_install_step_script,
     task_python_exports,
 )
-from vaws_coordinator.parity_support import SshEndpoint
+from mindie_coordinator.parity_support import SshEndpoint
 
 
 def _init_repo(path: Path) -> None:
@@ -43,7 +43,7 @@ class IsolatedPrepareScriptTests(unittest.TestCase):
         self.assertNotIn("pip uninstall", script)
         self.assertNotIn("$PIP", script)
         self.assertNotIn("uninstall -y vllm", script)
-        import vaws_coordinator.parity as parity
+        import mindie_coordinator.parity as parity
         self.assertFalse(hasattr(parity, "first_install_prepare_script"))
 
     def test_task_python_controls_pip_and_cmake_even_with_spaces(self):
@@ -51,7 +51,7 @@ class IsolatedPrepareScriptTests(unittest.TestCase):
         script = runtime_install_step_script(
             runtime_root="/vllm-workspace/tasks/s/h/r",
             marker_dirname=DEFAULT_MARKER_DIRNAME,
-            container_identity="vaws-alice",
+            container_identity="mindie-alice",
             step="uninstall",
             python=python,
         )
@@ -65,7 +65,7 @@ class IsolatedPrepareScriptTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "executes the Linux container venv payload locally")
     def test_venv_uses_prepared_image_python_instead_of_ssh_path(self):
-        from vaws_coordinator.provision.task_environment import create_venv_script
+        from mindie_coordinator.provision.task_environment import create_venv_script
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bad_bin = root / "system-bin"
@@ -77,7 +77,7 @@ class IsolatedPrepareScriptTests(unittest.TestCase):
             python = task / ".venv/bin/python"
             image_python = getattr(sys, "_base_executable", sys.executable)
             preamble = ("export PYTHON=" + shlex.quote(image_python),)
-            with mock.patch("vaws_coordinator.parity.PYTHON_METADATA_PREAMBLE", preamble):
+            with mock.patch("mindie_coordinator.parity.PYTHON_METADATA_PREAMBLE", preamble):
                 script = create_venv_script(str(task), str(python))
             result = subprocess.run(["bash", "-c", script], text=True,
                                     capture_output=True, timeout=30,
@@ -130,11 +130,11 @@ class ExplicitSourceSnapshotTests(unittest.TestCase):
                 return mock.Mock(stdout="", returncode=0)
 
             endpoint = SshEndpoint(host="192.0.2.10", port=46000, user="root")
-            with mock.patch("vaws_coordinator.parity.ssh_exec", fake_ssh):
+            with mock.patch("mindie_coordinator.parity.ssh_exec", fake_ssh):
                 materialize_runtime(
                     container=endpoint,
                     runtime_root="/vllm-workspace/tasks/s/h/r",
-                    container_cache_root="/root/.cache/vaws/remote-code-parity",
+                    container_cache_root="/root/.cache/mindie/remote-code-parity",
                     workspace_id="ws",
                     marker_dirname=DEFAULT_MARKER_DIRNAME,
                     root_preserve_paths=resolved_root_preserve_paths(DEFAULT_MARKER_DIRNAME, []),
@@ -174,7 +174,7 @@ class FakeTaskPythonInvocationTests(unittest.TestCase):
                 script = runtime_install_step_script(
                     runtime_root=str(runtime_root),
                     marker_dirname=DEFAULT_MARKER_DIRNAME,
-                    container_identity="vaws-alice",
+                    container_identity="mindie-alice",
                     step=step,
                     python=python,
                 )
@@ -194,7 +194,7 @@ class FakeTaskPythonInvocationTests(unittest.TestCase):
             self.assertNotIn("install_consent.py", runtime_install_step_script(
                 runtime_root=str(runtime_root),
                 marker_dirname=DEFAULT_MARKER_DIRNAME,
-                container_identity="vaws-alice",
+                container_identity="mindie-alice",
                 step="check-build-compat",
                 python=python,
             ))

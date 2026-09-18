@@ -13,9 +13,9 @@ import zlib
 import pytest
 
 from remote_dev.core.ssh_transport import RemoteCompleted
-from vaws_coordinator import backend as adapters, runtime_profile as profile
-from vaws_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
-from vaws_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
+from mindie_coordinator import backend as adapters, runtime_profile as profile
+from mindie_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
+from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
 from test_native_compatibility_reuse import prepared
 
 
@@ -85,7 +85,7 @@ def test_capture_returns_actual_container_and_full_proof_from_one_completed_comm
     shell = Mock(side_effect=[json.dumps(info), output])
     monkeypatch.setattr(backend, 'bash', shell)
     stream = Mock(return_value=SimpleNamespace(stdout=output))
-    monkeypatch.setattr('vaws_coordinator.parity_support.ssh_exec_stream', stream)
+    monkeypatch.setattr('mindie_coordinator.parity_support.ssh_exec_stream', stream)
     process = object() if owned else None
     result = backend._write_ready_profile(spec, {}, process=process)
     assert result == {**manifest, 'container_id': info['Id'],
@@ -149,11 +149,11 @@ def test_actual_capture_suffix_returns_only_after_import_hashes_and_atomic_marke
     if corrupt:
         with pytest.raises(ValueError, match='artifact hash mismatch'):
             exec(compile(REMOTE_CAPTURE_SUFFIX, '<capture>', 'exec'), namespace)
-        assert not outputs and not (root / '.vaws-runtime/ready-profile.json').exists()
+        assert not outputs and not (root / '.mindie-runtime/ready-profile.json').exists()
     else:
         exec(compile(REMOTE_CAPTURE_SUFFIX, '<capture>', 'exec'), namespace)
         manifest = adapters._captured_manifest(outputs[0])
-        assert manifest == json.loads((root / '.vaws-runtime/ready-profile.json').read_text()) == verified[0]
+        assert manifest == json.loads((root / '.mindie-runtime/ready-profile.json').read_text()) == verified[0]
         assert manifest['execution_view'] == {'source_id': 'fixed', 'python': sys.executable}
         profile.verify_execution_view(root, manifest)
         assert len(manifest['files']) == len(prepared['files'])
@@ -167,7 +167,7 @@ def test_fresh_venv_metadata_is_allowed_only_inside_this_execution(prepared, mon
     root = prepared['view']
     purelib = tmp_path / 'foreign-site' if foreign_site else root / '.venv/lib/site-packages'
     purelib.mkdir(parents=True)
-    for dist in (root / '.vaws-runtime/metadata').iterdir():
+    for dist in (root / '.mindie-runtime/metadata').iterdir():
         if editable:
             package = dist.name.split('-')[0]
             source = 'vllm-ascend' if package == 'vllm_ascend' else 'vllm'
@@ -193,9 +193,9 @@ def test_fresh_handoff_waits_for_store_and_cancellation_checks(receipt, monkeypa
     snapshot = {'id': 'fixed', 'records': [{'relpath': name, 'scm_version': '1.0', 'source_head': 'fixed-head'}
                                          for name in ('vllm', 'vllm-ascend')]}
     monkeypatch.setattr('remote_dev.core.ssh_transport.run_rpc_script', lambda *a, **k: RemoteCompleted(0, '', ''))
-    monkeypatch.setattr('vaws_coordinator.parity.materialize_fixed_sources', lambda **k: None)
-    monkeypatch.setattr('vaws_coordinator.parity_support.ssh_exec_stream', lambda *a, **k: None)
-    monkeypatch.setattr('vaws_coordinator.parity.run_runtime_install_step', lambda **k: None)
+    monkeypatch.setattr('mindie_coordinator.parity.materialize_fixed_sources', lambda **k: None)
+    monkeypatch.setattr('mindie_coordinator.parity_support.ssh_exec_stream', lambda *a, **k: None)
+    monkeypatch.setattr('mindie_coordinator.parity.run_runtime_install_step', lambda **k: None)
     monkeypatch.setattr(backend, 'bash', lambda *a, **k: '')
     monkeypatch.setattr(backend, '_export_shared_native', lambda *a, **k: {'status': 'miss'})
     steps, cancelled = [], [False]

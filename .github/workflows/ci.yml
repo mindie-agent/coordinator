@@ -35,7 +35,7 @@ jobs:
         run: |
           mkdir -p "$HOME"
           uv venv
-          uv pip install "vaws-remote-dev @ git+https://github.com/mindie-agent/remote-dev@89d197ef13bcae46f7bea809c22bbb058c4edfbf"
+          uv pip install "remote-dev @ git+https://github.com/mindie-agent/remote-dev@13301ef7f52b53ffca0a6702a8a3c18f2edfcd52"
           uv pip install pytest "jsonschema>=4" "setuptools-scm>=8"
           uv pip install -e . --no-deps
           .venv/bin/python -m pytest -q --durations=20 --junitxml=linux-coordinator.xml
@@ -48,7 +48,7 @@ jobs:
 
   wheel:
     # P14: build the wheel, install it into a clean venv, import the
-    # package, run the console script. vaws-remote-dev is not on PyPI, so
+    # package, run the console script. remote-dev is not on PyPI, so
     # the clean venv installs it from the public git URL first. That
     # fetch is anonymous; a token step here is a defect.
     runs-on: ubuntu-latest
@@ -71,10 +71,10 @@ jobs:
           cd "${{ runner.temp }}"
           uv venv .venv-wheel
           VIRTUAL_ENV="$PWD/.venv-wheel" uv pip install \
-            "vaws-remote-dev @ git+https://github.com/mindie-agent/remote-dev@89d197ef13bcae46f7bea809c22bbb058c4edfbf"
+            "remote-dev @ git+https://github.com/mindie-agent/remote-dev@13301ef7f52b53ffca0a6702a8a3c18f2edfcd52"
           VIRTUAL_ENV="$PWD/.venv-wheel" uv pip install "${{ github.workspace }}"/dist/*.whl
-          .venv-wheel/bin/python -c "import vaws_coordinator, pathlib; p=pathlib.Path(vaws_coordinator.__file__).resolve(); assert 'site-packages' in p.parts, p"
-          .venv-wheel/bin/vaws-coordinator --help
+          .venv-wheel/bin/python -c "import mindie_coordinator, pathlib; p=pathlib.Path(mindie_coordinator.__file__).resolve(); assert 'site-packages' in p.parts, p"
+          .venv-wheel/bin/mindie-coordinator --help
 
   windows:
     runs-on: windows-latest
@@ -99,7 +99,7 @@ jobs:
           $env:PATH = "$gitBin;$env:PATH"
           New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null
           uv venv
-          uv pip install "vaws-remote-dev @ git+https://github.com/mindie-agent/remote-dev@89d197ef13bcae46f7bea809c22bbb058c4edfbf"
+          uv pip install "remote-dev @ git+https://github.com/mindie-agent/remote-dev@13301ef7f52b53ffca0a6702a8a3c18f2edfcd52"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install pytest "jsonschema>=4" "setuptools-scm>=8"
           uv pip install -e . --no-deps
@@ -126,7 +126,7 @@ jobs:
         run: |
           mkdir -p "$HOME"
           uv venv
-          uv pip install "vaws-remote-dev @ git+https://github.com/mindie-agent/remote-dev@89d197ef13bcae46f7bea809c22bbb058c4edfbf"
+          uv pip install "remote-dev @ git+https://github.com/mindie-agent/remote-dev@13301ef7f52b53ffca0a6702a8a3c18f2edfcd52"
           uv pip install pytest "jsonschema>=4" "setuptools-scm>=8"
           uv pip install -e . --no-deps
           .venv/bin/python -m pytest -q tests --durations=20 --junitxml=macos-coordinator.xml

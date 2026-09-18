@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 
-from vaws_coordinator.agent_session import AgentSessions
+from mindie_coordinator.agent_session import AgentSessions
 
 
 def test_worker_binds_and_captures_sources_while_mcp_reader_waits(tmp_path):
@@ -24,15 +24,15 @@ def test_worker_binds_and_captures_sources_while_mcp_reader_waits(tmp_path):
     (repo / "kernel.cpp").write_text("edited\n", encoding="utf-8")
     state = tmp_path / "sessions"
     context = AgentSessions(state).attach("codex", "stdio-git", str(tmp_path))
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("VAWS_")}
-    environment.update(VAWS_AGENT_SESSIONS_DIR=str(state),
-                       VAWS_DIAGNOSTICS_ROOT=str(tmp_path / "diagnostics"),
-                       VAWS_COORDINATOR_STATE_DIR=str(tmp_path / "coordinator"))
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("MINDIE_")}
+    environment.update(MINDIE_AGENT_SESSIONS_DIR=str(state),
+                       MINDIE_DIAGNOSTICS_ROOT=str(tmp_path / "diagnostics"),
+                       MINDIE_COORDINATOR_STATE_DIR=str(tmp_path / "coordinator"))
     # Keep real TaskClient input capture, but never start a daemon or contact a
     # host. Reaching the admission boundary proves every local Git call returned.
     code = """
-from vaws_coordinator.task_client import TaskClient
-from vaws_coordinator.task_server import main
+from mindie_coordinator.task_client import TaskClient
+from mindie_coordinator.task_server import main
 def offline(self):
     import subprocess, sys
     echo = [sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())']
@@ -63,12 +63,12 @@ raise SystemExit(main())
     try:
         assert "result" in rpc(1, "initialize")
         params = {"context_file": context["context_file"], "sources": {"vllm": str(repo)}}
-        session = rpc(2, "tools/call", {"name": "vaws_session", "arguments": params})
+        session = rpc(2, "tools/call", {"name": "mindie_session", "arguments": params})
         assert not session["result"]["isError"], session
-        run = rpc(3, "tools/call", {"name": "vaws_run", "arguments": {**params, "command": "true"}})
+        run = rpc(3, "tools/call", {"name": "mindie_run", "arguments": {**params, "command": "true"}})
         assert "captured inputs; admission disabled" in run["result"]["structuredContent"]["summary"], run
         snapshots = [json.loads(path.read_text(encoding="utf-8")) for path in (state / "source-inputs").glob("*.json")]
-        snapshot = next(item for item in snapshots if item.get("schema_version") == "vaws.execution-sources.v1")
+        snapshot = next(item for item in snapshots if item.get("schema_version") == "mindie.execution-sources.v1")
         record = snapshot["records"][0]
         assert record["changed_paths"] == ["kernel.cpp"]
         assert record["build_inputs"]["native"]

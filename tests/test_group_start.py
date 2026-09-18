@@ -2,10 +2,10 @@ import threading
 import time
 from unittest.mock import patch
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.ready_runtime import RuntimePool
-from vaws_coordinator.service import CoordinatorService
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.service import CoordinatorService
+from mindie_coordinator.task_client import TaskClient
 from test_coordinator import Backend, runtime_spec
 
 

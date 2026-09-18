@@ -6,8 +6,8 @@ import subprocess
 import pytest
 
 from test_native_compatibility_reuse import prepared
-from vaws_coordinator import runtime_profile as profile
-from vaws_coordinator.build_inputs import build_input_fingerprints, VLLM_ASCEND_REINSTALL_PATTERNS
+from mindie_coordinator import runtime_profile as profile
+from mindie_coordinator.build_inputs import build_input_fingerprints, VLLM_ASCEND_REINSTALL_PATTERNS
 
 
 def test_source_closure_changes_for_python_resources_and_added_files(tmp_path):
@@ -90,7 +90,7 @@ def test_legacy_receipts_do_not_invent_a_source_import_proof(prepared):
 @pytest.mark.parametrize('change', [False, True])
 def test_actual_finalization_reuses_only_matching_import_closure(prepared, monkeypatch, change):
     import sys
-    from vaws_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
+    from mindie_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
     root = prepared['view']
     for name in profile.LAUNCH_PATH_KEYS:
         monkeypatch.delenv(name, raising=False)
@@ -98,15 +98,15 @@ def test_actual_finalization_reuses_only_matching_import_closure(prepared, monke
     monkeypatch.setenv('CXX', 'test-compiler')
     settings = copy.deepcopy(prepared['settings'])
     settings['launch_env'] = {'SOC_VERSION': 'test-soc', 'PYTHONPATH': ':'.join(
-        str(prepared['original'] / name) for name in ('.vaws-runtime/metadata', 'vllm', 'vllm-ascend'))}
+        str(prepared['original'] / name) for name in ('.mindie-runtime/metadata', 'vllm', 'vllm-ascend'))}
     inputs = copy.deepcopy(prepared['inputs'])
     for row in inputs.values():
         row['imports'] = 'd' * 64
     donor = {**prepared['donor'], 'profile': settings, 'build_inputs': inputs}
     certificate = profile.native_import_receipt(prepared['original'], donor)
-    (root / '.vaws-runtime/profile-evidence/import-closure.json').write_text(json.dumps(certificate))
-    (root / '.vaws-runtime/reuse.json').write_text(json.dumps({'kind': 'shared-native',
-        'import_evidence': '.vaws-runtime/profile-evidence/import-closure.json'}))
+    (root / '.mindie-runtime/profile-evidence/import-closure.json').write_text(json.dumps(certificate))
+    (root / '.mindie-runtime/reuse.json').write_text(json.dumps({'kind': 'shared-native',
+        'import_evidence': '.mindie-runtime/profile-evidence/import-closure.json'}))
     inputs = copy.deepcopy(inputs)
     inputs['vllm-ascend']['native'] = 'e' * 64
     if change:
@@ -123,6 +123,6 @@ def test_actual_finalization_reuses_only_matching_import_closure(prepared, monke
     namespace.update(native_import_smoke=smoke, installed_native_files=lambda root: prepared['files'],
                      _build_namespace={'runtime_build_inputs': lambda *args: inputs})
     exec(compile(REMOTE_CAPTURE_SUFFIX, '<actual-finalization>', 'exec'), namespace)
-    manifest = json.loads((root / '.vaws-runtime/ready-profile.json').read_text())
+    manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text())
     profile.verify(root, manifest)
     assert bool(calls) is change

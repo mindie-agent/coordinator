@@ -6,14 +6,14 @@ from unittest.mock import patch
 import pytest
 
 from remote_dev.result import make_result
-from vaws_coordinator.presentation import compact_runtime, present
+from mindie_coordinator.presentation import compact_runtime, present
 
 
 def test_large_history_and_duplicate_envs_are_bounded_and_readable(tmp_path):
     value = {"session": {"id": "task-1", "state": "open"}, "executions": [
         {"id": str(i), "phase": "failed", "error": "ERROR " * 2000,
          "binding": {"launch_env": {"PATH": "a" * 5000}}, "roles": []} for i in range(100)]}
-    result = make_result(tool="vaws.session", target={}, outcome="success", status="open", summary="VAWS open", extra={"data": value})
+    result = make_result(tool="mindie.session", target={}, outcome="success", status="open", summary="MindIE open", extra={"data": value})
     compact = present(result, tmp_path)
     assert len(json.dumps(compact).encode()) < 16000
     assert compact["data"]["executions_total"] == 100
@@ -24,14 +24,14 @@ def test_large_history_and_duplicate_envs_are_bounded_and_readable(tmp_path):
 
 def test_explicit_target_is_exact_or_omitted_never_silently_truncated(tmp_path):
     target = {"launch_preamble": "x" * 3000}
-    result = make_result(tool="vaws.execution", target={}, outcome="success", status="running", summary="VAWS running", extra={"data": {"execution_id": "e", "state": "running", "target": target}})
+    result = make_result(tool="mindie.execution", target={}, outcome="success", status="running", summary="MindIE running", extra={"data": {"execution_id": "e", "state": "running", "target": target}})
     compact = present(result, tmp_path, target=True)
     assert compact["data"]["target"] == target
 
 
 def test_full_mode_and_write_failure_preserve_operation_result(tmp_path):
     value = {"state": "running", "execution_id": "e", "private_field": "full" * 10000}
-    result = make_result(tool="vaws.run", target={}, outcome="success", status="running", summary="VAWS running", extra={"data": value})
+    result = make_result(tool="mindie.run", target={}, outcome="success", status="running", summary="MindIE running", extra={"data": value})
     assert present(result, tmp_path, full=True)["data"] == value
     with patch.object(Path, "open", side_effect=OSError("disk full")):
         reply = present(result, tmp_path)
@@ -50,8 +50,8 @@ def test_preparation_tail_keeps_bounded_log_text_and_exact_record(tmp_path):
              "progress": {"step": "install-native", "log_ref": "/logs/install.log"},
              "preparation_logs": [{"name": "default", "step": "install-native", "tail": log}],
              "tail": log}
-    result = make_result(tool="vaws.execution", target={}, outcome="success", status="preparing",
-                         summary="VAWS preparing", extra={"data": value})
+    result = make_result(tool="mindie.execution", target={}, outcome="success", status="preparing",
+                         summary="MindIE preparing", extra={"data": value})
     compact = present(result, tmp_path)
     assert compact["data"]["tail"].endswith("CompileError: affected operator failed")
     assert compact["data"]["preparation_logs"][0]["tail"].endswith("CompileError: affected operator failed")
@@ -70,8 +70,8 @@ def test_large_role_logs_preserve_completion_failure_and_release_facts(tmp_path,
              "roles": [{"name": str(i), "state": state, "quiet": quiet,
                         "lease_state": "released" if released else "held",
                         "error": log, "stdout": log, "stderr": log} for i in range(8)]}
-    result = make_result(tool="vaws.execution", target={}, outcome="failed" if state == "failed" else "success",
-                         status=state, summary="VAWS " + state, extra={"data": value})
+    result = make_result(tool="mindie.execution", target={}, outcome="failed" if state == "failed" else "success",
+                         status=state, summary="MindIE " + state, extra={"data": value})
     compact = present(result, tmp_path)
     data = compact["data"]
     assert len(json.dumps(compact, ensure_ascii=False).encode()) < 16000
@@ -95,8 +95,8 @@ def test_oversized_target_is_omitted_but_cleanup_and_error_references_remain_exa
              "progress": {"step": "install-native", "log_ref": reference},
              "target": {"launch_preamble": "x" * 20000},
              "roles": [{"name": "default", "state": "failed", "quiet": False, "lease_state": "held"}]}
-    result = make_result(tool="vaws.execution", target={}, outcome="failed", status="failed",
-                         summary="VAWS failed", extra={"data": value})
+    result = make_result(tool="mindie.execution", target={}, outcome="failed", status="failed",
+                         summary="MindIE failed", extra={"data": value})
     compact = present(result, tmp_path, target=True)
     assert "target" not in compact["data"] and compact["detail_omitted"]
     assert compact["data"]["resources_released"] is False
@@ -113,8 +113,8 @@ def test_role_limit_prioritizes_failure_and_unreleased_work_without_changing_fac
     roles.extend([{"name": "failed", "state": "failed", "quiet": True, "lease_state": "released", "error": "bad input"},
                   {"name": "draining", "state": "succeeded", "quiet": False, "lease_state": "held"}])
     value = {"execution_id": "e", "state": "failed", "resources_released": False, "roles": roles}
-    result = make_result(tool="vaws.execution", target={}, outcome="failed", status="failed",
-                         summary="VAWS failed", extra={"data": value})
+    result = make_result(tool="mindie.execution", target={}, outcome="failed", status="failed",
+                         summary="MindIE failed", extra={"data": value})
     compact = present(result, tmp_path)
     data = compact["data"]
     assert data["roles_total"] == 10 and len(data["roles"]) == 8
@@ -124,8 +124,8 @@ def test_role_limit_prioritizes_failure_and_unreleased_work_without_changing_fac
 
 
 def test_healthy_runtime_is_small_but_full_and_unhealthy_facts_remain_available(tmp_path):
-    packages = {"vaws-coordinator": {"version": "0.4.0", "commit": "a" * 40},
-                "vaws-remote-dev": {"version": "0.7.0", "commit": None}}
+    packages = {"mindie-coordinator": {"version": "0.4.0", "commit": "a" * 40},
+                "remote-dev": {"version": "0.7.0", "commit": None}}
     runtime = {scope: [{"status": "current", "loaded": {"package": name, **identity,
                         "location": "/workspace/" * 40, "python": "/workspace/python", "pid": index},
                        "installed": {"package": name, **identity, "location": "/workspace/" * 40}}
@@ -133,7 +133,7 @@ def test_healthy_runtime_is_small_but_full_and_unhealthy_facts_remain_available(
                for scope in ("client", "daemon")}
 
     def result(facts):
-        return make_result(tool="vaws.execution", target={}, outcome="success", status="preparing", summary="VAWS preparing",
+        return make_result(tool="mindie.execution", target={}, outcome="success", status="preparing", summary="MindIE preparing",
                            extra={"runtime": facts, "data": {"execution_id": "e", "state": "preparing", "target": {"launch_preamble": "exact"}}})
 
     compact = present(result(runtime), tmp_path)
@@ -151,7 +151,7 @@ def test_healthy_runtime_is_small_but_full_and_unhealthy_facts_remain_available(
 @pytest.mark.parametrize("changed,value", [("commit", "different-revision"), ("python", "/other/python"),
                                          ("location", "/other/site-packages")])
 def test_same_version_in_different_runtimes_keeps_scope_evidence(changed, value):
-    loaded = {"package": "vaws-coordinator", "version": "0.4.1.dev1", "commit": "revision-a",
+    loaded = {"package": "mindie-coordinator", "version": "0.4.1.dev1", "commit": "revision-a",
               "python": "/env-a/python", "location": "/env-a/site-packages"}
     other = {**loaded, changed: value}
     runtime = {"client": [{"status": "current", "loaded": loaded, "installed": loaded}],

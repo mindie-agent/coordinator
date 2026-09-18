@@ -10,8 +10,8 @@ the entire package test suite or every supported environment was exercised.
 
 ## Final native sequence, 2026-09-12
 
-The experiment used installed `vaws-coordinator` 0.4.0 at
-`255b65d9b392fd92c0a8e1b8a0a142bbad647854` and `vaws-remote-dev` 0.7.0 at
+The experiment used installed `mindie-coordinator` 0.4.0 at
+`255b65d9b392fd92c0a8e1b8a0a142bbad647854` and `remote-dev` 0.7.0 at
 `862e9ae4ab5e4bb8252a99cfee8629dbfeeb2597`. The loaded daemon identities were
 checked before execution and remained unchanged throughout the sequence.
 Subsequent task-finish and native-client attachment changes do not change the

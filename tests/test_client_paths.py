@@ -4,10 +4,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions, load_context, worktree_reference
-from vaws_coordinator.client_paths import client_path
-from vaws_coordinator.hooks.vaws_session import handle
-from vaws_coordinator.service import ensure_daemon, require_native_owner
+from mindie_coordinator.agent_session import AgentSessions, load_context, worktree_reference
+from mindie_coordinator.client_paths import client_path
+from mindie_coordinator.hooks.mindie_session import handle
+from mindie_coordinator.service import ensure_daemon, require_native_owner
 from test_execution_inputs import repo
 
 
@@ -41,8 +41,8 @@ def test_posix_refuses_windows_owned_state_before_starting_a_daemon(tmp_path):
     (tmp_path / "coordinator.ipc").write_text('{"host":"127.0.0.1","port":1234}', encoding="utf-8")
     with pytest.raises(RuntimeError, match="managed Windows Python"):
         require_native_owner(tmp_path, platform="posix")
-    with patch("vaws_coordinator.service.require_native_owner", side_effect=lambda path: require_native_owner(path, platform="posix")), \
-         patch("vaws_coordinator.service.CoordinatorClient") as client:
+    with patch("mindie_coordinator.service.require_native_owner", side_effect=lambda path: require_native_owner(path, platform="posix")), \
+         patch("mindie_coordinator.service.CoordinatorClient") as client:
         with pytest.raises(RuntimeError, match="second Linux coordinator"):
             ensure_daemon(tmp_path)
     client.assert_not_called()

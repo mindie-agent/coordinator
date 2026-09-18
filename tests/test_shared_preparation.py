@@ -13,9 +13,9 @@ import sysconfig
 
 import pytest
 
-from vaws_coordinator import preparation_cache as cache, runtime_profile as profile
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.provision.task_environment import reusable_preparation
+from mindie_coordinator import preparation_cache as cache, runtime_profile as profile
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.provision.task_environment import reusable_preparation
 
 
 @pytest.fixture
@@ -52,7 +52,7 @@ def bundle(tmp_path, monkeypatch):
                                {relative: 'library', metadata: 'metadata'},
                                {'cann': 'cann.txt', 'driver': 'driver.txt', 'smoke': 'smoke.json'})
     manifest['preparation'] = profile.verified_preparation(request, settings)
-    marker = source / '.vaws-runtime/ready-profile.json'
+    marker = source / '.mindie-runtime/ready-profile.json'
     marker.parent.mkdir()
     marker.write_text(json.dumps(manifest))
     class Distribution:
@@ -81,7 +81,7 @@ def test_cross_user_reuse_loads_real_extension_without_donor_runtime(bundle):
     assert cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)['status'] == 'hit'
     command = "import json,vllm,vllm_ascend._ctypes_test as extension;from vllm._version import __commit_id__;print(json.dumps({'source':vllm.value,'extension':extension.__file__,'head':__commit_id__}))"
     result = subprocess.run([sys.executable, '-c', command], capture_output=True, text=True,
-                            env={**os.environ, 'PYTHONPATH': os.pathsep.join(map(str, [target / '.vaws-runtime/metadata',
+                            env={**os.environ, 'PYTHONPATH': os.pathsep.join(map(str, [target / '.mindie-runtime/metadata',
                                                                                 target / 'vllm', target / 'vllm-ascend']))})
     assert result.returncode == 0, result.stderr
     loaded = json.loads(result.stdout)
@@ -112,10 +112,10 @@ def test_verified_atb_selection_is_carried_without_guessing_abi(bundle, home, ex
     manifest['profile']['launch_env']['ATB_HOME_PATH'] = home
     manifest['profile_key'] = profile.profile_key(manifest['profile'])
     manifest['build_key'] = profile.build_key(manifest['profile'], manifest['build_inputs'])
-    (source / '.vaws-runtime/ready-profile.json').write_text(json.dumps(manifest))
+    (source / '.mindie-runtime/ready-profile.json').write_text(json.dumps(manifest))
     cache.store_shared_native(source, shared)
     assert cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)['status'] == 'hit'
-    receipt = json.loads((target / '.vaws-runtime/reuse.json').read_text())
+    receipt = json.loads((target / '.mindie-runtime/reuse.json').read_text())
     assert receipt.get('atb_abi', {}).get('cxx_abi') == expected
     if expected:
         assert receipt['atb_abi']['torch'] == manifest['profile']['torch']
@@ -210,7 +210,7 @@ def test_cached_outputs_can_be_discarded_before_normal_build(bundle):
     cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)
     cache.discard_shared_native(target)
     assert not (target / relative).exists()
-    assert not (target / '.vaws-runtime/metadata').exists()
+    assert not (target / '.mindie-runtime/metadata').exists()
     assert (target / 'vllm/vllm/__init__.py').read_text() == "value = 'bob-execution'"
     assert (next((shared / 'bundles').iterdir()) / relative).is_file()
 
@@ -218,12 +218,12 @@ def test_cached_outputs_can_be_discarded_before_normal_build(bundle):
 @pytest.mark.parametrize('failure', [None, 'profile', 'cache-miss', 'missing-dependency', 'broken-dependency', 'repaired-abi',
                                     'cancel-profile', 'uncertain-profile', 'cancel-revalidate', 'uncertain-revalidate'])
 def test_normal_preparation_uses_cache_and_rebuilds_failed_hit(tmp_path, monkeypatch, failure):
-    import vaws_coordinator.parity as parity
-    import vaws_coordinator.parity_support as transport
+    import mindie_coordinator.parity as parity
+    import mindie_coordinator.parity_support as transport
     from remote_dev.core.ssh_transport import RemoteCompleted
-    from vaws_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
+    from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
     backend = RemoteBackend()
-    spec = {'user': 'bob', 'container_name': 'vaws-bob', 'python': '/bob/.venv/bin/python',
+    spec = {'user': 'bob', 'container_name': 'mindie-bob', 'python': '/bob/.venv/bin/python',
             'endpoint': {'host': 'host', 'port': 2202, 'user': 'root', 'root': '/bob'},
             'host_endpoint': {'host': 'host', 'port': 22, 'user': 'root'}}
     snapshot = {'id': 'source', 'records': [{'relpath': name, 'scm_version': '1.0', 'source_head': 'head'}
@@ -298,7 +298,7 @@ def test_dependency_repair_rechecks_fixed_bundle_and_preserves_native_proof(bund
     source, target, shared, request, manifest, relative, versions = bundle
     cache.store_shared_native(source, shared)
     restored = cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)
-    receipt = target / '.vaws-runtime/reuse.json'
+    receipt = target / '.mindie-runtime/reuse.json'
     receipt.write_text(json.dumps({'kind': 'dependencies', 'copied_packages': ['torch']}))
     original = (source / relative).read_bytes()
     if change in {'torch', 'torch-npu'}:
@@ -328,7 +328,7 @@ def test_dependency_repair_rechecks_fixed_bundle_and_preserves_native_proof(bund
 
 
 def test_known_host_weight_mounts_keep_original_paths():
-    from vaws_coordinator.provision import host_ops
+    from mindie_coordinator.provision import host_ops
     probe = host_ops.render_host_probe_script()
     bootstrap = host_ops.render_bootstrap_host_script()
     assert '["/home", "/tmp", "/weight", "/weights", "/models", "/data", "/mnt"]' in probe
@@ -347,7 +347,7 @@ def test_cache_metadata_steps_do_not_activate_cann_or_atb(monkeypatch, action):
                 if command.startswith('docker inspect') else '{"status":"fixture"}')
     monkeypatch.setattr(backend, 'bash', bash)
     spec = {'endpoint': {'root': '/execution'}, 'host_endpoint': {},
-            'container_name': 'vaws-fixture', 'python': '/execution/.venv/bin/python'}
+            'container_name': 'mindie-fixture', 'python': '/execution/.venv/bin/python'}
     assert backend._shared_native(spec, action, {})['status'] == 'fixture'
     assert 'safe_source()' not in commands[-1]
     assert '/nnal/atb/set_env.sh' not in commands[-1]
@@ -355,10 +355,10 @@ def test_cache_metadata_steps_do_not_activate_cann_or_atb(monkeypatch, action):
 
 
 def test_marker_and_venv_do_not_activate_native_runtime():
-    from vaws_coordinator.parity import runtime_install_step_script
-    from vaws_coordinator.provision.task_environment import create_venv_script
+    from mindie_coordinator.parity import runtime_install_step_script
+    from mindie_coordinator.provision.task_environment import create_venv_script
     marker = runtime_install_step_script(runtime_root='/execution', marker_dirname='.runtime',
-                                         container_identity='vaws-fixture', step='write-marker', python='/unused-python')
+                                         container_identity='mindie-fixture', step='write-marker', python='/unused-python')
     venv = create_venv_script('/execution', '/execution/.venv/bin/python')
     assert '/unused-python' not in marker
     assert 'safe_source()' not in marker and 'safe_source()' not in venv
@@ -367,7 +367,7 @@ def test_marker_and_venv_do_not_activate_native_runtime():
 
 @pytest.mark.skipif(os.name == 'nt', reason='generated shell payload executes in the Linux recipient')
 def test_actual_verification_payload_reads_execution_source_and_metadata(tmp_path):
-    from vaws_coordinator.parity import runtime_install_step_script
+    from mindie_coordinator.parity import runtime_install_step_script
     root, image = tmp_path / 'execution', tmp_path / 'image-python'
     image.mkdir()
     for name, body in {'torch': '__version__ = "1.0"', 'torch_npu': '',
@@ -378,17 +378,17 @@ def test_actual_verification_payload_reads_execution_source_and_metadata(tmp_pat
         package = root / name / name.replace('-', '_')
         package.mkdir(parents=True)
         (package / '__init__.py').write_text('__version__ = "current-source"\n')
-    marker = root / '.vaws-runtime/shared-native.json'
+    marker = root / '.mindie-runtime/shared-native.json'
     marker.parent.mkdir()
     marker.write_text('{}')
-    for base, requires in ((root / '.vaws-runtime/metadata', ''),
+    for base, requires in ((root / '.mindie-runtime/metadata', ''),
                            (image, 'Requires-Dist: definitely-missing-fixture-package>=999\n')):
         metadata = base / 'vllm_ascend-1.0.dist-info/METADATA'
         metadata.parent.mkdir(parents=True)
         metadata.write_text('Name: vllm-ascend\nVersion: 1.0\n' + requires)
     for step in ('verify-imports', 'verify-deps'):
         script = runtime_install_step_script(runtime_root=str(root), marker_dirname='.runtime',
-                                              container_identity='vaws-bob', step=step, python=sys.executable)
+                                              container_identity='mindie-bob', step=step, python=sys.executable)
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
                                 env={**os.environ, 'PYTHONPATH': str(image)}, timeout=30)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -396,7 +396,7 @@ def test_actual_verification_payload_reads_execution_source_and_metadata(tmp_pat
 
 
 def test_shared_baseline_recognizes_kernel_delta_and_keeps_its_interpreter(bundle, monkeypatch):
-    from vaws_coordinator import native_incremental as native
+    from mindie_coordinator import native_incremental as native
     source, target, shared, request, manifest, relative, versions = bundle
     old, new = b'int result = 1;\n', b'int result = 2;\n'
     def blob(data):
@@ -416,7 +416,7 @@ def test_shared_baseline_recognizes_kernel_delta_and_keeps_its_interpreter(bundl
     current = {path: ('100644', blob(new))}
     request['native']['vllm-ascend'] = native.native_tree_digest({path: ('100644', blob(old))})
     manifest['preparation'] = profile.verified_preparation(request, manifest['profile'])
-    (source / '.vaws-runtime/ready-profile.json').write_text(json.dumps(manifest))
+    (source / '.mindie-runtime/ready-profile.json').write_text(json.dumps(manifest))
     cache.store_shared_native(source, shared)
     request['native']['vllm-ascend'] = native.native_tree_digest(current)
     monkeypatch.setattr(cache, 'native_tree_entries', lambda *args: current)
@@ -424,23 +424,23 @@ def test_shared_baseline_recognizes_kernel_delta_and_keeps_its_interpreter(bundl
     result = cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)
     assert result['status'] == 'incremental' and result['operator'] == 'add_rms_norm_bias'
     assert (target / relative).read_bytes() == (source / relative).read_bytes()
-    plan = json.loads((target / '.vaws-runtime/native-incremental.json').read_text())
+    plan = json.loads((target / '.mindie-runtime/native-incremental.json').read_text())
     assert plan['source'] == path
     assert plan['native_to'] != plan['native_from']
     # No compiled result is published by restoration alone.
-    assert not (target / '.vaws-runtime/ready-profile.json').exists()
+    assert not (target / '.mindie-runtime/ready-profile.json').exists()
 
 
 @pytest.mark.parametrize('failure', [None, 'build', 'imports', 'profile', 'export', 'later-export',
                                     'exhausted', 'cancel-export-restore', 'uncertain-export-restore'])
 @pytest.mark.parametrize('dependency_donor', [False, True])
 def test_incremental_recipe_never_silently_falls_back_to_full_build(tmp_path, monkeypatch, failure, dependency_donor):
-    import vaws_coordinator.parity as parity
-    import vaws_coordinator.parity_support as transport
+    import mindie_coordinator.parity as parity
+    import mindie_coordinator.parity_support as transport
     from remote_dev.core.ssh_transport import RemoteCompleted
-    from vaws_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
+    from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
     backend = RemoteBackend()
-    spec = {'user': 'bob', 'container_name': 'vaws-bob', 'python': '/bob/.venv/bin/python',
+    spec = {'user': 'bob', 'container_name': 'mindie-bob', 'python': '/bob/.venv/bin/python',
             'endpoint': {'host': 'host', 'port': 2202, 'user': 'root', 'root': '/bob'},
             'host_endpoint': {'host': 'host', 'port': 22, 'user': 'root'}}
     snapshot = {'id': 'source', 'records': [{'relpath': name, 'scm_version': '1.0', 'source_head': 'head'}

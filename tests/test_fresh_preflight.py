@@ -6,8 +6,8 @@ import sqlite3
 import pytest
 
 import test_coordinator as fixtures
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.host.vaws_npu_coordination import CoordinationError, NpuCoordinator, handle_request
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.host.mindie_npu_coordination import CoordinationError, NpuCoordinator, handle_request
 
 
 @pytest.fixture

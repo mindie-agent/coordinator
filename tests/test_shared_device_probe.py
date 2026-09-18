@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator.host import vaws_npu_coordination as host
+from mindie_coordinator.host import mindie_npu_coordination as host
 
 
 MAPPING = """\tChip Physical ID              :6

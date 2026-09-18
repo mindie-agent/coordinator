@@ -6,8 +6,8 @@ from unittest.mock import Mock
 import pytest
 from remote_dev.core.cancellation import current_event, request_context
 
-from vaws_coordinator import backend as module
-from vaws_coordinator.runtime_profile import digest
+from mindie_coordinator import backend as module
+from mindie_coordinator.runtime_profile import digest
 
 
 @pytest.fixture

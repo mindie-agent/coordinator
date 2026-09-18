@@ -8,8 +8,8 @@ import subprocess
 
 import pytest
 
-from vaws_coordinator import native_incremental as native
-from vaws_coordinator.build_inputs import VLLM_ASCEND_REINSTALL_PATTERNS, build_input_fingerprints, submodule_content
+from mindie_coordinator import native_incremental as native
+from mindie_coordinator.build_inputs import VLLM_ASCEND_REINSTALL_PATTERNS, build_input_fingerprints, submodule_content
 
 
 def blob(data):
@@ -52,7 +52,7 @@ def test_recipe_plan_retains_actual_installed_tbe_tiling_layout(kernel):
     tbe = installed.split('/custom_transformer_impl/ascendc/', 1)[0]
     tiling = [tbe + '/op_tiling/liboptiling.so',
               tbe + '/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so']
-    manifest['files']['.vaws-runtime/kernel-compile-recipe.json'] = {'sha256': 'recipe'}
+    manifest['files']['.mindie-runtime/kernel-compile-recipe.json'] = {'sha256': 'recipe'}
     manifest['files'].update({path: {'sha256': 'tiling-' + str(index)} for index, path in enumerate(tiling)})
     plan = native.kernel_rebuild_plan(root, bundle, manifest, preparation, entries)
     assert {path: plan['recipe_files'][path] for path in tiling} == {
@@ -196,7 +196,7 @@ def test_invalid_incremental_output_keeps_installed_baseline_untouched(kernel, d
 def test_compile_requires_fixed_source_and_fresh_build_directory(kernel, monkeypatch):
     root, bundle, source, installed, entries, manifest, preparation = kernel
     plan = native.kernel_rebuild_plan(root, bundle, manifest, preparation, entries)
-    marker = root / '.vaws-runtime/native-incremental.json'
+    marker = root / '.mindie-runtime/native-incremental.json'
     marker.parent.mkdir()
     marker.write_text(json.dumps(plan))
     monkeypatch.setattr(native.subprocess, 'run', lambda *a, **k: pytest.fail('must reject before building'))
@@ -214,7 +214,7 @@ def test_compile_uses_current_owned_sources_and_merges_successful_result(kernel,
     build = root / 'vllm-ascend/csrc/build'
     generated = root / 'fixture-generated'
     build.rename(generated)
-    marker = root / '.vaws-runtime/native-incremental.json'
+    marker = root / '.mindie-runtime/native-incremental.json'
     marker.parent.mkdir()
     marker.write_text(json.dumps(plan))
     catlass = root / 'vllm-ascend/csrc/third_party/catlass/include'
@@ -237,14 +237,14 @@ def test_compile_uses_current_owned_sources_and_merges_successful_result(kernel,
 
 
 def test_renderer_contains_owned_single_operator_build_without_pip():
-    from vaws_coordinator.parity import runtime_install_step_script
+    from mindie_coordinator.parity import runtime_install_step_script
     script = runtime_install_step_script(runtime_root='/execution', marker_dirname='.runtime',
-                                         container_identity='vaws-fixture', step='install-vllm-ascend-incremental', python='/python')
+                                         container_identity='mindie-fixture', step='install-vllm-ascend-incremental', python='/python')
     assert 'build_incremental_kernel(Path(sys.argv[1]), compile_recipe=' in script
     assert 'read_recipe=compiled_opc_recipe' in script
     assert "'--opkernel', '--ops=' + plan['operator']" in script
     assert 'pip install --no-deps -v -e .' not in script
     assert 'spec.get("build_env", {})' in script
     assert 'SETUPTOOLS_SCM_PRETEND_VERSION=' in script
-    program = script.split("<<'VAWS_NATIVE_INCREMENTAL'\n", 1)[1].split('\nVAWS_NATIVE_INCREMENTAL', 1)[0]
+    program = script.split("<<'MINDIE_NATIVE_INCREMENTAL'\n", 1)[1].split('\nMINDIE_NATIVE_INCREMENTAL', 1)[0]
     compile(program, '<owned incremental program>', 'exec')

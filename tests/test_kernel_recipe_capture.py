@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from vaws_coordinator import runtime_profile as profile
+from mindie_coordinator import runtime_profile as profile
 
 
 def write(path, text):
@@ -38,7 +38,7 @@ def build_fixture(root, count=3):
 
 
 def recipe(root):
-    return root / '.vaws-runtime/kernel-compile-recipe.json'
+    return root / '.mindie-runtime/kernel-compile-recipe.json'
 
 
 def test_literal_flags_and_parameter_semantics_survive_normalization(tmp_path):
@@ -81,7 +81,7 @@ def test_complete_actual_build_is_captured_as_installed_metadata(tmp_path):
     data = json.loads(recipe(tmp_path).read_text())
     assert len(data['variants']['ascend910_93']['test_op']['variants']) == 3
     assert len(data['tools']) == 5
-    assert profile.installed_native_files(tmp_path)['.vaws-runtime/kernel-compile-recipe.json'] == 'metadata'
+    assert profile.installed_native_files(tmp_path)['.mindie-runtime/kernel-compile-recipe.json'] == 'metadata'
 
 
 @pytest.mark.parametrize('change', ['missing_object', 'wrong_installed_object', 'malformed_script', 'missing_generator', 'missing_scripts'])

@@ -7,7 +7,7 @@ confirmed cleanup. Actual NPU/recipe evidence still requires remote runs.
 This is the contract for the breaking lifecycle change. Task completion
 preserves the container and its prepared
 environments. Each user has one persistent container on each host, named
-`vaws-<user>` (for example, `vaws-alice` on every host). Business file work,
+`mindie-<user>` (for example, `mindie-alice` on every host). Business file work,
 builds, services and tests run in that container. Host operations are limited
 to device/port coordination and container maintenance. Reuse the existing
 ready-runtime registry and managed executions.
@@ -81,14 +81,14 @@ repository copy is not automatically associated as a linked worktree. These
 hooks observe the client-selected workspace. They do not create a worktree or
 change the parent client's cwd before its first tool call.
 
-Supported pre-tool hooks inject the attachment context into VAWS MCP calls,
-including `vaws_message` and provider-qualified `vaws-knowledge` / `remote-dev`
+Supported pre-tool hooks inject the attachment context into MindIE MCP calls,
+including `mindie_message` and provider-qualified `mindie-knowledge` / `remote-dev`
 companion tools. Cursor's native MCP dispatcher resolves bare `MCP:knowledge_*`
 and `MCP:remote_*` names through its configured providers; other clients require
 the provider-qualified name. Client wiring owns workspace/component preparation and
 consumption of this context; the hook reports its current source defaults.
 Cursor's `sessionStart` runs asynchronously, so its
-first VAWS `preToolUse` can attach the same stable conversation ID idempotently
+first MindIE `preToolUse` can attach the same stable conversation ID idempotently
 before supplying `updated_input`. Other tool calls do not trigger this fallback.
 See the [Cursor hook contract](https://cursor.com/docs/hooks#pretooluse).
 

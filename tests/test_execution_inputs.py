@@ -6,12 +6,12 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.execution_sources import capture_sources, validate_source_snapshot
-from vaws_coordinator.placement import normalize_resources, role_plan
-from vaws_coordinator.ready_runtime import RuntimePool
-from vaws_coordinator.service import CoordinatorService
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.execution_sources import capture_sources, validate_source_snapshot
+from mindie_coordinator.placement import normalize_resources, role_plan
+from mindie_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.service import CoordinatorService
+from mindie_coordinator.task_client import TaskClient
 
 
 def git(repo, *args):
@@ -78,7 +78,7 @@ def test_dirty_capture_preserves_head_index_and_ignored_files(tmp_path):
 
 def test_capture_retries_an_edit_during_capture_then_pins_the_stable_tree(tmp_path):
     source = repo(tmp_path / "repo")
-    from vaws_coordinator.parity import build_synthetic_snapshot
+    from mindie_coordinator.parity import build_synthetic_snapshot
     calls = []
 
     def changing(*args, **kwargs):
@@ -88,7 +88,7 @@ def test_capture_retries_an_edit_during_capture_then_pins_the_stable_tree(tmp_pa
             (source / "value.txt").write_text("B", encoding="utf-8")
         return result
 
-    with patch("vaws_coordinator.parity.build_synthetic_snapshot", side_effect=changing):
+    with patch("mindie_coordinator.parity.build_synthetic_snapshot", side_effect=changing):
         fixed = capture_sources({"app": str(source)}, tmp_path / "state")
     assert len(calls) == 2
     assert git(source, "show", fixed["records"][0]["commit"] + ":value.txt") == "B"
@@ -96,7 +96,7 @@ def test_capture_retries_an_edit_during_capture_then_pins_the_stable_tree(tmp_pa
 
 def test_unstable_capture_is_not_admitted_and_cleans_temporary_refs(client, tmp_path):
     source = repo(tmp_path / "repo")
-    from vaws_coordinator.parity import build_synthetic_snapshot
+    from mindie_coordinator.parity import build_synthetic_snapshot
     count = 0
 
     def changing(*args, **kwargs):
@@ -106,7 +106,7 @@ def test_unstable_capture_is_not_admitted_and_cleans_temporary_refs(client, tmp_
         (source / "value.txt").write_text(str(count), encoding="utf-8")
         return result
 
-    with patch("vaws_coordinator.parity.build_synthetic_snapshot", side_effect=changing):
+    with patch("mindie_coordinator.parity.build_synthetic_snapshot", side_effect=changing):
         with pytest.raises(ValueError, match="execution was not admitted"):
             client.run("true", sources={"app": str(source)})
     assert count == 3
@@ -123,7 +123,7 @@ def test_service_ensure_compares_dirty_source_and_connect_does_not_capture(clien
     (source / "value.txt").write_text("changed", encoding="utf-8")
     with pytest.raises(ValueError, match="different inputs: sources"):
         client.run("serve", service="api")
-    with patch("vaws_coordinator.execution_sources.capture_sources", side_effect=AssertionError("must not capture")):
+    with patch("mindie_coordinator.execution_sources.capture_sources", side_effect=AssertionError("must not capture")):
         assert client.observe(service="api")["execution_id"] == first["execution_id"]
 
 
@@ -138,7 +138,7 @@ def test_service_replacement_requires_confirmed_resource_release(client):
 def test_source_free_overrides_defaults_without_git_or_devices(client, tmp_path):
     source = repo(tmp_path / "repo")
     client.sources({"app": str(source)})
-    with patch("vaws_coordinator.agent_session.worktree_reference", side_effect=AssertionError("must not read Git")):
+    with patch("mindie_coordinator.agent_session.worktree_reference", side_effect=AssertionError("must not read Git")):
         reply = client.run("printf ready", sources={})
     row = client.store.executions(client.context["session"]["id"])[0]
     assert reply["sources"] == {}
@@ -150,7 +150,7 @@ def test_source_free_overrides_defaults_without_git_or_devices(client, tmp_path)
 
 def test_role_group_captures_once_and_progress_uses_accepted_paths(client, tmp_path):
     source = repo(tmp_path / "repo")
-    with patch("vaws_coordinator.execution_sources.capture_sources", wraps=capture_sources) as capture:
+    with patch("mindie_coordinator.execution_sources.capture_sources", wraps=capture_sources) as capture:
         reply = client.run("true", sources={"app": str(source)}, topology={
             "roles": [{"name": "one", "npu_count": 0}, {"name": "two", "npu_count": 1}]})
     capture.assert_called_once()
@@ -187,10 +187,10 @@ def test_zero_device_role_is_not_promoted_to_one():
 @pytest.mark.parametrize("devices", [[], [1, 3]])
 def test_consistent_device_count_is_accepted_and_canonicalized(client, devices):
     from jsonschema import validate
-    from vaws_coordinator.ops import TOOL_SCHEMAS
+    from mindie_coordinator.ops import TOOL_SCHEMAS
 
     resources = {"devices": devices, "npu_count": len(devices)}
-    validate({"command": "true", "sources": {}, "resources": resources}, TOOL_SCHEMAS["vaws.run"])
+    validate({"command": "true", "sources": {}, "resources": resources}, TOOL_SCHEMAS["mindie.run"])
     assert normalize_resources(resources) == {"devices": devices}
     assert role_plan({"roles": [{"name": "one", **resources}]}, {}, "true")[0] == {
         "name": "one", "command": "true", "devices": devices}
@@ -201,7 +201,7 @@ def test_consistent_device_count_is_accepted_and_canonicalized(client, devices):
 
 
 def test_conflicting_device_count_is_rejected_before_capture(client):
-    with patch("vaws_coordinator.execution_sources.capture_sources", side_effect=AssertionError("invalid request must not capture")):
+    with patch("mindie_coordinator.execution_sources.capture_sources", side_effect=AssertionError("invalid request must not capture")):
         for request in ({"resources": {"devices": [], "npu_count": 1}},
                         {"topology": {"roles": [{"name": "one", "devices": [0], "npu_count": 2}]}}):
             with pytest.raises(ValueError, match="must equal the number of devices"):
@@ -217,7 +217,7 @@ def test_conflicting_device_count_is_rejected_before_capture(client):
     {"environment": {"recpie": "rc"}},
 ])
 def test_unknown_constraints_are_rejected_before_capture_or_admission(client, arguments):
-    with patch("vaws_coordinator.execution_sources.capture_sources", side_effect=AssertionError("invalid request must not capture")):
+    with patch("mindie_coordinator.execution_sources.capture_sources", side_effect=AssertionError("invalid request must not capture")):
         with pytest.raises(ValueError, match="unsupported|do not combine"):
             client.run("true", sources={}, **arguments)
     assert client.store.executions(client.context["session"]["id"]) == []
@@ -282,7 +282,7 @@ def test_cancelled_group_stops_before_launch_and_skips_waiting_compiler(client, 
 
     with patch.object(client.pool, "catalog", return_value=catalog), \
          patch.object(client.coordinator, "_donor_for_role", return_value={"host": "same-host"}), \
-         patch("vaws_coordinator.provision.prepare_task_environment", side_effect=prepare_environment), \
+         patch("mindie_coordinator.provision.prepare_task_environment", side_effect=prepare_environment), \
          patch.object(client.pool, "checkout", side_effect=AssertionError("cancelled preparation must not checkout")) as checkout, \
          patch.object(client.pool, "managed_start", side_effect=AssertionError("cancelled preparation must not launch")) as launch:
         result = client.coordinator._progress(client.store, "alice", row)

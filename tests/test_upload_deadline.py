@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from vaws_coordinator.parity_support import SshEndpoint, ssh_stream_to_file, ssh_stream_bytes_to_file
+from mindie_coordinator.parity_support import SshEndpoint, ssh_stream_to_file, ssh_stream_bytes_to_file
 
 
 @pytest.mark.parametrize('upload,payload,expected_timeout', [

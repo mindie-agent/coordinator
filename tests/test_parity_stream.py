@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from remote_dev.core.ssh_transport import RemoteCompleted
-from vaws_coordinator.parity_support import (
+from mindie_coordinator.parity_support import (
     PROGRESS_SENTINEL,
     SshEndpoint,
     RemoteCommandError,

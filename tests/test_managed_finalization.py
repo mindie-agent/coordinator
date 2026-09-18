@@ -11,8 +11,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator import backend, parity, preparation_cache as cache, runtime_profile as profile
-from vaws_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
+from mindie_coordinator import backend, parity, preparation_cache as cache, runtime_profile as profile
+from mindie_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
 from test_native_compatibility_reuse import prepared
 from test_shared_preparation import bundle
 from test_captured_profile_handoff import receipt
@@ -139,13 +139,13 @@ def test_actual_managed_suffix_finishes_smoke_copy_and_atomic_ready(prepared, mo
     if failure in {'smoke', 'copy', 'marker'}:
         with pytest.raises((ValueError, PermissionError)):
             exec(compile(REMOTE_CAPTURE_SUFFIX, '<capture>', 'exec'), namespace)
-        assert not outputs and not (root / '.vaws-runtime/ready-profile.json').exists()
-        assert not (root / '.vaws-runtime/ready-profile.tmp').exists()
+        assert not outputs and not (root / '.mindie-runtime/ready-profile.json').exists()
+        assert not (root / '.mindie-runtime/ready-profile.tmp').exists()
     else:
         exec(compile(REMOTE_CAPTURE_SUFFIX, '<capture>', 'exec'), namespace)
         manifest = backend._captured_manifest(outputs[0])
         reply = json.loads(outputs[0])
-        assert manifest == json.loads((root / '.vaws-runtime/ready-profile.json').read_text())
+        assert manifest == json.loads((root / '.mindie-runtime/ready-profile.json').read_text())
         assert reply['native_smoke_executed'] is True
         assert reply['native_cache']['status'] == ('miss' if failure else 'stored')
         assert all(value >= 0 for value in reply['preparation_timings'].values())

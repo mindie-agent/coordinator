@@ -1,8 +1,8 @@
 import json
 import pytest
-from vaws_coordinator.service import CoordinatorService
-from vaws_coordinator.launch_observation import launch_observation, ENV_NAME
-from vaws_coordinator.placement import validate_user_env
+from mindie_coordinator.service import CoordinatorService
+from mindie_coordinator.launch_observation import launch_observation, ENV_NAME
+from mindie_coordinator.placement import validate_user_env
 
 
 def test_launch_receipt_is_detached_from_mutable_sources_and_omits_secrets():

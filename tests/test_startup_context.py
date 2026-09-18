@@ -7,8 +7,8 @@ import pytest
 
 from test_fresh_preflight import case
 from test_preflight_parallel import launch
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.host import vaws_npu_coordination as protocol
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.host import mindie_npu_coordination as protocol
 
 
 INFO = {"Id": "container-a", "State": {"Running": True, "Paused": False, "Restarting": False}}
@@ -21,11 +21,11 @@ def test_context_reads_only_exact_task_and_does_not_run_housekeeping(tmp_path, m
     monkeypatch.setattr(protocol.NpuCoordinator, "_housekeep", lambda *a, **k: pytest.fail("discovery cannot reclaim other tasks"))
     commands = []
     monkeypatch.setattr(protocol.subprocess, "check_output", lambda args, **kwargs: commands.append(args) or json.dumps(INFO))
-    absent = host.startup_context("new", "vaws-owner")
+    absent = host.startup_context("new", "mindie-owner")
     assert absent == {"status": "ok", "coordination_epoch": before["coordination_epoch"], "tasks": [], "container": INFO}
-    existing = host.startup_context("other", "vaws-owner")
+    existing = host.startup_context("other", "mindie-owner")
     assert existing["tasks"] == before["tasks"]
-    assert commands[0][-1] == "vaws-owner" and commands[0][:3] == ["docker", "inspect", "--format"]
+    assert commands[0][-1] == "mindie-owner" and commands[0][:3] == ["docker", "inspect", "--format"]
 
 
 @pytest.mark.parametrize("field,value", [("Running", False), ("Paused", True), ("Restarting", True), ("Id", "replacement")])
@@ -85,6 +85,6 @@ def test_backend_context_uses_the_host_authority_with_exact_task():
     backend = RemoteBackend()
     calls = []
     backend.host = lambda runtime, request: calls.append(request) or {"container": INFO}
-    runtime = {"container_name": "vaws-owner"}
+    runtime = {"container_name": "mindie-owner"}
     assert backend.startup_context(runtime, "new-task") == {"container": INFO}
-    assert calls == [{"action": "startup-context", "task_id": "new-task", "container_name": "vaws-owner"}]
+    assert calls == [{"action": "startup-context", "task_id": "new-task", "container_name": "mindie-owner"}]

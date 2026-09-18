@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.task_client import TaskClient
 
 
 def task(tmp_path, **kwargs):
@@ -24,11 +24,11 @@ from pathlib import Path
 class BlockManagedImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         pure_diagnostics = {"remote_dev", "remote_dev.observability", "remote_dev.core", "remote_dev.core.errors"}
-        if fullname == "vaws_coordinator.service" or (fullname.startswith("remote_dev.") and fullname not in pure_diagnostics):
+        if fullname == "mindie_coordinator.service" or (fullname.startswith("remote_dev.") and fullname not in pure_diagnostics):
             raise AssertionError("unmanaged finish imported " + fullname)
 sys.meta_path.insert(0, BlockManagedImports())
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.task_client import TaskClient
 store=AgentSessions(Path(sys.argv[1]) / "sessions")
 context=store.attach("codex", "fresh-local", sys.argv[1])
 client=TaskClient(context["context_file"], user="user")
@@ -58,13 +58,13 @@ assert not (Path(sys.argv[1]) / "coordinator").exists()
 assert client.status()["session"]["state"] == "finished"
 pure_diagnostics = {"remote_dev", "remote_dev.observability", "remote_dev.core", "remote_dev.core.errors"}
 assert {name for name in sys.modules if name == "remote_dev" or name.startswith("remote_dev.")} <= pure_diagnostics
-assert "vaws_coordinator.service" not in sys.modules
+assert "mindie_coordinator.service" not in sys.modules
 print(json.dumps(reply))
 '''
     result = subprocess.run([sys.executable, "-c", script, str(tmp_path)],
                             env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
-                                 "VAWS_DIAGNOSTICS_ROOT": str(tmp_path / "diagnostics"),
-                                 "VAWS_COORDINATOR_STATE_DIR": str(tmp_path / "coordinator")},
+                                 "MINDIE_DIAGNOSTICS_ROOT": str(tmp_path / "diagnostics"),
+                                 "MINDIE_COORDINATOR_STATE_DIR": str(tmp_path / "coordinator")},
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -144,7 +144,7 @@ def test_finish_and_admission_are_serialized_by_the_database(tmp_path, monkeypat
 
 
 def test_finish_wins_after_service_initial_open_check_before_admission(tmp_path, monkeypatch):
-    from vaws_coordinator.service import CoordinatorService
+    from mindie_coordinator.service import CoordinatorService
     store, context, client = task(tmp_path)
     service = CoordinatorService(tmp_path / "coordinator", pool=MagicMock(), sessions=store)
     checked, release = threading.Event(), threading.Event()
@@ -152,7 +152,7 @@ def test_finish_wins_after_service_initial_open_check_before_admission(tmp_path,
     def source_check(snapshot):
         checked.set()
         assert release.wait(5)
-    monkeypatch.setattr("vaws_coordinator.service.validate_source_snapshot", source_check)
+    monkeypatch.setattr("mindie_coordinator.service.validate_source_snapshot", source_check)
     def admit():
         try:
             service.admit(str(store.state_dir), "user", context["session"]["id"], {"source_snapshot": {}}, wait=False)

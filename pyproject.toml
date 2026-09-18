@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vaws-coordinator"
+name = "mindie-coordinator"
 version = "0.5.0.dev5"
-description = "Local VAWS coordinator: task stdio MCP and host NPU allocation"
+description = "Local MindIE coordinator: task stdio MCP and host NPU allocation"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-    "vaws-diagnostics @ git+https://github.com/mindie-agent/diagnostics@96fcdfaa0f25fa59f12e948eb4e17ead775f3287",
-    "vaws-remote-dev>=0.9.3",
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@db16926ed04fdaede28824b6e4f3aff5fb35e603",
+    "remote-dev>=0.9.3",
     "setuptools-scm>=8",
 ]
 
@@ -20,13 +20,13 @@ dependencies = [
 test = ["pytest", "jsonschema>=4"]
 
 [project.scripts]
-vaws-coordinator = "vaws_coordinator.cli:main"
+mindie-coordinator = "mindie_coordinator.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/mindie-agent/coordinator"
 
 [tool.hatch.build.targets.wheel]
-packages = ["vaws_coordinator"]
+packages = ["mindie_coordinator"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

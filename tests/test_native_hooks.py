@@ -7,16 +7,16 @@ import json
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.hooks.vaws_session import handle
-from vaws_coordinator.hooks.vaws_session import main
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.hooks.mindie_session import handle
+from mindie_coordinator.hooks.mindie_session import main
 from test_execution_inputs import repo
 
 
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
-    for name in ("VAWS_CONTEXT_FILE", "VAWS_PARENT_CONTEXT", "VAWS_ATTACH_CONTEXT",
-                 "VAWS_GITHUB_IDENTITY_FILE", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+    for name in ("MINDIE_CONTEXT_FILE", "MINDIE_PARENT_CONTEXT", "MINDIE_ATTACH_CONTEXT",
+                 "MINDIE_GITHUB_IDENTITY_FILE", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -24,7 +24,7 @@ def cursor_event(root, *, native="conversation", event="preToolUse", **fields):
     return {"conversation_id": native, "generation_id": "first-turn",
             "hook_event_name": event, "cursor_version": "test",
             "workspace_roots": [str(root)], "cwd": str(root),
-            "tool_name": "MCP:vaws_run", "tool_input": {"command": "echo ready"}, **fields}
+            "tool_name": "MCP:mindie_run", "tool_input": {"command": "echo ready"}, **fields}
 
 
 @pytest.mark.parametrize("first", ["sessionStart", "preToolUse"])
@@ -60,9 +60,9 @@ def test_cursor_concurrent_start_and_first_tools_create_one_task(tmp_path):
 
 
 @pytest.mark.parametrize("fields", [
-    {"tool_name": "Shell", "tool_input": {"command": "echo vaws_run"}},
-    {"tool_name": "MCP:unrelated_vaws_run"},
-    {"tool_name": "MCP:vaws_run_extra"},
+    {"tool_name": "Shell", "tool_input": {"command": "echo mindie_run"}},
+    {"tool_name": "MCP:unrelated_mindie_run"},
+    {"tool_name": "MCP:mindie_run_extra"},
     {"tool_name": "mcp__unrelated__knowledge_query"},
     {"tool_name": "mcp__unrelated__remote_read"},
     {"tool_input": []},
@@ -70,14 +70,14 @@ def test_cursor_concurrent_start_and_first_tools_create_one_task(tmp_path):
 ])
 def test_cursor_unrelated_or_explicit_calls_never_open_the_task_registry(tmp_path, monkeypatch, fields):
     opening = Mock(side_effect=AssertionError("ordinary tool must not open registry"))
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.AgentSessions", opening)
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.AgentSessions", opening)
     assert handle("cursor", cursor_event(tmp_path, **fields)) == {}
     opening.assert_not_called()
 
 
 def test_cursor_missing_native_id_never_uses_cwd_to_create_task(tmp_path, monkeypatch):
     opening = Mock(side_effect=AssertionError("missing identity must not open registry"))
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.AgentSessions", opening)
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.AgentSessions", opening)
     with pytest.raises(ValueError, match="no native session identity"):
         handle("cursor", cursor_event(tmp_path, native=""))
     opening.assert_not_called()
@@ -87,7 +87,7 @@ def test_cursor_first_tool_respects_explicit_association(tmp_path, monkeypatch):
     source = repo(tmp_path / "project")
     store = AgentSessions(tmp_path / "sessions")
     parent = store.attach("codex", "parent", str(source))
-    monkeypatch.setenv("VAWS_ATTACH_CONTEXT", parent["context_file"])
+    monkeypatch.setenv("MINDIE_ATTACH_CONTEXT", parent["context_file"])
     output = handle("cursor", cursor_event(source), store)
     child = store.native_context("cursor", "conversation")
     assert output["updated_input"]["context_file"] == child["context_file"]
@@ -108,7 +108,7 @@ def test_message_gets_native_context_without_changing_explicit_arguments(tmp_pat
     context = store.attach(client, "native", str(tmp_path))
     arguments = {"recipient": {"reply_reference": "known-reference"}, "text": "ready"}
     payload = {"hook_event_name": "preToolUse", "session_id": "native", "cwd": str(tmp_path),
-               "tool_name": "mcp__vaws-task__vaws_message", "tool_input": arguments}
+               "tool_name": "mcp__mindie-task__mindie_message", "tool_input": arguments}
     output = handle(client, payload, store)
     updated = output["updated_input"] if client == "cursor" else output["hookSpecificOutput"]["updatedInput"]
     assert updated == {**arguments, "context_file": context["context_file"]}
@@ -117,7 +117,7 @@ def test_message_gets_native_context_without_changing_explicit_arguments(tmp_pat
     assert handle(client, {**payload, "tool_input": explicit}, store) == {}
 
 
-@pytest.mark.parametrize("name", ["vaws-task__vaws_message", "vaws-knowledge__knowledge_capture", "remote-dev__remote_read"])
+@pytest.mark.parametrize("name", ["mindie-task__mindie_message", "mindie-knowledge__knowledge_capture", "remote-dev__remote_read"])
 def test_grok_dispatcher_keeps_its_nested_envelope(tmp_path, name):
     store = AgentSessions(tmp_path / "sessions")
     context = store.attach("grok", "native", str(tmp_path))
@@ -130,11 +130,11 @@ def test_grok_dispatcher_keeps_its_nested_envelope(tmp_path, name):
 
 
 @pytest.mark.parametrize("client,name", [
-    ("claude", "mcp__vaws-knowledge__knowledge_query"),
-    ("claude", "mcp__vaws-knowledge__knowledge_explain"),
-    ("codex", "mcp__vaws_knowledge__knowledge_capture"),
+    ("claude", "mcp__mindie-knowledge__knowledge_query"),
+    ("claude", "mcp__mindie-knowledge__knowledge_explain"),
+    ("codex", "mcp__mindie_knowledge__knowledge_capture"),
     ("codex", "mcp__remote_dev__remote_read"),
-    ("cursor", "MCP:vaws-knowledge__knowledge_query"),
+    ("cursor", "MCP:mindie-knowledge__knowledge_query"),
     ("cursor", "MCP:remote-dev__remote_job_status"),
     ("cursor", "MCP:knowledge_query"),
     ("cursor", "MCP:remote_read"),
@@ -184,7 +184,7 @@ def test_kimi_prompt_keeps_context_without_native_call_metadata(tmp_path, monkey
     payload = {"hook_event_name": "UserPromptSubmit", "session_id": "native", "cwd": str(after)}
     if agent:
         payload["agent_id"] = agent
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.AgentSessions", lambda: store)
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.AgentSessions", lambda: store)
     monkeypatch.setattr("sys.argv", ["hook", "--client", "kimi"])
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     capsys.readouterr()
@@ -215,7 +215,7 @@ def test_prompt_refreshes_cwd_without_repeating_context(tmp_path, client, event)
     assert current["attachment"]["cwd"] == str(after)
     assert {source["path"] for source in current["source_defaults"]["sources"].values()} == {str(after)}
     tool = {**payload, "hook_event_name": "PreToolUse", "cwd": str(after),
-            "tool_name": "vaws_run", "tool_input": {"command": "echo ready"}}
+            "tool_name": "mindie_run", "tool_input": {"command": "echo ready"}}
     updated = handle(client, tool, store)
     arguments = updated["updated_input"] if client == "cursor" else updated["hookSpecificOutput"]["updatedInput"]
     assert arguments["context_file"] == current["context_file"]
@@ -223,16 +223,16 @@ def test_prompt_refreshes_cwd_without_repeating_context(tmp_path, client, event)
 
 @pytest.mark.parametrize("client", ["claude", "codex", "grok", "cursor"])
 @pytest.mark.parametrize("fields", [
-    {"tool_name": "Shell", "tool_input": {"command": "echo vaws_run"}},
-    {"tool_name": "mcp__other__vaws_run_extra"},
-    {"tool_name": "vaws_run", "tool_input": []},
-    {"tool_name": "vaws_run", "tool_input": {"context_file": "explicit-context"}},
+    {"tool_name": "Shell", "tool_input": {"command": "echo mindie_run"}},
+    {"tool_name": "mcp__other__mindie_run_extra"},
+    {"tool_name": "mindie_run", "tool_input": []},
+    {"tool_name": "mindie_run", "tool_input": {"context_file": "explicit-context"}},
 ])
 def test_ordinary_pretool_needs_no_identity_registry_or_git_scope(tmp_path, monkeypatch, capsys, client, fields):
     opening = Mock(side_effect=AssertionError("ordinary tool must not open registry"))
     scope = Mock(side_effect=AssertionError("ordinary tool must not probe Git scope"))
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.AgentSessions", opening)
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.in_project_scope", scope)
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.AgentSessions", opening)
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.in_project_scope", scope)
     payload = {"hook_event_name": "PreToolUse", "cwd": str(tmp_path), **fields}
     assert handle(client, payload) == {}
     monkeypatch.setattr("sys.argv", ["hook", "--client", client, "--project", str(tmp_path)])
@@ -244,7 +244,7 @@ def test_ordinary_pretool_needs_no_identity_registry_or_git_scope(tmp_path, monk
 
 
 def test_unrelated_grok_dispatcher_never_opens_registry(monkeypatch):
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.AgentSessions",
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.AgentSessions",
                         Mock(side_effect=AssertionError("ordinary nested call must not open registry")))
     assert handle("grok", {"hookEventName": "pre_tool_use", "toolName": "use_tool",
                            "toolInput": {"tool_name": "other_provider__remote_read", "tool_input": {"path": "/work/code.py"}}}) == {}
@@ -281,12 +281,12 @@ def test_prepared_source_map_is_replaced_after_native_cwd_change_and_not_rebound
     assert set(current["source_defaults"]["sources"]) == {"second"}
     monkeypatch.setattr(store, "bind_native_sources", Mock(side_effect=AssertionError("repeated source binding")))
     tool = {**payload, "hook_event_name": "PreToolUse", "cwd": str(second),
-            "tool_name": "vaws_run", "tool_input": {}}
+            "tool_name": "mindie_run", "tool_input": {}}
     assert handle("claude", tool, store, sources={"second": str(second)})
 
 
 def test_selected_roots_extend_hook_scope_but_unselected_nested_clone_does_not(tmp_path):
-    from vaws_coordinator.hooks.vaws_session import in_project_scope
+    from mindie_coordinator.hooks.mindie_session import in_project_scope
     project, bundle = repo(tmp_path / "project"), repo(tmp_path / "bundle")
     selected, unrelated = repo(bundle / "selected"), repo(bundle / "unrelated")
     roots = {"workspace": str(bundle), "business": str(selected)}
@@ -367,7 +367,7 @@ def test_lost_prepared_repository_stays_unknown_across_repeated_cli_resumes(tmp_
 
 def test_native_prepared_roots_capture_ignored_child_edits(tmp_path):
     from test_execution_inputs import git
-    from vaws_coordinator.execution_sources import capture_sources
+    from mindie_coordinator.execution_sources import capture_sources
     root = repo(tmp_path / "workspace")
     (root / ".gitignore").write_text("/business/\n")
     git(root, "add", ".gitignore")
@@ -405,7 +405,7 @@ def test_missing_prepared_child_never_becomes_implicit_source_free_execution(tmp
 
 
 def test_prepared_roots_keep_global_kimi_silent_outside_git_project(tmp_path, monkeypatch, capsys):
-    from vaws_coordinator.hooks.vaws_session import in_project_scope
+    from mindie_coordinator.hooks.mindie_session import in_project_scope
     project = repo(tmp_path / "project")
     outside = tmp_path / "non-git"
     outside.mkdir()
@@ -414,7 +414,7 @@ def test_prepared_roots_keep_global_kimi_silent_outside_git_project(tmp_path, mo
     monkeypatch.setattr("sys.argv", ["hook", "--client", "kimi", "--project", str(project)])
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "UserPromptSubmit",
                         "session_id": "unrelated", "cwd": str(outside)})))
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.AgentSessions",
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.AgentSessions",
                         Mock(side_effect=AssertionError("outside scope must not open registry")))
     capsys.readouterr()
     assert main(sources=sources) == 0

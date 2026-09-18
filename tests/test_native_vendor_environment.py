@@ -9,8 +9,8 @@ import sys
 
 import pytest
 
-from vaws_coordinator import preparation_cache as cache, runtime_profile as profile
-from vaws_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
+from mindie_coordinator import preparation_cache as cache, runtime_profile as profile
+from mindie_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
 
 
 def test_vendor_paths_follow_manifest_layout_and_all_vendors():
@@ -63,7 +63,7 @@ def native_loader(tmp_path, monkeypatch):
     vllm.mkdir(parents=True)
     (vllm / '__init__.py').write_text('')
     for name in ('vllm', 'vllm-ascend'):
-        metadata = root / '.vaws-runtime/metadata' / (name.replace('-', '_') + '-1.0.dist-info')
+        metadata = root / '.mindie-runtime/metadata' / (name.replace('-', '_') + '-1.0.dist-info')
         metadata.mkdir(parents=True)
         (metadata / 'METADATA').write_text('Name: ' + name + '\nVersion: 1.0\n')
     system = {}
@@ -75,7 +75,7 @@ def native_loader(tmp_path, monkeypatch):
         monkeypatch.delenv(key, raising=False)
     environment = {'LD_LIBRARY_PATH': str(image), 'ASCEND_CUSTOM_OPP_PATH': str(image / 'opp'),
                    'PYTHONPATH': ':'.join(str(path) for path in
-                       (root / '.vaws-runtime/metadata', root / 'vllm', root / 'vllm-ascend', image)),
+                       (root / '.mindie-runtime/metadata', root / 'vllm', root / 'vllm-ascend', image)),
                    'SOC_VERSION': '1.0'}
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
@@ -90,7 +90,7 @@ def native_loader(tmp_path, monkeypatch):
                         lambda name: '1.0' if name in {'torch', 'torch-npu'} else real_version(name))
     settings = {name: '1.0' for name in profile.PROFILE_FIELDS}
     settings.update(python_abi=profile.sysconfig.get_config_var('SOABI'), build_env={}, launch_env=environment,
-                    compatibility_evidence='.vaws-runtime/profile-evidence/smoke.json', system_files=system)
+                    compatibility_evidence='.mindie-runtime/profile-evidence/smoke.json', system_files=system)
     inputs = {name: {'native': 'a' * 64, 'dependencies': 'b' * 64, 'build_env': 'c' * 64}
               for name in ('vllm', 'vllm-ascend')}
     return root, image, library, settings, inputs
@@ -121,8 +121,8 @@ def test_actual_capture_publishes_the_environment_used_by_its_native_child(nativ
     namespace = {key: value for key, value in vars(profile).items() if not key.startswith('__')}
     namespace['_build_namespace'] = {'runtime_build_inputs': lambda *args: inputs}
     exec(compile(REMOTE_CAPTURE_SUFFIX, '<real-loader-capture>', 'exec'), namespace)
-    manifest = json.loads((root / '.vaws-runtime/ready-profile.json').read_text())
-    smoke = json.loads((root / '.vaws-runtime/profile-evidence/smoke.json').read_text())
+    manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text())
+    smoke = json.loads((root / '.mindie-runtime/profile-evidence/smoke.json').read_text())
     assert smoke['passed'] is True and 'loaded-owned-opapi=' + str(library) in smoke['stdout']
     assert smoke['source_mapping'] == {
         'vllm': str(root / 'vllm/vllm/__init__.py'),

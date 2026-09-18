@@ -3,13 +3,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.parity_support import RemoteCommandError
-from vaws_coordinator.runtime_profile import build_toolchain_from_logs, file_digest
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.parity_support import RemoteCommandError
+from mindie_coordinator.runtime_profile import build_toolchain_from_logs, file_digest
 
 
 def build_log(root, name, text):
-    path = root / ".vaws-runtime/prepare-logs" / name
+    path = root / ".mindie-runtime/prepare-logs" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path

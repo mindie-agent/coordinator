@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from remote_dev.core.ssh_transport import RemoteCompleted
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.parity_support import RemoteCommandError
-from vaws_coordinator.preparation_process import PreparationCancelled, PreparationProcess
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.parity_support import RemoteCommandError
+from mindie_coordinator.preparation_process import PreparationCancelled, PreparationProcess
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def test_root_rpc_uses_subsequent_job_endpoint_and_preserves_logs(preparation, m
         calls.append((endpoint, script, kwargs))
         return RemoteCompleted(0, 'created\n', 'warning\n')
     monkeypatch.setattr('remote_dev.core.ssh_transport.run_rpc_script', rpc)
-    monkeypatch.setattr('vaws_coordinator.parity_support.ssh_exec_stream',
+    monkeypatch.setattr('mindie_coordinator.parity_support.ssh_exec_stream',
                         lambda *args, **kwargs: pytest.fail('root bootstrap must use pooled RPC'))
     preparation.run(log_dir=tmp_path)
     endpoint, script, options = calls[0]
@@ -95,7 +95,7 @@ def test_root_cancellation_stops_before_any_next_step(preparation, monkeypatch, 
 def test_cold_venv_setup_is_carried_by_first_owned_job(preparation, monkeypatch):
     monkeypatch.setattr('remote_dev.core.ssh_transport.run_rpc_script',
                         lambda *a, **k: pytest.fail('managed setup must share its first owned job'))
-    monkeypatch.setattr('vaws_coordinator.parity_support.ssh_exec_stream',
+    monkeypatch.setattr('mindie_coordinator.parity_support.ssh_exec_stream',
                         lambda *a, **k: pytest.fail('no separate venv job'))
     preparation.run(donor_python=None, on_preparation_job=lambda job: None)
     assert len(preparation.finished) == 1

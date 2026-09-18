@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from vaws_coordinator import parity
+from mindie_coordinator import parity
 
 
 def git(repo, *args):
@@ -88,7 +88,7 @@ def test_shared_clone_without_retained_base_recovers_fixed_clean_snapshot(source
         add_child(source, child)
     baseline = capture(source)[-1]
     fresh = clone(source, tmp_path / 'fresh', child)
-    assert not git(fresh, 'for-each-ref', 'refs/parity', 'refs/vaws')
+    assert not git(fresh, 'for-each-ref', 'refs/parity', 'refs/mindie')
     (fresh / 'operator.cpp').write_bytes(b'int value() { int output = 1; return output; }\n')
     record = capture(fresh)[-1]
     # Only the just-captured snapshot has a retained ref; it is not a base.
@@ -208,7 +208,7 @@ def test_existing_hint_or_clean_capture_has_no_extra_tree_discovery(source, monk
         (source / 'operator.cpp').write_bytes(b'int value() { return 2; }\n')
     record = capture(source)[-1]
     if kind == 'retained':
-        git(source, 'update-ref', 'refs/vaws/inputs/old/project', baseline.commit)
+        git(source, 'update-ref', 'refs/mindie/inputs/old/project', baseline.commit)
     monkeypatch.setattr(parity, '_clean_head_snapshot_base',
                         lambda *args: pytest.fail('unnecessary base reconstruction'))
     assert parity._local_snapshot_bases(record, limit=0 if kind == 'zero-limit' else 64) == (

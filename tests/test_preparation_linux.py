@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from vaws_coordinator import preparation_cache as cache, runtime_profile as profile
+from mindie_coordinator import preparation_cache as cache, runtime_profile as profile
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux recipient venv and shell contract')
@@ -20,8 +20,8 @@ def test_image_pip_installs_only_in_new_owned_venv(tmp_path, monkeypatch):
     import importlib.util
     import shlex
     import zipfile
-    from vaws_coordinator import parity
-    from vaws_coordinator.provision.task_environment import create_venv_script
+    from mindie_coordinator import parity
+    from mindie_coordinator.provision.task_environment import create_venv_script
     root = tmp_path / 'execution'
     interpreter = root / '.venv/bin/python'
     monkeypatch.setattr(parity, 'PYTHON_METADATA_PREAMBLE', ['PYTHON=' + shlex.quote(sys.executable)])
@@ -33,17 +33,17 @@ def test_image_pip_installs_only_in_new_owned_venv(tmp_path, monkeypatch):
         # the new venv, exactly as system-site-packages does on the recipient.
         environment['PYTHONPATH'] = str(Path(pip.origin).parent.parent)
     subprocess.run(['bash', '-c', script], env=environment, capture_output=True, text=True, check=True, timeout=30)
-    wheel = tmp_path / 'vaws_dependency_fixture-1.0-py3-none-any.whl'
-    dist = 'vaws_dependency_fixture-1.0.dist-info/'
+    wheel = tmp_path / 'mindie_dependency_fixture-1.0-py3-none-any.whl'
+    dist = 'mindie_dependency_fixture-1.0.dist-info/'
     with zipfile.ZipFile(wheel, 'w') as archive:
-        archive.writestr('vaws_dependency_fixture.py', 'value = "owned"\n')
-        archive.writestr(dist + 'METADATA', 'Metadata-Version: 2.1\nName: vaws-dependency-fixture\nVersion: 1.0\n')
+        archive.writestr('mindie_dependency_fixture.py', 'value = "owned"\n')
+        archive.writestr(dist + 'METADATA', 'Metadata-Version: 2.1\nName: mindie-dependency-fixture\nVersion: 1.0\n')
         archive.writestr(dist + 'WHEEL', 'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
         archive.writestr(dist + 'RECORD', '')
     subprocess.run([str(interpreter), '-m', 'pip', 'install', '--no-index', '--no-deps', str(wheel)],
                    env=environment, capture_output=True, text=True, check=True, timeout=30)
     probe = subprocess.run([str(interpreter), '-c',
-        'import json,sys,sysconfig,vaws_dependency_fixture as p;print(json.dumps([sys.prefix,sysconfig.get_paths()["purelib"],p.__file__]))'],
+        'import json,sys,sysconfig,mindie_dependency_fixture as p;print(json.dumps([sys.prefix,sysconfig.get_paths()["purelib"],p.__file__]))'],
         env=environment, capture_output=True, text=True, check=True)
     prefix, purelib, installed = map(Path, json.loads(probe.stdout))
     assert prefix == root / '.venv'
@@ -99,7 +99,7 @@ from vllm._version import __version__, __commit_id__
 print(json.dumps({'value':vllm.value,'source':vllm.__file__,'extension':extension.__file__,
  'version':__version__,'metadata':importlib.metadata.version('vllm'),'commit':__commit_id__,
  'loaded':extension.__name__}))'''
-    paths = [view / '.vaws-runtime/metadata', view / 'vllm', view / 'vllm-ascend', installed,
+    paths = [view / '.mindie-runtime/metadata', view / 'vllm', view / 'vllm-ascend', installed,
              original / 'vllm', original / 'vllm-ascend']
     result = subprocess.run([sys.executable, '-c', command], text=True, capture_output=True,
                             env={**os.environ, 'PYTHONPATH': os.pathsep.join(map(str, paths))})

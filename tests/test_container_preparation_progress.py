@@ -5,10 +5,10 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from vaws_coordinator import provision
-from vaws_coordinator.provision import existing_container
-from vaws_coordinator.provision.host_ops import MachineManagementError, RemoteResult, SshTarget
-from vaws_coordinator.service import CoordinatorService
+from mindie_coordinator import provision
+from mindie_coordinator.provision import existing_container
+from mindie_coordinator.provision.host_ops import MachineManagementError, RemoteResult, SshTarget
+from mindie_coordinator.service import CoordinatorService
 
 IMAGE = 'registry.example/ascend@sha256:' + 'a' * 64
 TARGET = SshTarget(host='fixture', user='root', port=22)
@@ -78,7 +78,7 @@ def test_placement_routes_owner_phases_to_persisted_run_log_before_root_preparat
     pool.backend.host.return_value = {'port': 2201}
     service = CoordinatorService(tmp_path / 'coordinator', pool=pool)
     service._configured_machines = lambda: [{'host': {'ip': 'fixture'}, 'user': 'alice',
-        'container': {'name': 'vaws-alice', 'ssh_port': 2201}}]
+        'container': {'name': 'mindie-alice', 'ssh_port': 2201}}]
     monkeypatch.setattr(service, '_adopt_cancel', lambda *a: False)
     monkeypatch.setattr(service, '_prepare_role', Mock(side_effect=RuntimeError('reached root preparation')))
     row, store = {'id': 'owned-execution', 'spec': {}}, Mock()

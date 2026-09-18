@@ -8,14 +8,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaws_coordinator.code_identity import (
+from mindie_coordinator.code_identity import (
     CodeIdentityError,
     code_identity,
     identity_workspace,
     manifest_code,
 )
-from vaws_coordinator.ready_runtime import RuntimePool
-from vaws_coordinator.run_manifest import (
+from mindie_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.run_manifest import (
     GIT_SHA_RE,
     ZERO_SHA,
     RunManifestError,
@@ -143,10 +143,10 @@ class ReadyRuntimeExecutionRecordTests(unittest.TestCase):
                    "task_id": "pool-testrun1", "epoch": "epoch"}
             binding = {"profile_key": "profile-a", "build_key": "native-a",
                        "endpoint": {"host": "host.invalid", "port": 22}, "runtime_id": "runtime-a"}
-            with mock.patch("vaws_coordinator.code_identity.manifest_code", side_effect=AssertionError("no recapture")):
+            with mock.patch("mindie_coordinator.code_identity.manifest_code", side_effect=AssertionError("no recapture")):
                 pool.export_execution_record(run, binding)
             record = json.loads((Path(tmp)/"runs/testrun1.json").read_text())
-            self.assertEqual(record["schema_version"], "vaws.managed-run.v2")
+            self.assertEqual(record["schema_version"], "mindie.managed-run.v2")
             self.assertEqual(record["snapshots"], {"arbitrary": "a" * 40})
             self.assertFalse(record["resources"]["released"])
             self.assertIsNone(record["process"])
@@ -218,7 +218,7 @@ class CodeIdentityTests(unittest.TestCase):
 
 class ParityCommandTests(unittest.TestCase):
     def test_materialize_command_uses_the_in_package_module(self) -> None:
-        from vaws_coordinator.parity import materialize_command
+        from mindie_coordinator.parity import materialize_command
 
         command = materialize_command(
             workspace_id="ws",
@@ -227,7 +227,7 @@ class ParityCommandTests(unittest.TestCase):
             sources={"vllm": "/tmp/vllm", "vllm-ascend": "/tmp/vllm-ascend"},
             workspace_root="/tmp/workspace",
         )
-        self.assertEqual(command[1:4], ["-m", "vaws_coordinator.parity", "sync"])
+        self.assertEqual(command[1:4], ["-m", "mindie_coordinator.parity", "sync"])
         self.assertIn("--source", command)
         self.assertIn("vllm=/tmp/vllm", command)
         self.assertIn("vllm-ascend=/tmp/vllm-ascend", command)
@@ -243,7 +243,7 @@ class ParityCommandTests(unittest.TestCase):
 
 class HostStateDirTests(unittest.TestCase):
     def test_host_state_dir_is_configurable(self) -> None:
-        from vaws_coordinator.host.vaws_npu_coordination import (
+        from mindie_coordinator.host.mindie_npu_coordination import (
             DEFAULT_STATE_DIR,
             resolve_host_state_dir,
         )
@@ -251,7 +251,7 @@ class HostStateDirTests(unittest.TestCase):
         self.assertEqual(resolve_host_state_dir(), DEFAULT_STATE_DIR)
         self.assertEqual(resolve_host_state_dir("/explicit"), "/explicit")
         with mock.patch.dict(
-            "os.environ", {"VAWS_NPU_COORDINATOR_STATE_DIR": "/tmp/custom-host-state"}
+            "os.environ", {"MINDIE_NPU_COORDINATOR_STATE_DIR": "/tmp/custom-host-state"}
         ):
             self.assertEqual(resolve_host_state_dir(), "/tmp/custom-host-state")
 

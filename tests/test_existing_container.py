@@ -9,9 +9,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator import provision
-from vaws_coordinator.provision import existing_container as existing
-from vaws_coordinator.provision.host_ops import MachineManagementError, RemoteResult, SshTarget
+from mindie_coordinator import provision
+from mindie_coordinator.provision import existing_container as existing
+from mindie_coordinator.provision.host_ops import MachineManagementError, RemoteResult, SshTarget
 
 
 TARGET = SshTarget(host='192.0.2.10', user='root', port=22)
@@ -19,19 +19,19 @@ IMAGE = 'registry.example/ascend:v1.2.3'
 
 
 def request(image=IMAGE):
-    return {'container': 'vaws-alice', 'user': 'alice', 'ssh_port': 2201,
+    return {'container': 'mindie-alice', 'user': 'alice', 'ssh_port': 2201,
             'workdir': provision.DEFAULT_WORKDIR,
             'image_request': provision.host_ops.image_request_payload(image)}
 
 
 def container(image=IMAGE):
-    return {'Name': '/vaws-alice', 'Id': 'a' * 64, 'Image': 'sha256:' + 'b' * 64,
+    return {'Name': '/mindie-alice', 'Id': 'a' * 64, 'Image': 'sha256:' + 'b' * 64,
             'State': {'Running': True, 'Paused': False, 'Restarting': False, 'Pid': 101},
             'HostConfig': {'NetworkMode': 'host'},
-            'Config': {'Image': image, 'Labels': {'com.vaws.managed': 'true',
-                'com.vaws.namespace': 'alice', 'com.vaws.workdir': provision.DEFAULT_WORKDIR,
-                'com.vaws.container_ssh_port': '2201', 'com.vaws.base_image': image,
-                'com.vaws.base_image_id': 'sha256:' + 'b' * 64}}}
+            'Config': {'Image': image, 'Labels': {'com.mindie.managed': 'true',
+                'com.mindie.namespace': 'alice', 'com.mindie.workdir': provision.DEFAULT_WORKDIR,
+                'com.mindie.container_ssh_port': '2201', 'com.mindie.base_image': image,
+                'com.mindie.base_image_id': 'sha256:' + 'b' * 64}}}
 
 
 def command_results(info=None, listener=None, processes='PID\n101\n102\n'):
@@ -51,7 +51,7 @@ def test_matching_fixed_image_requires_real_container_owned_ssh_listener(image):
     assert result['container_id'] == 'a' * 64 and result['image_id'] == 'sha256:' + 'b' * 64
     assert result['ssh_port'] == 2201 and result['listener_pids'] == [102]
     assert run.call_count == 3
-    assert run.call_args_list[0].args[0] == ['docker', 'inspect', 'vaws-alice']
+    assert run.call_args_list[0].args[0] == ['docker', 'inspect', 'mindie-alice']
     assert run.call_args_list[1].args[0] == ['docker', 'top', 'a' * 64, '-eo', 'pid']
     assert run.call_args_list[2].args[0] == ['ss', '-ltnpH', 'sport = :2201']
     assert all(0 < call.kwargs['timeout'] <= 3 for call in run.call_args_list)
@@ -59,7 +59,7 @@ def test_matching_fixed_image_requires_real_container_owned_ssh_listener(image):
 
 def test_different_image_is_rejected_even_if_base_label_claims_the_requested_image():
     info = container('registry.example/ascend:other')
-    info['Config']['Labels']['com.vaws.base_image'] = IMAGE
+    info['Config']['Labels']['com.mindie.base_image'] = IMAGE
     run = command_results(info)
     assert existing.inspect_existing(request(), run=run)['status'] == 'mismatch'
     assert run.call_count == 1
@@ -71,7 +71,7 @@ def test_different_image_is_rejected_even_if_base_label_claims_the_requested_ima
 def test_incomplete_container_facts_cannot_skip_bootstrap(damage):
     info = container()
     if damage == 'name':
-        info['Name'] = '/vaws-bob'
+        info['Name'] = '/mindie-bob'
     elif damage == 'id':
         info['Id'] = ''
     elif damage == 'image-id':
@@ -86,7 +86,7 @@ def test_incomplete_container_facts_cannot_skip_bootstrap(damage):
         info['HostConfig']['NetworkMode'] = 'bridge'
     else:
         key = {'label': 'managed', 'user': 'namespace', 'port': 'container_ssh_port', 'workdir': 'workdir'}[damage]
-        info['Config']['Labels']['com.vaws.' + key] = 'different'
+        info['Config']['Labels']['com.mindie.' + key] = 'different'
     assert existing.inspect_existing(request(), run=command_results(info))['status'] == 'unknown'
 
 
@@ -136,7 +136,7 @@ def test_fast_match_skips_bootstrap_and_smoke_but_keeps_port_reservation(monkeyp
         ssh_port=2201, machines=directory, reserve_port=reserve)
     assert result['image_verification'] == facts and result['state'] == 'ready'
     assert result['ssh_port'] == 2201
-    reserve.assert_called_once_with(user='alice', container_name='vaws-alice', port=2201)
+    reserve.assert_called_once_with(user='alice', container_name='mindie-alice', port=2201)
     assert directory.upsert_machine.call_args.args[0]['image']['requested'] == IMAGE
     observe.assert_called_once()
     remote.assert_not_called()

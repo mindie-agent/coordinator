@@ -3,31 +3,31 @@
 Status: current package ownership, 2026-09-12. Execution behavior is defined
 by README.md and session-lifecycle.md.
 
-This repository is the VAWS coordinator extracted from
+This repository is the MindIE coordinator extracted from
 `vllm-ascend-workspace`. It is a **local process**: it coordinates the current
 user's own remote containers and NPU allocation. It does not host a manager
 for other people to connect to.
 
-Install as `vaws-coordinator` (import `vaws_coordinator`). The public TaskClient
+Install as `mindie-coordinator` (import `mindie_coordinator`). The public TaskClient
 contract is described in [session-lifecycle.md](session-lifecycle.md) and
-implemented in [task_client.py](../vaws_coordinator/task_client.py).
+implemented in [task_client.py](../mindie_coordinator/task_client.py).
 
 ## Ownership
 
 | Piece | Owner | Notes |
 | --- | --- | --- |
-| Host NPU authority | this package, `vaws_coordinator.host` | Shipped to the host and executed there. One implementation. Marker: `REMOTE_DEV_JOB_TOKEN`. |
-| Host queue client | `vaws_coordinator.host_queue` | Public API. |
-| Task tools / stdio MCP | `vaws_coordinator.task_server` | `vaws-coordinator task-server` |
-| Runtime pool / managed jobs | `vaws_coordinator.ready_runtime`, `managed_execution` | In-process, this user. Remote process control is `remote_dev.processes.control`. |
+| Host NPU authority | this package, `mindie_coordinator.host` | Shipped to the host and executed there. One implementation. Marker: `REMOTE_DEV_JOB_TOKEN`. |
+| Host queue client | `mindie_coordinator.host_queue` | Public API. |
+| Task tools / stdio MCP | `mindie_coordinator.task_server` | `mindie-coordinator task-server` |
+| Runtime pool / managed jobs | `mindie_coordinator.ready_runtime`, `managed_execution` | In-process, this user. Remote process control is `remote_dev.processes.control`. |
 | Result envelope | `remote_dev.result` | `schema_version: remote-dev.result.v1` |
-| Remote shell | `remote_dev.core.endpoint` / `remote_dev.core.shell_ops` | Pip package `vaws-remote-dev`. |
-| Run Manifest v1 | this package, `vaws_coordinator.run_manifest` | `code` is Git identity (`source_head`, `snapshot_commit`). |
-| Code identity | this package, `vaws_coordinator.code_identity` | Dirty trees get a parentless snapshot commit. |
-| Code parity | this package, `vaws_coordinator.parity` | In-package CLI; no consumer script path. |
+| Remote shell | `remote_dev.core.endpoint` / `remote_dev.core.shell_ops` | Pip package `remote-dev`. |
+| Run Manifest v1 | this package, `mindie_coordinator.run_manifest` | `code` is Git identity (`source_head`, `snapshot_commit`). |
+| Code identity | this package, `mindie_coordinator.code_identity` | Dirty trees get a parentless snapshot commit. |
+| Code parity | this package, `mindie_coordinator.parity` | In-package CLI; no consumer script path. |
 | Execution preparation | Fixed execution snapshot, isolated source root, verified dependency/native cache | Generic commands use an available interpreter without a new venv. Native builds and reuse remain package-owned. |
-| Machine directory | this package, `vaws_coordinator.machine_directory` | Consumers pass a document; store is coordinator-owned. |
-| Persistent daemon | `vaws_coordinator.service` | Short `/tmp/vc-<user>-<sha>.sock`; lock/sqlite in state dir. |
+| Machine directory | this package, `mindie_coordinator.machine_directory` | Consumers pass a document; store is coordinator-owned. |
+| Persistent daemon | `mindie_coordinator.service` | Short `/tmp/vc-<user>-<sha>.sock`; lock/sqlite in state dir. |
 
 ## What this package expects from remote-dev
 

@@ -10,14 +10,14 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator import provision
-from vaws_coordinator.host import vaws_npu_coordination as host
-from vaws_coordinator.provision.host_ops import RemoteResult
+from mindie_coordinator import provision
+from mindie_coordinator.host import mindie_npu_coordination as host
+from mindie_coordinator.provision.host_ops import RemoteResult
 
 
 def request(user, port=0):
     return {'action': 'container-ssh-reserve', 'user': user,
-            'container_name': 'vaws-' + user, 'port': port}
+            'container_name': 'mindie-' + user, 'port': port}
 
 
 @pytest.mark.parametrize('automatic', [True, False])
@@ -27,7 +27,7 @@ def test_independent_processes_compete_for_ports_in_one_authority(tmp_path, auto
     coordinator.reserve_container_ssh(request('reserved-user', 46000))
     program = tmp_path / 'reserve.py'
     program.write_text('''import json, pathlib, sys, time
-from vaws_coordinator.host.vaws_npu_coordination import handle_request, CoordinationError
+from mindie_coordinator.host.mindie_npu_coordination import handle_request, CoordinationError
 payload = json.loads(sys.argv[1])
 gate, ready = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
 ready.touch()
@@ -130,7 +130,7 @@ def test_provision_uses_atomic_result_in_bootstrap_and_metadata_endpoint(monkeyp
     reserve = Mock(return_value={'status': 'reserved', 'port': fixed or 46002})
     result = provision.provision_user_container(host='fixture', user='alice', image='main',
         ssh_port=fixed, reserve_port=reserve, machines=Mock())
-    reserve.assert_called_once_with(user='alice', container_name='vaws-alice', port=fixed or 0)
+    reserve.assert_called_once_with(user='alice', container_name='mindie-alice', port=fixed or 0)
     assert result['ssh_port'] == (fixed or 46002)
     assert calls[1][2]['args'][1] == str(fixed or 46002)
     assert calls[2][0].port == (fixed or 46002)

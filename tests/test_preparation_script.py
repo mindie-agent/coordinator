@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from vaws_coordinator.preparation_script import COMMAND_BYTES, preparation_command, preparation_command_fits
+from mindie_coordinator.preparation_script import COMMAND_BYTES, preparation_command, preparation_command_fits
 
 
 def test_large_composite_program_fits_without_splitting_jobs():
@@ -34,14 +34,14 @@ def test_large_program_preserves_cwd_stdin_output_and_exit(tmp_path, code):
 def test_first_job_bootstraps_from_existing_parent_once(tmp_path, monkeypatch):
     from remote_dev.processes.client import worker_source
     from remote_dev.processes.worker import control_job
-    from vaws_coordinator.preparation_process import PreparationProcess
+    from mindie_coordinator.preparation_process import PreparationProcess
     root = tmp_path / 'execution'
     endpoint = {'host': 'local.invalid', 'port': 22, 'user': 'test', 'root': str(root), 'cwd': str(root)}
     saved, output = [], []
     def control(endpoint, job_id, action, **kwargs):
         assert saved and saved[-1]['job_id'] == job_id
         return control_job({'root': endpoint['root'], 'job_id': job_id, 'action': action, **kwargs}, worker_source())
-    monkeypatch.setattr('vaws_coordinator.preparation_process.control', control)
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', control)
     process = PreparationProcess(endpoint, 'materialize', lambda row: saved.append(copy.deepcopy(row)), lambda: False,
         setup=[('prepare-root', 'mkdir -p ' + shlex.quote(str(root)) + '; echo setup >> ' + shlex.quote(str(root / 'count')))],
         bootstrap_root=str(tmp_path))

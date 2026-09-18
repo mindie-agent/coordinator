@@ -8,8 +8,8 @@ import sysconfig
 
 import pytest
 
-from vaws_coordinator import backend, runtime_profile
-from vaws_coordinator.build_inputs import runtime_build_inputs
+from mindie_coordinator import backend, runtime_profile
+from mindie_coordinator.build_inputs import runtime_build_inputs
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='executes the actual remote Bash entry')
@@ -44,7 +44,7 @@ def test_probe_uses_bound_pythonpath_and_rejects_changed_distribution(tmp_path, 
         row['sha256'] = runtime_profile.file_digest(Path(row['path']))
     manifest = {'runtime_root': str(root), 'profile': profile, 'profile_key': runtime_profile.profile_key(profile),
                 'build_key': 'fixture', 'files': {}, 'build_inputs': runtime_build_inputs(root, profile, runtime_profile.profile_key(profile))}
-    marker = root / '.vaws-runtime/ready-profile.json'
+    marker = root / '.mindie-runtime/ready-profile.json'
     marker.parent.mkdir()
     if change == 'origin':
         profile['dependency_origins']['affinity-sched'] = str(tmp_path / 'other-origin')

@@ -8,8 +8,8 @@ import sys
 
 import pytest
 
-from vaws_coordinator import agent_session
-from vaws_coordinator.agent_session import AgentSessions, load_context
+from mindie_coordinator import agent_session
+from mindie_coordinator.agent_session import AgentSessions, load_context
 
 
 @pytest.fixture
@@ -115,7 +115,7 @@ def test_concurrent_instances_and_processes_preserve_one_reference(attachment):
         script = """
 import json, sys
 from pathlib import Path
-from vaws_coordinator.agent_session import AgentSessions
+from mindie_coordinator.agent_session import AgentSessions
 context = AgentSessions(Path(sys.argv[1])).attach('codex', 'native', sys.argv[2])
 print(json.dumps(context['session']['id']))
 """

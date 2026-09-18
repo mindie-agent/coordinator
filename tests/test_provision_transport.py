@@ -17,7 +17,7 @@ import pytest
 
 import remote_dev.core.ssh_transport as ssh_transport
 
-from vaws_coordinator.provision import host_ops
+from mindie_coordinator.provision import host_ops
 
 TARGET = host_ops.SshTarget(host="192.0.2.10", user="root", port=22)
 
@@ -44,9 +44,9 @@ class RunRemoteScriptTransportTests(unittest.TestCase):
     def test_separate_channels_progress_and_sentinel(self) -> None:
         script = r"""
 echo 'machine-out'
-echo '__VAWS_PROGRESS__={"phase":"probe","message":"checking"}' >&2
+echo '__MINDIE_PROGRESS__={"phase":"probe","message":"checking"}' >&2
 echo 'warn-line' >&2
-echo '__VAWS_JSON__={"success":true,"step":"probe"}'
+echo '__MINDIE_JSON__={"success":true,"step":"probe"}'
 """
         with patch.object(ssh_transport, "stream_ssh_command", _local_bash):
             result = host_ops.run_remote_script(
@@ -97,7 +97,7 @@ printf '%s\n' "$1"
 printf '%s\n' "$2"
 printf '%s\n' "$3"
 printf '%s\n' "$4"
-echo '__VAWS_JSON__={"success":true,"n":4}'
+echo '__MINDIE_JSON__={"success":true,"n":4}'
 """
         with patch.object(ssh_transport, "stream_ssh_command", _local_bash):
             result = host_ops.run_remote_script(
@@ -129,8 +129,8 @@ def test_cached_probe_executes_literal_arguments_and_preserves_channels(monkeypa
     monkeypatch.setattr(ssh_transport, 'run_rpc_script', rpc)
     monkeypatch.setattr(host_ops, 'run_stream', lambda *a, **k: pytest.fail('probe opened an extra stream'))
     result = host_ops.run_remote_script(TARGET,
-        'printf "%s\\n" "$1"; echo \'__VAWS_PROGRESS__={"phase":"read"}\' >&2; '
-        'echo \'__VAWS_JSON__={"success":true}\'',
+        'printf "%s\\n" "$1"; echo \'__MINDIE_PROGRESS__={"phase":"read"}\' >&2; '
+        'echo \'__MINDIE_JSON__={"success":true}\'',
         args=['literal\nquote\'"$()'], timeout_seconds=5, stream_progress=False, reuse_connection=True)
     assert result.stdout.split(host_ops.SENTINEL)[0] == 'literal\nquote\'"$()\n'
     assert host_ops.assert_remote_success(result)['success'] is True
@@ -153,7 +153,7 @@ def test_cached_probe_never_replays_unknown_or_cancelled_command(monkeypatch, ca
 
 def test_cached_probe_retains_exit_error(monkeypatch):
     monkeypatch.setattr(ssh_transport, 'run_rpc_script', lambda *a, **k:
-        SimpleNamespace(returncode=7, stdout='__VAWS_JSON__={"success":false,"error":"missing runtime"}\n',
+        SimpleNamespace(returncode=7, stdout='__MINDIE_JSON__={"success":false,"error":"missing runtime"}\n',
                         stderr='detail\n', timed_out=False, cancelled=False))
     result = host_ops.run_remote_script(TARGET, 'probe', reuse_connection=True, stream_progress=False)
     assert result.returncode == 7

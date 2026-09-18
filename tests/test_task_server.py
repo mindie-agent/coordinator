@@ -12,11 +12,11 @@ from importlib.metadata import version
 from pathlib import Path
 from unittest import mock
 
-from vaws_coordinator import task_server
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.host_queue import SCHEMA_VERSION
-from vaws_coordinator.service import CoordinatorClient, socket_path, _lock_daemon
-from vaws_coordinator.task_server import (
+from mindie_coordinator import task_server
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.host_queue import SCHEMA_VERSION
+from mindie_coordinator.service import CoordinatorClient, socket_path, _lock_daemon
+from mindie_coordinator.task_server import (
     ALIASES,
     SERVICE_NAME,
     StdioTransport,
@@ -27,7 +27,7 @@ from vaws_coordinator.task_server import (
     package_version,
 )
 
-LEAKY = ("VAWS_COORDINATOR_STATE_DIR", "VAWS_AGENT_SESSIONS_DIR", "VAWS_CONTEXT_FILE")
+LEAKY = ("MINDIE_COORDINATOR_STATE_DIR", "MINDIE_AGENT_SESSIONS_DIR", "MINDIE_CONTEXT_FILE")
 
 
 def clean_environment(**extra):
@@ -75,7 +75,7 @@ class CapabilityTests(unittest.TestCase):
     def test_shared_device_schema_requires_explicit_single_card_opt_in(self):
         from jsonschema import Draft202012Validator, ValidationError
 
-        schema = next(tool["inputSchema"] for tool in list_tools() if tool["name"] == "vaws_run")
+        schema = next(tool["inputSchema"] for tool in list_tools() if tool["name"] == "mindie_run")
         validator = Draft202012Validator(schema)
         validator.validate({"command": "serve", "resources": {"devices": [0], "allow_external_busy": True}})
         for resources in ({"allow_external_busy": True}, {"devices": [0, 1], "allow_external_busy": True},
@@ -85,12 +85,12 @@ class CapabilityTests(unittest.TestCase):
 
     def test_tools_list_advertises_portable_names_with_their_own_schemas(self):
         tools = list_tools()
-        self.assertEqual([tool["name"] for tool in tools], ["vaws_session", "vaws_run", "vaws_execution", "vaws_finish", "vaws_message"])
+        self.assertEqual([tool["name"] for tool in tools], ["mindie_session", "mindie_run", "mindie_execution", "mindie_finish", "mindie_message"])
         from jsonschema import Draft202012Validator, ValidationError
 
-        examples = {"vaws_session": {"sources": {}}, "vaws_run": {"command": "echo ready"},
-                    "vaws_execution": {"execution_id": "a" * 64}, "vaws_finish": {},
-                    "vaws_message": {"recipient": {"host": "host-ref", "user": "bob", "session_id": "task-bob"}, "text": "hello"}}
+        examples = {"mindie_session": {"sources": {}}, "mindie_run": {"command": "echo ready"},
+                    "mindie_execution": {"execution_id": "a" * 64}, "mindie_finish": {},
+                    "mindie_message": {"recipient": {"host": "host-ref", "user": "bob", "session_id": "task-bob"}, "text": "hello"}}
         for tool in tools:
             with self.subTest(tool=tool["name"]):
                 self.assertTrue(tool["description"])
@@ -104,7 +104,7 @@ class CapabilityTests(unittest.TestCase):
         result = initialize_result({"protocolVersion": "2025-03-26", "capabilities": {}})
         self.assertEqual(result["protocolVersion"], "2025-03-26")
         declared = result["capabilities"]["experimental"][SERVICE_NAME]
-        self.assertEqual(declared["version"], version("vaws-coordinator"))
+        self.assertEqual(declared["version"], version("mindie-coordinator"))
         self.assertEqual(declared["version"], package_version())
         self.assertEqual(declared["tools"], sorted(ALIASES))
         self.assertEqual(result["serverInfo"]["version"], package_version())
@@ -125,13 +125,13 @@ class CapabilityTests(unittest.TestCase):
         error = handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "remote_bash", "arguments": {}}})["error"]
         self.assertEqual(error["code"], -32602)
         self.assertIn("unknown task tool", error["message"])
-        error = handle({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "vaws_session", "arguments": []}})["error"]
+        error = handle({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "mindie_session", "arguments": []}})["error"]
         self.assertEqual(error["code"], -32000)
         self.assertEqual(handle({"jsonrpc": "2.0", "id": 11})["error"]["code"], -32600)
 
     def test_describe_is_the_offline_view_of_initialize_and_tools_list(self):
         proc = subprocess.run(
-            [sys.executable, "-m", "vaws_coordinator", "task-server", "--describe"],
+            [sys.executable, "-m", "mindie_coordinator", "task-server", "--describe"],
             capture_output=True, text=True, check=False, env=clean_environment(),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -139,7 +139,7 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(payload["serverInfo"]["version"], package_version())
         self.assertEqual([tool["name"] for tool in payload["tools"]], list(ALIASES))
         proc = subprocess.run(
-            [sys.executable, "-m", "vaws_coordinator", "task-server", "--help"],
+            [sys.executable, "-m", "mindie_coordinator", "task-server", "--help"],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -165,47 +165,47 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), result["structuredContent"])
         return result
 
-    def test_vaws_session_is_local_and_the_same_task_answers_twice(self):
-        first = self.call("vaws_session")
-        second = self.call("vaws_session")
+    def test_mindie_session_is_local_and_the_same_task_answers_twice(self):
+        first = self.call("mindie_session")
+        second = self.call("mindie_session")
         for result in (first, second):
             self.assertFalse(result["isError"], result)
             self.assertEqual(result["structuredContent"]["outcome"], "success")
             self.assertEqual(result["structuredContent"]["status"], "open")
-            self.assertEqual(result["structuredContent"]["tool"], "vaws.session")
+            self.assertEqual(result["structuredContent"]["tool"], "mindie.session")
         self.assertEqual(first["structuredContent"]["data"]["session"]["id"],
                          second["structuredContent"]["data"]["session"]["id"])
         self.assertEqual(first["structuredContent"]["target"]["session_id"], self.registry.context["session"]["id"])
 
-    def test_vaws_session_binds_an_actual_worktree_without_any_manager(self):
+    def test_mindie_session_binds_an_actual_worktree_without_any_manager(self):
         repo = self.root / "repo"
         repo.mkdir()
         for args in (["init"], ["config", "user.name", "T"], ["config", "user.email", "t@example.invalid"],
                      ["commit", "--allow-empty", "-m", "base"]):
             subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-        result = self.call("vaws_session", sources={"repo": str(repo)})
+        result = self.call("mindie_session", sources={"repo": str(repo)})
         self.assertFalse(result["isError"])
         self.assertEqual(result["structuredContent"]["data"]["session"]["sources"]["repo"]["path"], str(repo.resolve()))
 
-    def test_vaws_run_without_bound_sources_admits_an_empty_fixed_input(self):
+    def test_mindie_run_without_bound_sources_admits_an_empty_fixed_input(self):
         owner = mock.Mock()
         owner.admit.return_value = {"execution_id": "e" * 64, "state": "queued"}
         owner.runtime = None
-        with mock.patch("vaws_coordinator.service.ensure_daemon", return_value=owner):
-            result = self.call("vaws_run", command="true")
+        with mock.patch("mindie_coordinator.service.ensure_daemon", return_value=owner):
+            result = self.call("mindie_run", command="true")
         self.assertFalse(result["isError"])
-        self.assertEqual(result["structuredContent"]["tool"], "vaws.run")
+        self.assertEqual(result["structuredContent"]["tool"], "mindie.run")
         self.assertEqual((result["structuredContent"]["outcome"], result["structuredContent"]["status"]), ("success", "queued"))
         spec = owner.admit.call_args.args[3]
         self.assertEqual(spec["source_snapshot"]["records"], [])
         self.assertEqual(spec["resources"], {"npu_count": 0})
 
-    def test_vaws_run_forwards_explicit_shared_device_in_fixed_admission(self):
+    def test_mindie_run_forwards_explicit_shared_device_in_fixed_admission(self):
         owner = mock.Mock()
         owner.admit.return_value = {"execution_id": "e" * 64, "state": "queued"}
         owner.runtime = None
-        with mock.patch("vaws_coordinator.service.ensure_daemon", return_value=owner):
-            result = self.call("vaws_run", command="serve", sources={},
+        with mock.patch("mindie_coordinator.service.ensure_daemon", return_value=owner):
+            result = self.call("mindie_run", command="serve", sources={},
                                resources={"devices": [0], "allow_external_busy": True})
         self.assertFalse(result["isError"])
         spec = owner.admit.call_args.args[3]
@@ -213,79 +213,79 @@ class DispatchTests(unittest.TestCase):
         self.assertTrue(spec["roles"][0]["allow_external_busy"])
 
     def test_accepted_execution_progress_is_not_an_mcp_error(self):
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.task_client import TaskClient
 
         for state, outcome in (("queued", "success"), ("preparing", "success"), ("waiting", "success"),
                                ("running", "success"), ("cancelled", "cancelled"),
                                ("uncertain", "blocked"), ("inconclusive", "failed"), ("timeout", "timeout")):
             with self.subTest(state=state), mock.patch.object(TaskClient, "observe", return_value={"execution_id": "e" * 64, "state": state}):
-                result = self.call("vaws_execution", execution_id="e" * 64)
+                result = self.call("mindie_execution", execution_id="e" * 64)
                 self.assertEqual(result["isError"], outcome not in {"success", "cancelled"})
                 self.assertEqual(result["structuredContent"]["outcome"], outcome)
                 self.assertEqual(result["structuredContent"]["data"]["state"], state)
 
     def test_pending_runtime_update_preserves_blocking_facts_without_claiming_admission(self):
-        from vaws_coordinator.task_client import TaskClient
+        from mindie_coordinator.task_client import TaskClient
 
         pending = {"state": "needs_runtime_update", "reason": "nonterminal executions remain",
                    "runtime_update": {"selected": [{"commit": "new"}], "daemon": [{"loaded": {"commit": "old"}}]},
                    "active_executions": [{"execution_id": "e" * 64, "state": "running"}]}
         with mock.patch.object(TaskClient, "run", return_value=pending):
-            result = self.call("vaws_run", command="true", sources={})
+            result = self.call("mindie_run", command="true", sources={})
         self.assertTrue(result["isError"])
         observation = result["structuredContent"]
         self.assertEqual((observation["outcome"], observation["status"]), ("blocked", "needs_runtime_update"))
         self.assertEqual(observation["data"], pending)
         self.assertNotIn("execution_id", observation["data"])
 
-    def test_vaws_execution_rejects_an_id_it_does_not_own_before_any_network(self):
-        result = self.call("vaws_execution", execution_id="not-an-id", action="status")
+    def test_mindie_execution_rejects_an_id_it_does_not_own_before_any_network(self):
+        result = self.call("mindie_execution", execution_id="not-an-id", action="status")
         self.assertTrue(result["isError"])
-        self.assertEqual(result["structuredContent"]["tool"], "vaws.execution")
+        self.assertEqual(result["structuredContent"]["tool"], "mindie.execution")
         self.assertEqual(result["structuredContent"]["outcome"], "blocked")
         self.assertIn("invalid local execution id", result["structuredContent"]["summary"])
 
-    def test_vaws_execution_rejects_another_task_before_the_coordinator(self):
+    def test_mindie_execution_rejects_another_task_before_the_coordinator(self):
         other = self.registry.store.attach("codex", "native-other", str(self.root))
         row = self.registry.store.execution(self.registry.context, "owned-fixture", {"command": "true"})
         row.update(phase="cancelled", user="alice", roles=[])
         self.registry.store.save_execution(row)
-        with mock.patch("vaws_coordinator.service.ensure_daemon",
+        with mock.patch("mindie_coordinator.service.ensure_daemon",
                         side_effect=AssertionError("coordinator must not start for a foreign execution")):
             for action in ("status", "tail", "stop", "target"):
                 with self.subTest(action=action):
                     response = handle({
                         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                        "params": {"name": "vaws_execution",
+                        "params": {"name": "mindie_execution",
                                    "arguments": {"context_file": other["context_file"],
                                                  "execution_id": row["id"], "action": action}},
                     })
                     result = response["result"]
                     self.assertTrue(result["isError"], result)
-                    self.assertEqual(result["structuredContent"]["tool"], "vaws.execution")
+                    self.assertEqual(result["structuredContent"]["tool"], "mindie.execution")
                     self.assertEqual(result["structuredContent"]["outcome"], "blocked")
-                    self.assertIn("another VAWS task", result["structuredContent"]["summary"])
+                    self.assertIn("another MindIE task", result["structuredContent"]["summary"])
         with self.registry.store.transaction() as db:
             latest = self.registry.store.get(db, "execution", row["id"])
         self.assertEqual(latest["phase"], "cancelled")
         self.assertFalse(latest.get("cancel_requested"))
 
-    def test_vaws_finish_completes_locally_and_the_dotted_name_is_still_accepted(self):
-        result = self.call("vaws.finish")
+    def test_mindie_finish_completes_locally_and_the_dotted_name_is_still_accepted(self):
+        result = self.call("mindie.finish")
         self.assertFalse(result["isError"])
-        self.assertEqual(result["structuredContent"]["tool"], "vaws.finish")
+        self.assertEqual(result["structuredContent"]["tool"], "mindie.finish")
         self.assertEqual((result["structuredContent"]["outcome"], result["structuredContent"]["status"]), ("success", "finished"))
         self.assertTrue(result["structuredContent"]["data"]["worktrees_preserved"])
 
     def test_a_missing_context_is_blocked_not_guessed(self):
-        response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "vaws_session"}})
+        response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "mindie_session"}})
         result = response["result"]
         self.assertTrue(result["isError"])
         self.assertEqual(result["structuredContent"]["status"], "unavailable")
         self.assertIn("context is required", result["structuredContent"]["summary"])
 
     def test_call_tool_uses_the_remote_dev_result_envelope(self):
-        result = call_tool("vaws_session", {"context_file": self.registry.context_file})
+        result = call_tool("mindie_session", {"context_file": self.registry.context_file})
         self.assertEqual(result["structuredContent"]["schema_version"], "remote-dev.result.v1")
         self.assertLessEqual({"tool", "invocation_id", "target", "outcome", "status", "summary", "warnings"},
                              set(result["structuredContent"]))
@@ -295,7 +295,7 @@ class StdioClient:
     def __init__(self, framed: bool, env: dict):
         self.framed = framed
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "vaws_coordinator", "task-server"],
+            [sys.executable, "-m", "mindie_coordinator", "task-server"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
         )
         self.sequence = 0
@@ -351,14 +351,14 @@ class LiveStdioTests(unittest.TestCase):
         self.assertEqual(init["result"]["serverInfo"]["version"], package_version())
         client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         names = [tool["name"] for tool in client.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(names, ["vaws_session", "vaws_run", "vaws_execution", "vaws_finish", "vaws_message"])
-        first = client.rpc("tools/call", {"name": "vaws_session", "arguments": {"context_file": self.registry.context_file}})
-        second = client.rpc("tools/call", {"name": "vaws_session", "arguments": {"context_file": self.registry.context_file}})
+        self.assertEqual(names, ["mindie_session", "mindie_run", "mindie_execution", "mindie_finish", "mindie_message"])
+        first = client.rpc("tools/call", {"name": "mindie_session", "arguments": {"context_file": self.registry.context_file}})
+        second = client.rpc("tools/call", {"name": "mindie_session", "arguments": {"context_file": self.registry.context_file}})
         for reply in (first, second):
             self.assertFalse(reply["result"]["isError"], reply)
         self.assertEqual(first["result"]["structuredContent"]["data"]["session"]["id"],
                          second["result"]["structuredContent"]["data"]["session"]["id"])
-        run = client.rpc("tools/call", {"name": "vaws_run", "arguments": {"context_file": self.registry.context_file,
+        run = client.rpc("tools/call", {"name": "mindie_run", "arguments": {"context_file": self.registry.context_file,
                                                                           "request_id": "r1", "command": "true"}})
         self.assertTrue(run["result"]["isError"])
         self.assertEqual(run["result"]["structuredContent"]["status"], "unavailable")

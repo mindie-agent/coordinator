@@ -11,8 +11,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator import runtime_profile as profile
-from vaws_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
+from mindie_coordinator import runtime_profile as profile
+from mindie_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
 
 
 @pytest.fixture
@@ -30,17 +30,17 @@ def prepared(tmp_path, monkeypatch):
             path = root / source / package
             path.mkdir(parents=True, exist_ok=True)
             (path / '__init__.py').write_text("raise RuntimeError('candidate Python failure')\n")
-            dist = root / '.vaws-runtime/metadata' / (package + '-2.0.dist-info')
+            dist = root / '.mindie-runtime/metadata' / (package + '-2.0.dist-info')
             dist.mkdir(parents=True)
             (dist / 'METADATA').write_text('Name: ' + source + '\nVersion: 2.0\n')
-        evidence = root / '.vaws-runtime/profile-evidence'
+        evidence = root / '.mindie-runtime/profile-evidence'
         evidence.mkdir()
         for name in ('cann', 'driver'):
             (evidence / (name + '.json')).write_text('{}')
     settings = {name: '1.0' for name in profile.PROFILE_FIELDS}
     settings.update(image_digest='sha256:fixture', soc='test-soc', compiler='test-compiler',
                     python_abi=sysconfig.get_config_var('SOABI'), vllm='2.0', vllm_ascend='2.0',
-                    build_env={}, launch_env={}, compatibility_evidence='.vaws-runtime/profile-evidence/smoke.json',
+                    build_env={}, launch_env={}, compatibility_evidence='.mindie-runtime/profile-evidence/smoke.json',
                     system_files={})
     for name in ('cann', 'driver'):
         system = tmp_path / name
@@ -49,7 +49,7 @@ def prepared(tmp_path, monkeypatch):
         settings['system_files'][name] = {'path': str(system), 'sha256': profile.file_digest(system)}
     inputs = {name: {'native': 'a' * 64, 'dependencies': 'b' * 64, 'build_env': 'c' * 64}
               for name in ('vllm', 'vllm-ascend')}
-    evidence = {name: '.vaws-runtime/profile-evidence/' + name + '.json' for name in ('cann', 'driver', 'smoke')}
+    evidence = {name: '.mindie-runtime/profile-evidence/' + name + '.json' for name in ('cann', 'driver', 'smoke')}
     original_smoke = {'passed': True, 'profile_key': profile.profile_key(settings), 'stdout': 'original import output'}
     (original / evidence['smoke']).write_text(json.dumps(original_smoke))
     donor = profile.capture(original, settings, inputs, files, evidence)
@@ -57,7 +57,7 @@ def prepared(tmp_path, monkeypatch):
     certificate = profile.native_compatibility_receipt(original, donor)
     for package in ('vllm', 'vllm_ascend'):
         monkeypatch.delitem(sys.modules, package, raising=False)
-    for path in (view / 'vllm', view / 'vllm-ascend', view / '.vaws-runtime/metadata'):
+    for path in (view / 'vllm', view / 'vllm-ascend', view / '.mindie-runtime/metadata'):
         monkeypatch.syspath_prepend(str(path))
     version = profile.importlib.metadata.version
     monkeypatch.setattr(profile.importlib.metadata, 'version',
@@ -109,7 +109,7 @@ def test_reused_proof_rejects_changes_even_if_new_manifest_is_recaptured(prepare
 
 def test_view_mapping_rejects_foreign_sources_and_changed_scm(prepared, monkeypatch, tmp_path):
     manifest, _ = prepared['capture']()
-    metadata = next((prepared['view'] / '.vaws-runtime/metadata').glob('vllm-*/METADATA'))
+    metadata = next((prepared['view'] / '.mindie-runtime/metadata').glob('vllm-*/METADATA'))
     metadata.write_text('Name: vllm\nVersion: 3.0\n')
     with pytest.raises(ValueError, match='SCM metadata mapping changed'):
         profile.verify(prepared['view'], manifest)
@@ -178,17 +178,17 @@ def test_capture_runs_import_only_when_no_complete_native_proof_is_available(pre
     monkeypatch.setenv('CXX', 'test-compiler')
     settings = copy.deepcopy(prepared['settings'])
     settings['launch_env'] = {'SOC_VERSION': 'test-soc', 'PYTHONPATH': ':'.join(
-        str(prepared['original'] / path) for path in ('.vaws-runtime/metadata', 'vllm', 'vllm-ascend'))}
+        str(prepared['original'] / path) for path in ('.mindie-runtime/metadata', 'vllm', 'vllm-ascend'))}
     donor = copy.deepcopy(prepared['donor'])
     donor['profile'] = settings
     certificate = copy.deepcopy(prepared['certificate'])
     certificate['key'] = profile.native_compatibility_key(donor)
-    proof = prepared['view'] / '.vaws-runtime/profile-evidence/native-compatibility.json'
+    proof = prepared['view'] / '.mindie-runtime/profile-evidence/native-compatibility.json'
     proof.write_text(json.dumps(certificate))
     reuse = {'kind': 'native', 'soc': 'test-soc', 'compiler': 'test-compiler'}
     if hot:
-        reuse['compatibility_evidence'] = '.vaws-runtime/profile-evidence/native-compatibility.json'
-    (prepared['view'] / '.vaws-runtime/reuse.json').write_text(json.dumps(reuse))
+        reuse['compatibility_evidence'] = '.mindie-runtime/profile-evidence/native-compatibility.json'
+    (prepared['view'] / '.mindie-runtime/reuse.json').write_text(json.dumps(reuse))
     request = {'root': str(prepared['view']), 'image_digest': 'sha256:fixture',
                'cann_files': [settings['system_files']['cann']['path']],
                'driver_files': [settings['system_files']['driver']['path']]}
@@ -201,11 +201,11 @@ def test_capture_runs_import_only_when_no_complete_native_proof_is_available(pre
                      _build_namespace={'runtime_build_inputs': lambda *args: prepared['inputs']})
     if hot:
         exec(compile(REMOTE_CAPTURE_SUFFIX, '<remote-profile>', 'exec'), namespace)
-        actual = json.loads((prepared['view'] / '.vaws-runtime/ready-profile.json').read_text())
+        actual = json.loads((prepared['view'] / '.mindie-runtime/ready-profile.json').read_text())
         profile.verify(prepared['view'], actual)
         run.assert_not_called()
     else:
         with pytest.raises(ValueError, match='import smoke failed'):
             exec(compile(REMOTE_CAPTURE_SUFFIX, '<remote-profile>', 'exec'), namespace)
         run.assert_called_once()
-        assert not (prepared['view'] / '.vaws-runtime/ready-profile.json').exists()
+        assert not (prepared['view'] / '.mindie-runtime/ready-profile.json').exists()

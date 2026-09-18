@@ -9,8 +9,8 @@ import sys
 
 import pytest
 
-from vaws_coordinator import native_kernel_recipe as recipe
-from vaws_coordinator.runtime_profile import compiled_opc_recipe
+from mindie_coordinator import native_kernel_recipe as recipe
+from mindie_coordinator.runtime_profile import compiled_opc_recipe
 
 
 GENERATOR = r'''
@@ -196,7 +196,7 @@ def test_incomplete_recipe_falls_back_before_any_compiler(compiler, damage, monk
     monkeypatch.setattr(recipe.subprocess, 'run', run)
     assert recipe.compile_kernel_recipe(root, plan, environment, read_recipe=compiled_opc_recipe) is False
     assert not (root / 'vllm-ascend/csrc/build').exists()
-    assert not list((root / '.vaws-runtime').glob('kernel-recipe-*'))
+    assert not list((root / '.mindie-runtime').glob('kernel-recipe-*'))
 
 
 def test_changed_verified_recipe_is_fatal(compiler):
@@ -216,7 +216,7 @@ def test_all_variants_use_current_cpp_in_real_compiler_processes(compiler):
     assert sorted(path.read_bytes() for path in output.glob('*.o')) == [b'new CPP\nbfloat16', b'new CPP\nfloat16', b'new CPP\nfloat32']
     assert len(list(output.glob('*.json'))) == 3
     assert {name: (root / name).read_bytes() for name in plan['recipe_files']} == before
-    assert not list((root / '.vaws-runtime').glob('kernel-recipe-*'))
+    assert not list((root / '.mindie-runtime').glob('kernel-recipe-*'))
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='the real owned compiler commands execute on Linux')
@@ -228,7 +228,7 @@ def test_failed_variant_waits_for_siblings_and_never_publishes_or_replays(compil
         recipe.compile_kernel_recipe(root, plan, environment, read_recipe=compiled_opc_recipe)
     assert sorted(completed.read_text().splitlines()) == ['bfloat16', 'float32']
     assert not (root / 'vllm-ascend/csrc/build').exists()
-    stages = list((root / '.vaws-runtime').glob('kernel-recipe-*'))
+    stages = list((root / '.mindie-runtime').glob('kernel-recipe-*'))
     assert len(stages) == 1
     assert len(list((stages[0] / 'binary' / plan['unit'] / 'bin/fixture').glob('*.o'))) == 2
 
@@ -248,7 +248,7 @@ def test_configuration_failure_preserves_completed_outputs_and_source_proofs(com
     environment['FAIL_CONFIG'] = '1'
     with pytest.raises(subprocess.CalledProcessError):
         recipe.compile_kernel_recipe(root, plan, environment, read_recipe=compiled_opc_recipe)
-    stages = list((root / '.vaws-runtime').glob('kernel-recipe-*'))
+    stages = list((root / '.mindie-runtime').glob('kernel-recipe-*'))
     assert len(stages) == 1
     assert str(stages[0]) in capsys.readouterr().out
     output = stages[0] / 'binary' / plan['unit'] / 'bin/fixture'
@@ -259,8 +259,8 @@ def test_configuration_failure_preserves_completed_outputs_and_source_proofs(com
 
 @pytest.mark.skipif(os.name == 'nt', reason='the real owned compiler commands execute on Linux')
 def test_rendered_owner_entry_compiles_merges_and_preserves_next_recipe(compiler):
-    from vaws_coordinator.parity import runtime_install_step_script, task_python_exports
-    from vaws_coordinator.runtime_profile import capture_kernel_compile_recipe
+    from mindie_coordinator.parity import runtime_install_step_script, task_python_exports
+    from mindie_coordinator.runtime_profile import capture_kernel_compile_recipe
     root, plan, environment, _ = compiler
     op, unit = plan['operator'], plan['unit']
     config = root / plan['kernel_root'] / 'config' / unit
@@ -275,10 +275,10 @@ def test_rendered_owner_entry_compiles_merges_and_preserves_next_recipe(compiler
     write(config / 'relocatable_kernel_info_config.json', '{}')
     plan['recipe_files'][(config / 'fixture.json').relative_to(root).as_posix()] = digest(config / 'fixture.json')
     plan['installed_source'] = next(name for name in plan['recipe_files'] if name.endswith('/ascendc/fixture/fixture.cpp'))
-    marker = write(root / '.vaws-runtime/native-incremental.json', json.dumps(plan))
+    marker = write(root / '.mindie-runtime/native-incremental.json', json.dumps(plan))
     shell = runtime_install_step_script(runtime_root=str(root), marker_dirname='.runtime',
         container_identity='fixture', step='install-vllm-ascend-incremental', python=sys.executable)
-    program = shell.split("<<'VAWS_NATIVE_INCREMENTAL'\n", 1)[1].split('\nVAWS_NATIVE_INCREMENTAL', 1)[0]
+    program = shell.split("<<'MINDIE_NATIVE_INCREMENTAL'\n", 1)[1].split('\nMINDIE_NATIVE_INCREMENTAL', 1)[0]
     # Run the actual owner shell exports, including its nonempty CMAKE_ARGS,
     # before executing the rendered compiler program.
     command = '\n'.join(task_python_exports(sys.executable)) + '\n"$PYTHON" - "$1" <<\'COMPILER\'\n' + program + '\nCOMPILER\n'

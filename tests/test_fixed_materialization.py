@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from vaws_coordinator import parity
-from vaws_coordinator.execution_sources import source_identity
+from mindie_coordinator import parity
+from mindie_coordinator.execution_sources import source_identity
 
 
 def git(repo, *args):
@@ -25,7 +25,7 @@ def make_record(repo, name, *, submodules=()):
 
 
 def snapshot(records):
-    result = {'schema_version': 'vaws.execution-sources.v1', 'sources': {},
+    result = {'schema_version': 'mindie.execution-sources.v1', 'sources': {},
               'records': [asdict(row) for row in records], 'build_env': {}}
     result['id'] = source_identity(result)
     return result
@@ -79,7 +79,7 @@ def test_build_metadata_is_written_only_by_completed_materialization(peer, monke
     def stream(*args, **kwargs):
         result = peer.stream(*args, **kwargs)
         reply = json.loads(result.stdout)
-        marker = peer.root / '.vaws-runtime/build-source.json'
+        marker = peer.root / '.mindie-runtime/build-source.json'
         observed.append(reply['status'])
         if reply['status'] == 'missing':
             assert not marker.exists()
@@ -91,12 +91,12 @@ def test_build_metadata_is_written_only_by_completed_materialization(peer, monke
     peer.run(build_source=payload)
     assert observed == ['missing', 'materialized']
     assert len(peer.commands) == 2
-    assert not list((peer.root / '.vaws-runtime').glob('.build-source-*'))
+    assert not list((peer.root / '.mindie-runtime').glob('.build-source-*'))
 
 
 def test_build_metadata_write_failure_does_not_return_success(peer):
     peer.run()
-    marker = peer.root / '.vaws-runtime/build-source.json'
+    marker = peer.root / '.mindie-runtime/build-source.json'
     marker.mkdir()
     with pytest.raises(RuntimeError):
         peer.run(build_source={'versions': {}})
@@ -117,8 +117,8 @@ def test_shared_hit_copies_only_exact_objects_to_private_owner(peer, tmp_path):
     private = Path(parity.mirror_path_for(str(peer.cache), 'other-owner', record))
     assert git(original_mirror, 'show-ref') == original_refs
     assert set(git(private, 'for-each-ref', '--format=%(refname)').splitlines()) == {
-        'refs/vaws/snapshots/' + record.commit, 'refs/parity/other-owner/transport-carrier'}
-    assert git(Path(shared) / 'project.git', 'for-each-ref', '--format=%(refname)') == 'refs/vaws/snapshots/' + record.commit
+        'refs/mindie/snapshots/' + record.commit, 'refs/parity/other-owner/transport-carrier'}
+    assert git(Path(shared) / 'project.git', 'for-each-ref', '--format=%(refname)') == 'refs/mindie/snapshots/' + record.commit
     assert not (private / 'objects/info/alternates').exists()
     # Clearing a shared cache cannot change an already admitted private tree.
     import shutil
@@ -128,7 +128,7 @@ def test_shared_hit_copies_only_exact_objects_to_private_owner(peer, tmp_path):
 
 
 def test_cold_owner_automatically_exports_legacy_exact_objects(peer, tmp_path, monkeypatch):
-    from vaws_coordinator.shared_source_objects import export_container_objects
+    from mindie_coordinator.shared_source_objects import export_container_objects
     record = make_record(peer.source, 'project')
     peer.run([record])  # Historical private mirror, no prior shared publication.
     shared = str(tmp_path / 'shared')
@@ -172,7 +172,7 @@ def test_cold_owner_small_edit_uses_shared_fixed_base_without_full_push(peer, tm
     assert (peer.root.parent / 'new-owner-edit/project/model.py').read_text() == 'value = 2\n'
     assert (peer.root / 'project/model.py').read_text() == 'value = 1\n'
     private = parity.mirror_path_for(str(peer.cache), 'other', second)
-    assert git(private, 'rev-parse', 'refs/vaws/snapshots/' + first.commit) == first.commit
+    assert git(private, 'rev-parse', 'refs/mindie/snapshots/' + first.commit) == first.commit
 
 
 @pytest.mark.parametrize('foreign_snapshot', [False, True])
@@ -200,7 +200,7 @@ def test_disconnected_snapshots_pack_only_the_cpp_edit_for_a_new_owner(peer, tmp
     donor = parity.mirror_path_for(str(peer.cache), 'test', first)
     donor_refs = git(donor, 'show-ref')
     if foreign_snapshot:
-        from vaws_coordinator.shared_source_objects import copy_fixed_objects
+        from mindie_coordinator.shared_source_objects import copy_fixed_objects
         foreign = tmp_path / 'independent-source'
         git(tmp_path, 'clone', '--local', str(peer.source), str(foreign))
         (foreign / 'marker.py').write_text("marker = 'another source copy'\n")
@@ -216,10 +216,10 @@ def test_disconnected_snapshots_pack_only_the_cpp_edit_for_a_new_owner(peer, tmp
         assert 'parent ' not in git(foreign, 'cat-file', '-p', unknown)
         assert parity.git(peer.source, ['cat-file', '-e', unknown], check=False).returncode
         assert git(Path(shared) / 'project.git', 'for-each-ref', '--count=1', '--sort=-creatordate',
-                   '--format=%(objectname)', 'refs/vaws/snapshots/') == unknown
+                   '--format=%(objectname)', 'refs/mindie/snapshots/') == unknown
         # Keep the older fixed input ref, without a local transport association
         # for this recipient. A different source copy must not hide that base.
-        git(peer.source, 'update-ref', 'refs/vaws/inputs/old-source/project', first.commit)
+        git(peer.source, 'update-ref', 'refs/mindie/inputs/old-source/project', first.commit)
         for ref in git(peer.source, 'for-each-ref', '--format=%(refname)', 'refs/parity-transport').splitlines():
             git(peer.source, 'update-ref', '-d', ref)
     cpp.write_text('int Operator(int recipient_op) { return recipient_op + 1; }\n')
@@ -323,7 +323,7 @@ def test_fresh_shared_clone_hint_preserves_queued_edit_and_uses_verified_base(
 
 
 def test_shared_publications_are_serialized_and_keep_both_snapshots(peer, tmp_path):
-    from vaws_coordinator.shared_source_objects import copy_fixed_objects
+    from mindie_coordinator.shared_source_objects import copy_fixed_objects
     first = make_record(peer.source, 'project')
     (peer.source / 'model.py').write_text('value = 2\n')
     git(peer.source, 'commit', '-am', 'second')
@@ -338,7 +338,7 @@ def test_shared_publications_are_serialized_and_keep_both_snapshots(peer, tmp_pa
 
 
 def test_shared_wrong_tree_and_missing_blob_never_publish_success(peer, tmp_path):
-    from vaws_coordinator.shared_source_objects import copy_fixed_objects
+    from mindie_coordinator.shared_source_objects import copy_fixed_objects
     record = make_record(peer.source, 'project')
     shared = tmp_path / 'shared.git'
     with pytest.raises(ValueError, match='wrong tree'):
@@ -353,20 +353,20 @@ def test_shared_wrong_tree_and_missing_blob_never_publish_success(peer, tmp_path
 
 
 def test_uncertain_legacy_export_does_not_fall_back_to_upload(peer, tmp_path, monkeypatch):
-    from vaws_coordinator.preparation_process import PreparationUncertain
+    from mindie_coordinator.preparation_process import PreparationUncertain
     def unknown(*args):
         raise PreparationUncertain('lost export reply')
     monkeypatch.setattr(parity, '_export_existing_source_objects', unknown)
     with pytest.raises(PreparationUncertain, match='lost export reply'):
         peer.run(shared_cache=str(tmp_path / 'shared'), host={'host': 'fixture'})
     assert len(peer.commands) == 1 and not peer.transfers
-    assert not (peer.root / '.vaws-runtime/source-materialization.json').exists()
+    assert not (peer.root / '.mindie-runtime/source-materialization.json').exists()
 
 
 @pytest.mark.parametrize('failure', [PermissionError('read only'), OSError('no space'),
                                      ValueError('corrupt shared cache')])
 def test_private_snapshot_does_not_require_shared_publication(peer, tmp_path, monkeypatch, capsys, failure):
-    from vaws_coordinator import parity_support
+    from mindie_coordinator import parity_support
     record = make_record(peer.source, 'project')
     peer.run([record])
     def fail(*args):
@@ -398,7 +398,7 @@ def test_bad_shared_candidate_falls_back_to_verified_git_upload(peer, tmp_path):
 
 
 def test_private_snapshot_does_not_swallow_shared_copy_timeout(peer, tmp_path, monkeypatch):
-    from vaws_coordinator import parity_support
+    from mindie_coordinator import parity_support
     record = make_record(peer.source, 'project')
     peer.run([record])
     def timeout(*args):
@@ -412,11 +412,11 @@ def test_private_snapshot_does_not_swallow_shared_copy_timeout(peer, tmp_path, m
             'records': [{**asdict(record), 'mirror': parity.mirror_path_for(str(peer.cache), 'test', record),
                          'shared_mirror': str(tmp_path / 'shared.git')}],
         })
-    assert not (runtime / '.vaws-runtime/source-materialization.json').exists()
+    assert not (runtime / '.mindie-runtime/source-materialization.json').exists()
 
 
 def test_invalid_legacy_mirror_does_not_hide_valid_donor(peer, tmp_path, monkeypatch):
-    from vaws_coordinator import shared_source_objects as shared
+    from mindie_coordinator import shared_source_objects as shared
     record = make_record(peer.source, 'project')
     parent = tmp_path / 'legacy/workspaces'
     broken = parent / 'first/mirrors/nested/project.git'
@@ -447,7 +447,7 @@ def test_cold_two_operations_warm_one_without_recapture(peer):
     result = peer.run([record])
     assert result['status'] == 'materialized'
     assert len(peer.commands) == 2 and len(peer.transfers) == 1
-    assert peer.transfers[0][-2].startswith(record.commit + ':refs/vaws/snapshots/')
+    assert peer.transfers[0][-2].startswith(record.commit + ':refs/mindie/snapshots/')
     peer.commands.clear()
     peer.transfers.clear()
     # Current user files and even local retained refs are irrelevant on a hit.
@@ -479,7 +479,7 @@ def test_concurrent_roots_ignore_mutable_mirror_refs(peer):
                                     [(first, 'parallel-one'), (second, 'parallel-two')]))
     assert [row['commits']['project'] for row in results] == [first.commit, second.commit]
     assert len(peer.commands) == 2
-    assert git(mirror, 'rev-parse', 'refs/vaws/snapshots/' + first.commit) == first.commit
+    assert git(mirror, 'rev-parse', 'refs/mindie/snapshots/' + first.commit) == first.commit
 
 
 def test_missing_reply_does_not_touch_root_and_transfer_failure_keeps_mirror(peer, monkeypatch):
@@ -488,7 +488,7 @@ def test_missing_reply_does_not_touch_root_and_transfer_failure_keeps_mirror(pee
     monkeypatch.setattr(parity, '_fixed_inline_pack', lambda *args, **kwargs: None)
     first = make_record(peer.source, 'project')
     peer.run([first])
-    receipt = peer.root / '.vaws-runtime/source-materialization.json'
+    receipt = peer.root / '.mindie-runtime/source-materialization.json'
     before = receipt.read_bytes()
     (peer.source / 'model.py').write_text('value = 2\n')
     git(peer.source, 'commit', '-am', 'second')
@@ -504,13 +504,13 @@ def test_missing_reply_does_not_touch_root_and_transfer_failure_keeps_mirror(pee
         peer.run([second])
     assert receipt.read_bytes() == before
     mirror = parity.mirror_path_for(str(peer.cache), 'test', first)
-    assert git(mirror, 'rev-parse', 'refs/vaws/snapshots/' + first.commit) == first.commit
+    assert git(mirror, 'rev-parse', 'refs/mindie/snapshots/' + first.commit) == first.commit
 
 
 def test_small_edit_uses_owned_rpc_pack_and_preserves_previous_root(peer):
     first = make_record(peer.source, 'project')
     peer.run([first])
-    before = (peer.root / '.vaws-runtime/source-materialization.json').read_bytes()
+    before = (peer.root / '.mindie-runtime/source-materialization.json').read_bytes()
     (peer.source / 'model.py').write_text('value = 2\n')
     git(peer.source, 'commit', '-am', 'second')
     second = make_record(peer.source, 'project')
@@ -522,10 +522,10 @@ def test_small_edit_uses_owned_rpc_pack_and_preserves_previous_root(peer):
     assert "'inline_packs':" in peer.commands[-1]
     assert (peer.root.parent / 'second/project/model.py').read_text() == 'value = 2\n'
     assert (peer.root / 'project/model.py').read_text() == 'value = 1\n'
-    assert (peer.root / '.vaws-runtime/source-materialization.json').read_bytes() == before
+    assert (peer.root / '.mindie-runtime/source-materialization.json').read_bytes() == before
     mirror = parity.mirror_path_for(str(peer.cache), 'test', first)
     for row in (first, second):
-        assert git(mirror, 'rev-parse', 'refs/vaws/snapshots/' + row.commit) == row.commit
+        assert git(mirror, 'rev-parse', 'refs/mindie/snapshots/' + row.commit) == row.commit
 
 
 @pytest.mark.parametrize('damage, message', [('digest', 'size or digest differs'),
@@ -548,12 +548,12 @@ def test_invalid_inline_pack_never_materializes_or_changes_pins(peer, monkeypatc
     with pytest.raises(RuntimeError, match=message):
         peer.run([second], root='second')
     assert len(peer.commands) == 2 and not peer.transfers
-    assert not (peer.root.parent / 'second/.vaws-runtime/source-materialization.json').exists()
+    assert not (peer.root.parent / 'second/.mindie-runtime/source-materialization.json').exists()
     assert not (peer.root.parent / 'second/project').exists()
     mirror = parity.mirror_path_for(str(peer.cache), 'test', first)
-    assert git(mirror, 'rev-parse', 'refs/vaws/snapshots/' + first.commit) == first.commit
+    assert git(mirror, 'rev-parse', 'refs/mindie/snapshots/' + first.commit) == first.commit
     assert subprocess.run(['git', '-C', mirror, 'show-ref', '--verify',
-                           'refs/vaws/snapshots/' + second.commit], capture_output=True).returncode
+                           'refs/mindie/snapshots/' + second.commit], capture_output=True).returncode
 
 
 def test_unknown_inline_materialization_is_not_replayed(peer, monkeypatch):
@@ -651,12 +651,12 @@ def test_verification_failure_never_publishes_receipt(peer, monkeypatch):
     monkeypatch.setattr(parity, 'ssh_exec_stream', corrupt)
     with pytest.raises(RuntimeError, match='git diff failed'):
         peer.run([record])
-    assert not (peer.root / '.vaws-runtime/source-materialization.json').exists()
+    assert not (peer.root / '.mindie-runtime/source-materialization.json').exists()
 
 
 def test_owned_missing_and_materialize_use_distinct_durable_jobs(peer, monkeypatch):
-    from vaws_coordinator import preparation_process
-    from vaws_coordinator.parity_support import ssh_exec_stream
+    from mindie_coordinator import preparation_process
+    from mindie_coordinator.parity_support import ssh_exec_stream
     jobs, saved = [], []
     def control(endpoint, job_id, action, **kwargs):
         assert action == 'launch'
@@ -688,7 +688,7 @@ def test_owned_missing_and_materialize_use_distinct_durable_jobs(peer, monkeypat
         assert json.loads(receipt.read_text()) == {'job_id': job_id, 'owned': True}
 
 
-@pytest.mark.parametrize('name', ['.remote-dev', '.remote-dev/nested', '.vaws-runtime', '.venv', '.git'])
+@pytest.mark.parametrize('name', ['.remote-dev', '.remote-dev/nested', '.mindie-runtime', '.venv', '.git'])
 def test_sources_cannot_overlap_owned_runtime_directories(tmp_path, monkeypatch, name):
     row = parity.SnapshotRecord(name, name.replace('/', '__'), 'a' * 40, None, 'a' * 40,
                                'b' * 40, 'refs/input', [], [], source_path=str(tmp_path))

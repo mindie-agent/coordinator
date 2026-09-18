@@ -13,9 +13,9 @@ import sysconfig
 
 import pytest
 
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.parity_support import RemoteCommandError
-from vaws_coordinator.runtime_profile import digest, launch_preamble, profile_key
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.parity_support import RemoteCommandError
+from mindie_coordinator.runtime_profile import digest, launch_preamble, profile_key
 
 
 class LocalProbeBackend(RemoteBackend):
@@ -30,8 +30,8 @@ class LocalProbeBackend(RemoteBackend):
     def bash(self, target, command):
         if command.startswith("docker inspect"):
             return json.dumps(self.container)
-        header, body = command.split(" <<'VAWS_READY_PROBE'\n", 1)
-        script, trailer = body.rsplit("\nVAWS_READY_PROBE\n", 1)
+        header, body = command.split(" <<'MINDIE_READY_PROBE'\n", 1)
+        script, trailer = body.rsplit("\nMINDIE_READY_PROBE\n", 1)
         assert not trailer
         arguments = shlex.split(header.splitlines()[-1])
         request = arguments[2]
@@ -83,7 +83,7 @@ def prepared_view(tmp_path):
         # This field is outside profile/build keys; equality must still cover it.
         "preparation": {"notes": "retained-metadata" * 22000, "generation": 1},
     }
-    marker = root / ".vaws-runtime/ready-profile.json"
+    marker = root / ".mindie-runtime/ready-profile.json"
     marker.parent.mkdir()
     marker.write_text(json.dumps(manifest), encoding="utf-8")
     backend = LocalProbeBackend()

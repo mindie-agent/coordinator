@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-from vaws_coordinator import service
-from vaws_coordinator.agent_session import AgentSessions
+from mindie_coordinator import service
+from mindie_coordinator.agent_session import AgentSessions
 
 IPCClient = service.CoordinatorClient
 
@@ -17,7 +17,7 @@ def daemon(tmp_path, monkeypatch):
     owner = service.CoordinatorService(state)
     marker = state / "test-listener"
     marker.touch()
-    current = {"package": "vaws-coordinator", "version": "0.4.1.dev1", "commit": "current-commit",
+    current = {"package": "mindie-coordinator", "version": "0.4.1.dev1", "commit": "current-commit",
                "python": sys.executable, "location": "/current/site-packages", "pid": 999}
     loaded = {**current, "commit": "previous-commit", "pid": 100}
     calls, launches, restart_error = [], [], []
@@ -57,7 +57,7 @@ def daemon(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("difference", ["commit", "python", "location", "version"])
-@pytest.mark.parametrize("package", ["vaws-coordinator", "vaws-remote-dev"])
+@pytest.mark.parametrize("package", ["mindie-coordinator", "remote-dev"])
 def test_idle_different_daemon_restarts_with_selected_interpreter(daemon, difference, package):
     state, owner, current, loaded, calls, launches, *_ = daemon
     current["package"] = package
@@ -67,7 +67,7 @@ def test_idle_different_daemon_restarts_with_selected_interpreter(daemon, differ
     assert calls == ["ping", "ping", "restart_if_idle", "ping"]
     assert client.runtime[0]["loaded"] == {**current, "pid": 101}
     assert len(launches) == 1
-    assert launches[0][0] == [sys.executable, "-m", "vaws_coordinator", "daemon", "--state-dir", str(state)]
+    assert launches[0][0] == [sys.executable, "-m", "mindie_coordinator", "daemon", "--state-dir", str(state)]
 
 
 def test_identical_code_different_pid_does_not_restart(daemon):

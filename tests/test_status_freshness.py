@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import test_coordinator as fixtures
-from vaws_coordinator.ops import vaws_call
-from vaws_coordinator.service import CoordinatorClient, STATUS_CACHE_SECONDS
+from mindie_coordinator.ops import mindie_call
+from mindie_coordinator.service import CoordinatorClient, STATUS_CACHE_SECONDS
 
 
 @pytest.fixture
@@ -105,12 +105,12 @@ def test_busy_refresh_returns_age_and_deferred_without_waiting_for_execution(tas
 def test_task_tool_defaults_to_cache_and_preserves_freshness_in_compact_output(task):
     execution = task.client.run("true")["execution_id"]
     task.client.observe(execution)
-    with mock.patch("vaws_coordinator.task_client.TaskClient", return_value=task.client):
+    with mock.patch("mindie_coordinator.task_client.TaskClient", return_value=task.client):
         with mock.patch.object(task.pool, "managed_control", wraps=task.pool.managed_control) as control:
-            cached = vaws_call("vaws.execution", {"execution_id": execution})["result"]
+            cached = mindie_call("mindie.execution", {"execution_id": execution})["result"]
             assert control.call_count == 0
             assert cached["data"]["observation_freshness"]["source"] == "cache"
-            fresh = vaws_call("vaws.execution", {"execution_id": execution, "refresh": True})["result"]
+            fresh = mindie_call("mindie.execution", {"execution_id": execution, "refresh": True})["result"]
             assert control.call_count == 1
             assert fresh["data"]["observation_freshness"]["source"] == "refreshed"
 
@@ -120,14 +120,14 @@ def test_daemon_tick_supervises_an_attached_job_once(task):
     task.backend.calls.clear()
     def inline_thread(*, target, args, **kwargs):
         return SimpleNamespace(start=lambda: target(*args))
-    with mock.patch("vaws_coordinator.service.threading.Thread", side_effect=inline_thread):
+    with mock.patch("mindie_coordinator.service.threading.Thread", side_effect=inline_thread):
         task.client.coordinator._dispatch_progress()
     assert task.backend.calls.count(("job", "status")) == 1
     assert task.backend.calls.count(("host", "heartbeat")) == 1
 
 
 def test_cached_status_never_admits_a_planned_execution(task):
-    from vaws_coordinator.execution_sources import capture_sources
+    from mindie_coordinator.execution_sources import capture_sources
     spec = {"command": "true", "env": {}, "environment": {}, "resources": {}, "topology": {},
             "roles": [{"name": "default", "command": "true", "npu_count": 1}],
             "source_snapshot": capture_sources({}, task.store.state_dir), "timeout_seconds": 30, "service": None}
@@ -192,13 +192,13 @@ def test_slow_role_does_not_block_a_healthy_siblings_lease_renewal(task):
 
 
 def test_cached_status_still_rejects_another_task_before_remote_control(task):
-    from vaws_coordinator.task_client import TaskClient
+    from mindie_coordinator.task_client import TaskClient
     execution = task.client.run("true")["execution_id"]
     task.client.observe(execution)
     foreign = task.store.attach("codex", "another-native-task", str(task.root))
     other = TaskClient(foreign["context_file"], user="alice", service=task.client.coordinator)
     with mock.patch.object(task.pool, "managed_control", side_effect=AssertionError("must not probe")):
-        with pytest.raises(ValueError, match="another VAWS task"):
+        with pytest.raises(ValueError, match="another MindIE task"):
             other.observe(execution, refresh=False)
 
 
@@ -207,10 +207,10 @@ def test_ipc_and_cli_forward_explicit_refresh_without_overwriting_json(task):
     with mock.patch.object(client, "call") as call:
         client.advance(task.root, "alice", "a" * 64, refresh=False)
     assert call.call_args.kwargs["refresh"] is False
-    from vaws_coordinator import vaws
+    from mindie_coordinator import mindie
     for options in (["--refresh"], ["--json", '{"refresh":true}']):
-        with mock.patch("sys.argv", ["vaws", "execution", "--execution-id", "a" * 64, *options]):
-            with mock.patch.object(vaws, "vaws_call", return_value={"result": {"outcome": "success"}}) as call:
+        with mock.patch("sys.argv", ["mindie", "execution", "--execution-id", "a" * 64, *options]):
+            with mock.patch.object(mindie, "mindie_call", return_value={"result": {"outcome": "success"}}) as call:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    assert vaws.main() == 0
+                    assert mindie.main() == 0
         assert call.call_args.args[1]["refresh"] is True

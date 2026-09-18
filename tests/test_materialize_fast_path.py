@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator import parity
+from mindie_coordinator import parity
 
 
 @pytest.mark.parametrize("matches", [True, False])

@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from vaws_coordinator.service import CoordinatorClient, ensure_daemon, socket_path
+from mindie_coordinator.service import CoordinatorClient, ensure_daemon, socket_path
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows IPC")

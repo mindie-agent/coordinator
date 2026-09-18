@@ -5,15 +5,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from vaws_coordinator.agent_session import worktree_reference
-from vaws_coordinator.code_identity import code_identity
-from vaws_coordinator.git_sources import ensure_populated_worktree
-from vaws_coordinator.parity import build_snapshot_records
-from vaws_coordinator.state_paths import shared_workspace_root
+from mindie_coordinator.agent_session import worktree_reference
+from mindie_coordinator.code_identity import code_identity
+from mindie_coordinator.git_sources import ensure_populated_worktree
+from mindie_coordinator.parity import build_snapshot_records
+from mindie_coordinator.state_paths import shared_workspace_root
 
 
 def test_snapshot_ref_beyond_windows_path_limit(tmp_path):
-    from vaws_coordinator.parity_support import git
+    from mindie_coordinator.parity_support import git
     root = tmp_path / "nested-source"
     root.mkdir()
     git(root, ["init", "-q"])
@@ -28,7 +28,7 @@ def test_snapshot_ref_beyond_windows_path_limit(tmp_path):
 
 def test_remote_profile_absolute_paths_do_not_depend_on_client_os():
     import pytest
-    from vaws_coordinator.runtime_profile import PROFILE_FIELDS, profile_key, launch_preamble
+    from mindie_coordinator.runtime_profile import PROFILE_FIELDS, profile_key, launch_preamble
     profile = {key: "test" for key in PROFILE_FIELDS}
     profile.update(build_env={}, launch_env={}, compatibility_evidence="fixture",
                    system_files={name: {"path": f"/usr/local/{name}/version.info", "sha256": "a" * 64}
@@ -42,7 +42,7 @@ def test_remote_profile_absolute_paths_do_not_depend_on_client_os():
 
 def test_remote_upload_uses_posix_parent_and_exact_bytes(monkeypatch):
     from types import SimpleNamespace
-    from vaws_coordinator.parity_support import SshEndpoint, ssh_stream_to_file, ssh_stream_bytes_to_file
+    from mindie_coordinator.parity_support import SshEndpoint, ssh_stream_to_file, ssh_stream_bytes_to_file
     calls = []
 
     def capture(endpoint, script, *, stdin, timeout_ms):
@@ -76,10 +76,10 @@ def test_unicode_worktree_binding_snapshot_and_cli(tmp_path):
     assert code_identity(root)["dirty"]
     rows = build_snapshot_records(root, "unicode", "test", ())
     assert rows and rows[0].commit
-    proc = subprocess.run([sys.executable, "-m", "vaws_coordinator.vaws", "attach", "--client", "codex",
+    proc = subprocess.run([sys.executable, "-m", "mindie_coordinator.mindie", "attach", "--client", "codex",
                            "--native-session-id", "unicode-test", "--cwd", str(root)],
                           capture_output=True, timeout=15,
-                          env={**os.environ, "VAWS_AGENT_SESSIONS_DIR": str(tmp_path / "sessions"),
+                          env={**os.environ, "MINDIE_AGENT_SESSIONS_DIR": str(tmp_path / "sessions"),
                                "PYTHONIOENCODING": "cp936" if os.name == "nt" else "utf-8"})
     assert proc.returncode == 0, proc.stderr
     assert "中文 🧪" in json.dumps(json.loads(proc.stdout.decode("utf-8")), ensure_ascii=False)

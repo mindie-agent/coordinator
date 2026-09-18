@@ -4,24 +4,24 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.hooks.vaws_session import handle
-from vaws_coordinator.ready_runtime import user_container_name
-from vaws_coordinator.task_client import TaskClient, coordinator_user
-from vaws_coordinator.user_identity import IDENTITY_FILE_ENV, load_github_identity
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.hooks.mindie_session import handle
+from mindie_coordinator.ready_runtime import user_container_name
+from mindie_coordinator.task_client import TaskClient, coordinator_user
+from mindie_coordinator.user_identity import IDENTITY_FILE_ENV, load_github_identity
 
 
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
-    for name in (IDENTITY_FILE_ENV, "VAWS_CONTEXT_FILE", "VAWS_PARENT_CONTEXT", "VAWS_ATTACH_CONTEXT",
+    for name in (IDENTITY_FILE_ENV, "MINDIE_CONTEXT_FILE", "MINDIE_PARENT_CONTEXT", "MINDIE_ATTACH_CONTEXT",
                  "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr("vaws_coordinator.task_client.getpass.getuser", lambda: "root")
+    monkeypatch.setattr("mindie_coordinator.task_client.getpass.getuser", lambda: "root")
 
 
 def identity(tmp_path, login="Alice", user_id=42):
     path = tmp_path / f"{login} 身份.json"
-    path.write_text(json.dumps({"schema": "vaws.github.v1", "login": login,
+    path.write_text(json.dumps({"schema": "mindie.github.v1", "login": login,
                                "github_user_id": user_id}), encoding="utf-8")
     return path
 
@@ -37,7 +37,7 @@ def test_configured_user_drives_task_and_default_container(tmp_path, monkeypatch
     owner = Mock()
     client = TaskClient(native["context_file"], service=owner)
     assert coordinator_user() == client.user == "alice"
-    assert user_container_name(client.user) == "vaws-alice"
+    assert user_container_name(client.user) == "mindie-alice"
     assert client.context["session"]["user"] == "alice"
     assert client.context["session"]["github_identity"]["github_user_id"] == 42
     assert owner.mock_calls == []
@@ -45,13 +45,13 @@ def test_configured_user_drives_task_and_default_container(tmp_path, monkeypatch
 
 def test_confirmed_login_only_binds_local_task_without_github_authentication(tmp_path, monkeypatch):
     path = tmp_path / 'identity-only.json'
-    path.write_text(json.dumps({'schema': 'vaws.github.v1', 'login': 'Alice'}), encoding='utf-8')
+    path.write_text(json.dumps({'schema': 'mindie.github.v1', 'login': 'Alice'}), encoding='utf-8')
     monkeypatch.setenv(IDENTITY_FILE_ENV, str(path))
     native = context(tmp_path)
     owner = Mock()
     client = TaskClient(native['context_file'], service=owner)
     assert coordinator_user() == client.user == 'alice'
-    assert client.context['session']['github_identity'] == {'schema': 'vaws.github.v1', 'login': 'alice'}
+    assert client.context['session']['github_identity'] == {'schema': 'mindie.github.v1', 'login': 'alice'}
     path.unlink()
     assert TaskClient(native['context_file'], service=owner).user == 'alice'
     assert owner.mock_calls == []
@@ -101,8 +101,8 @@ def test_explicit_identity_path_wins_without_changing_process_environment(tmp_pa
 
 @pytest.mark.parametrize("document,reason", [
     ("{broken", "not valid UTF-8 JSON"),
-    ('{"schema":"other"}', "schema vaws.github.v1"),
-    ('{"schema":"vaws.github.v1","login":"bad/login","github_user_id":42}', "invalid personal login"),
+    ('{"schema":"other"}', "schema mindie.github.v1"),
+    ('{"schema":"mindie.github.v1","login":"bad/login","github_user_id":42}', "invalid personal login"),
 ])
 def test_invalid_configured_identity_explains_the_error_and_does_not_bind_root(tmp_path, document, reason):
     path = tmp_path / "identity.json"
@@ -150,8 +150,8 @@ def test_legacy_execution_attribution_is_retained(tmp_path):
 
 @pytest.mark.parametrize("via_cli", [False, True])
 def test_provision_uses_configured_user_with_shared_root_transport(tmp_path, monkeypatch, via_cli, capsys):
-    from vaws_coordinator import provision
-    from vaws_coordinator.cli import main
+    from mindie_coordinator import provision
+    from mindie_coordinator.cli import main
 
     monkeypatch.setenv(IDENTITY_FILE_ENV, str(identity(tmp_path)))
     directory = Mock()
@@ -169,10 +169,10 @@ def test_provision_uses_configured_user_with_shared_root_transport(tmp_path, mon
     else:
         result = provision.provision_user_container(host="shared-host", image="stable")
     assert result["user"] == "alice"
-    assert result["container_name"] == "vaws-alice"
+    assert result["container_name"] == "mindie-alice"
     boot = calls.call_args_list[1]
     assert boot.args[0].user == "root"
-    assert boot.kwargs["args"][0] == "vaws-alice"
+    assert boot.kwargs["args"][0] == "mindie-alice"
     assert boot.kwargs["args"][5] == "alice"
     assert boot.kwargs["args"][1] == '2222'
     assert [call.kwargs.get('reuse_connection', False) for call in calls.call_args_list] == [True, False, True]
@@ -182,7 +182,7 @@ def test_provision_uses_configured_user_with_shared_root_transport(tmp_path, mon
 
 
 def test_provision_invalid_config_fails_before_remote_work(tmp_path, monkeypatch):
-    from vaws_coordinator import provision
+    from mindie_coordinator import provision
 
     monkeypatch.setenv(IDENTITY_FILE_ENV, str(tmp_path / "missing.json"))
     remote = Mock()
@@ -194,15 +194,15 @@ def test_provision_invalid_config_fails_before_remote_work(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("explicit_user,expected", [(None, "alice"), ("operator", "operator")])
 def test_runtime_register_defaults_to_configured_user(tmp_path, monkeypatch, capsys, explicit_user, expected):
-    from vaws_coordinator.cli import main
+    from mindie_coordinator.cli import main
 
     monkeypatch.setenv(IDENTITY_FILE_ENV, str(identity(tmp_path)))
     owner = Mock()
     owner.runtime_register.return_value = {
-        "id": "prepared", "user": expected, "container_name": f"vaws-{expected}",
+        "id": "prepared", "user": expected, "container_name": f"mindie-{expected}",
         "python": "/venv/bin/python", "endpoint": {}, "state": "ready", "reuse_only": False,
     }
-    monkeypatch.setattr("vaws_coordinator.service.ensure_daemon", lambda _: owner)
+    monkeypatch.setattr("mindie_coordinator.service.ensure_daemon", lambda _: owner)
     args = ["runtime-register", "--runtime-id", "prepared", "--host", "shared-host",
             "--ssh-port", "2222", "--root", "/prepared", "--python", "/venv/bin/python",
             "--state-dir", str(tmp_path)]

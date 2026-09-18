@@ -6,10 +6,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions, worktree_reference
-from vaws_coordinator.hooks.vaws_session import handle, in_project_scope, main
-from vaws_coordinator.presentation import compact_data
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.agent_session import AgentSessions, worktree_reference
+from mindie_coordinator.hooks.mindie_session import handle, in_project_scope, main
+from mindie_coordinator.presentation import compact_data
+from mindie_coordinator.task_client import TaskClient
 from test_execution_inputs import client, git, repo
 
 
@@ -66,7 +66,7 @@ def test_hook_entry_scopes_before_creating_native_attachment(tmp_path, monkeypat
     outside = linked_worktree(source, tmp_path / "native-worktree")
     foreign = repo(tmp_path / "other-project")
     store = AgentSessions(tmp_path / "registry")
-    monkeypatch.setattr("vaws_coordinator.hooks.vaws_session.AgentSessions", lambda: store)
+    monkeypatch.setattr("mindie_coordinator.hooks.mindie_session.AgentSessions", lambda: store)
     monkeypatch.setattr("sys.argv", ["hook", "--client", "codex", "--project", str(source)])
     for directory, native in [(outside, "actual-native-id"), (foreign, "foreign-native-id")]:
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart",
@@ -153,7 +153,7 @@ def test_claude_pretool_after_enter_worktree_refreshes_only_automatic_sources(tm
         store.bind_sources(original, explicit)
     sibling = store.context(sibling["attachment"]["id"])
     result = handle("claude", {"hook_event_name": "PreToolUse", "session_id": "native", "cwd": str(changed),
-                               "tool_name": "mcp__vaws_task__vaws_run", "tool_input": {"command": "echo ready"}}, store)
+                               "tool_name": "mcp__mindie_task__mindie_run", "tool_input": {"command": "echo ready"}}, store)
     current = store.native_context("claude", "native")
     assert current["context_file"] == original["context_file"]
     assert current["session"]["id"] == original["session"]["id"]
@@ -170,7 +170,7 @@ def test_claude_pretool_does_not_infer_cwd_or_unknown_identity(tmp_path, monkeyp
     store = AgentSessions(tmp_path / "registry")
     handle("claude", {"hook_event_name": "SessionStart", "session_id": "native", "cwd": str(source)}, store)
     monkeypatch.chdir(changed)
-    tool = {"hook_event_name": "PreToolUse", "session_id": "native", "tool_name": "mcp__vaws_task__vaws_session"}
+    tool = {"hook_event_name": "PreToolUse", "session_id": "native", "tool_name": "mcp__mindie_task__mindie_session"}
     handle("claude", tool, store)
     assert store.native_context("claude", "native")["attachment"]["cwd"] == str(source.resolve())
     with pytest.raises(ValueError, match="association is missing"):
@@ -195,7 +195,7 @@ def test_handoff_leaves_accepted_sources_and_service_identity_immutable(client, 
     (changed / "value.txt").write_text("accepted-B")
     if handoff == "claude-pretool":
         handle("claude", {"hook_event_name": "PreToolUse", "session_id": native, "cwd": str(changed),
-                          "tool_name": "mcp__vaws_task__vaws_run", "tool_input": {}}, client.store)
+                          "tool_name": "mcp__mindie_task__mindie_run", "tool_input": {}}, client.store)
     else:
         start(client.store, native, changed, source="resume")
     with pytest.raises(ValueError, match="different inputs: sources"):
@@ -225,7 +225,7 @@ def test_legacy_source_mapping_is_not_guessed_and_per_run_explicit_sources_remai
     assert current["source_defaults"]["origin"] == "unknown"
     owner = Mock()
     client = TaskClient(current["context_file"], service=owner)
-    with patch("vaws_coordinator.execution_sources.capture_sources", side_effect=AssertionError("must not capture old defaults")):
+    with patch("mindie_coordinator.execution_sources.capture_sources", side_effect=AssertionError("must not capture old defaults")):
         with pytest.raises(ValueError, match="no provenance"):
             client.run("echo ready")
     owner.admit.assert_not_called()

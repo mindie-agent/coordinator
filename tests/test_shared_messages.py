@@ -6,12 +6,12 @@ import time
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.host.vaws_npu_coordination import CoordinationError, NpuCoordinator, handle_request
-from vaws_coordinator.ready_runtime import RuntimePool
-from vaws_coordinator.service import CoordinatorService
-from vaws_coordinator.task_client import TaskClient
-from vaws_coordinator.task_messages import _key
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.host.mindie_npu_coordination import CoordinationError, NpuCoordinator, handle_request
+from mindie_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.service import CoordinatorService
+from mindie_coordinator.task_client import TaskClient
+from mindie_coordinator.task_messages import _key
 
 
 class MailHost:
@@ -175,7 +175,7 @@ def test_local_session_and_finish_do_not_start_daemon(tmp_path, monkeypatch):
     client = TaskClient(context["context_file"], user="alice")
     def forbidden(*args, **kwargs):
         raise AssertionError("local tasks must not start a daemon for messages")
-    monkeypatch.setattr("vaws_coordinator.service.ensure_daemon", forbidden)
+    monkeypatch.setattr("mindie_coordinator.service.ensure_daemon", forbidden)
     assert client.status()["session"]["state"] == "open"
     assert client.finish()["state"] == "finished"
 
@@ -193,7 +193,7 @@ def test_host_epoch_reset_does_not_skip_new_low_cursor_messages(tmp_path):
 
 
 def test_status_delivers_text_without_presentation_truncation(pair):
-    from vaws_coordinator.presentation import present
+    from mindie_coordinator.presentation import present
     _, (alice, bob) = pair
     _, to_bob = addresses(pair)
     text = "x" * 3500

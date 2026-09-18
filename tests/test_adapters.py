@@ -11,17 +11,17 @@ from unittest import mock
 
 from remote_dev.result import RESULT_SCHEMA_VERSION, make_result
 
-from vaws_coordinator.backend import RemoteDev
-from vaws_coordinator.git_sources import discover_repo_tree, iter_postorder
-from vaws_coordinator.host_queue import (
+from mindie_coordinator.backend import RemoteDev
+from mindie_coordinator.git_sources import discover_repo_tree, iter_postorder
+from mindie_coordinator.host_queue import (
     HostQueue,
     HostQueueUnavailable,
     bundled_host_module_path,
     host_queue_module_path,
     load_host_protocol,
 )
-from vaws_coordinator.machine_directory import MachineDirectory, MachineDirectoryUnavailable
-from vaws_coordinator.ops import vaws_call
+from mindie_coordinator.machine_directory import MachineDirectory, MachineDirectoryUnavailable
+from mindie_coordinator.ops import mindie_call
 
 HOST_MODULE = '''
 import json
@@ -46,7 +46,7 @@ class RemoteDevAdapterTests(unittest.TestCase):
     def test_successful_shell_uses_the_installed_remote_dev_package(self):
         from remote_dev.core.endpoint import resolve_endpoint
         from remote_dev.core.shell_ops import remote_bash
-        from vaws_coordinator import backend as backend_mod
+        from mindie_coordinator import backend as backend_mod
 
         self.assertIs(backend_mod.resolve_endpoint, resolve_endpoint)
         self.assertIs(backend_mod.remote_bash, remote_bash)
@@ -72,7 +72,7 @@ class ProcessControlBoundaryTests(unittest.TestCase):
     """Generic process control belongs to remote-dev, not this package."""
 
     def test_coordinator_does_not_ship_a_container_worker(self):
-        from vaws_coordinator import backend as backend_mod
+        from mindie_coordinator import backend as backend_mod
         self.assertFalse(hasattr(backend_mod, "worker_source"))
         self.assertFalse(hasattr(backend_mod, "WORKERS"))
 
@@ -80,7 +80,7 @@ class ProcessControlBoundaryTests(unittest.TestCase):
 class HostQueueAdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.module = Path(self.temp.name) / "vaws_npu_coordination.py"
+        self.module = Path(self.temp.name) / "mindie_npu_coordination.py"
         self.module.write_text(HOST_MODULE)
         self.addCleanup(self.temp.cleanup)
 
@@ -102,7 +102,7 @@ class HostQueueAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(HostQueueUnavailable, "not found"):
             HostQueue(lambda target, command: "", module_path=missing).request(
                 {"host": "h", "port": 22}, {"action": "status"})
-        with mock.patch.dict("os.environ", {"VAWS_HOST_QUEUE_MODULE": str(missing)}, clear=True):
+        with mock.patch.dict("os.environ", {"MINDIE_HOST_QUEUE_MODULE": str(missing)}, clear=True):
             with self.assertRaisesRegex(HostQueueUnavailable, "not found"):
                 HostQueue(lambda target, command: "").request({"host": "h", "port": 22}, {"action": "status"})
 
@@ -218,8 +218,8 @@ class GitSourceTests(unittest.TestCase):
 
 class ResultAndToolContractTests(unittest.TestCase):
     def test_result_envelope_comes_from_remote_dev(self):
-        result = make_result(tool="vaws.session", target={"kind": "vaws-task"}, outcome="success",
-                             status="open", summary="VAWS open")
+        result = make_result(tool="mindie.session", target={"kind": "mindie-task"}, outcome="success",
+                             status="open", summary="MindIE open")
         self.assertEqual(result["schema_version"], RESULT_SCHEMA_VERSION)
         self.assertLessEqual({"tool", "invocation_id", "target", "outcome", "status", "summary",
                               "started_at", "duration_ms", "preview", "refs", "artifacts",
@@ -228,7 +228,7 @@ class ResultAndToolContractTests(unittest.TestCase):
 
     def test_an_unavailable_task_registry_is_blocked_and_never_a_remote_success(self):
         with mock.patch.dict("os.environ", {}, clear=True):
-            payload = vaws_call("vaws.session", {})
+            payload = mindie_call("mindie.session", {})
         self.assertEqual(payload["result"]["outcome"], "blocked")
         self.assertEqual(payload["result"]["status"], "unavailable")
 

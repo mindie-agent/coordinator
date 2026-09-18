@@ -6,8 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.host_queue import HostQueue, HostQueueUnavailable
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.host_queue import HostQueue, HostQueueUnavailable
 
 
 HOST = {"host": "host.invalid", "port": 22, "user": "root", "cwd": "/ignored"}
@@ -131,9 +131,9 @@ def test_real_host_failure_survives_native_nonzero_wrapper_without_output_leak(t
     monkeypatch.setattr('remote_dev.core.rpc_transport.request', rpc)
     queue = HostQueue()
     common = {'state_dir': str(tmp_path / 'authority'), 'action': 'container-ssh-reserve', 'port': 46002}
-    queue.request(HOST, {**common, 'user': 'alice', 'container_name': 'vaws-alice'})
+    queue.request(HOST, {**common, 'user': 'alice', 'container_name': 'mindie-alice'})
     with pytest.raises(RuntimeError, match=r'already reserved \(port 46002\) \[port_reserved\]'):
-        queue.request(HOST, {**common, 'user': 'bob', 'container_name': 'vaws-bob'})
+        queue.request(HOST, {**common, 'user': 'bob', 'container_name': 'mindie-bob'})
     assert len(calls) == 2
 
 

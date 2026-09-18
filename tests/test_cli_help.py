@@ -12,7 +12,7 @@ class CliHelpTests(unittest.TestCase):
                      ["daemon", "--help"], ["provision", "--help"]):
             with self.subTest(args=args):
                 proc = subprocess.run(
-                    [sys.executable, "-m", "vaws_coordinator", *args],
+                    [sys.executable, "-m", "mindie_coordinator", *args],
                     capture_output=True, text=True, check=False,
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -23,7 +23,7 @@ class CliHelpTests(unittest.TestCase):
                      ["run", "--help"], ["execution", "--help"], ["finish", "--help"]):
             with self.subTest(args=args):
                 proc = subprocess.run(
-                    [sys.executable, "-m", "vaws_coordinator.vaws", *args],
+                    [sys.executable, "-m", "mindie_coordinator.mindie", *args],
                     capture_output=True, text=True, check=False,
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -33,13 +33,13 @@ class CliHelpTests(unittest.TestCase):
         code = """
 import json, sys
 from unittest import mock
-import vaws_coordinator.vaws as module
+import mindie_coordinator.mindie as module
 captured = {}
 def fake(name, args, **kwargs):
     captured.update(args)
     return {"result": {"outcome": "success"}}
-argv = ["vaws", "execution", "--execution-id", "e1", "--json", json.dumps({"action": "stop"})]
-with mock.patch.object(module, "vaws_call", side_effect=fake), mock.patch.object(sys, "argv", argv):
+argv = ["mindie", "execution", "--execution-id", "e1", "--json", json.dumps({"action": "stop"})]
+with mock.patch.object(module, "mindie_call", side_effect=fake), mock.patch.object(sys, "argv", argv):
     module.main()
 print(json.dumps(captured))
 """
@@ -48,9 +48,9 @@ print(json.dumps(captured))
         merged = json.loads(proc.stdout.strip().splitlines()[-1])
         self.assertEqual(merged["action"], "stop")
 
-    def test_vaws_cli_bad_json_returns_result_contract_without_traceback(self) -> None:
+    def test_mindie_cli_bad_json_returns_result_contract_without_traceback(self) -> None:
         proc = subprocess.run(
-            [sys.executable, "-m", "vaws_coordinator.vaws", "session", "--json", "{not json"],
+            [sys.executable, "-m", "mindie_coordinator.mindie", "session", "--json", "{not json"],
             capture_output=True,
             text=True,
             check=False,
@@ -59,23 +59,23 @@ print(json.dumps(captured))
         self.assertNotIn("Traceback", proc.stdout + proc.stderr)
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["schema_version"], "remote-dev.result.v1")
-        self.assertEqual(payload["tool"], "vaws.session")
+        self.assertEqual(payload["tool"], "mindie.session")
         self.assertEqual(payload["status"], "invalid_json")
         self.assertEqual(payload["outcome"], "needs_input")
 
-    def test_vaws_cli_attach_error_returns_result_contract_without_traceback(self) -> None:
+    def test_mindie_cli_attach_error_returns_result_contract_without_traceback(self) -> None:
         proc = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "vaws_coordinator.vaws",
+                "mindie_coordinator.mindie",
                 "attach",
                 "--client",
                 "kimi",
                 "--native-session-id",
                 "native-test",
                 "--parent-context",
-                "/nonexistent/vaws-agent-context.json",
+                "/nonexistent/mindie-agent-context.json",
             ],
             capture_output=True,
             text=True,
@@ -85,7 +85,7 @@ print(json.dumps(captured))
         self.assertNotIn("Traceback", proc.stdout + proc.stderr)
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["schema_version"], "remote-dev.result.v1")
-        self.assertEqual(payload["tool"], "vaws.attach")
+        self.assertEqual(payload["tool"], "mindie.attach")
         self.assertEqual(payload["status"], "attach_failed")
         self.assertEqual(payload["outcome"], "failed")
 

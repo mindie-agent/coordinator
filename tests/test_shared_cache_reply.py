@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from vaws_coordinator import preparation_cache as cache
+from mindie_coordinator import preparation_cache as cache
 from test_shared_preparation import bundle
 
 
@@ -25,7 +25,7 @@ def test_restore_wire_reply_keeps_fixed_bundle_and_dependencies_but_not_copy_lis
     namespace['print'] = outputs.append
     exec(compile(cache.REMOTE_SHARED_SUFFIX, '<shared-native>', 'exec'), namespace)
     reply = json.loads(outputs[0])
-    saved = json.loads((target / '.vaws-runtime/shared-native.json').read_text())
+    saved = json.loads((target / '.mindie-runtime/shared-native.json').read_text())
     assert reply['status'] == ('incremental' if incremental else 'hit')
     assert 'copied' not in reply and saved['copied'] == list(manifest['files'])
     for field in ('native_key', 'bundle', 'bundle_manifest_sha256', 'dependencies'):

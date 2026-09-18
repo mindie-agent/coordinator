@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from vaws_coordinator.provision import host_ops
+from mindie_coordinator.provision import host_ops
 
 
 def payload(device_test):

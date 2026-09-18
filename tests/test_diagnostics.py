@@ -7,17 +7,17 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from vaws_diagnostics import configure, current_context, bind_context
+from mindie_diagnostics import configure, current_context, bind_context
 from remote_dev.core.errors import RemoteExecutionError, error_details
-from vaws_coordinator import ops, service, task_server
-from vaws_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator import ops, service, task_server
+from mindie_coordinator.ready_runtime import RuntimePool
 from test_agent_wait_evidence import owned
 
 
 @pytest.mark.parametrize("name", list(ops.TOOL_SCHEMAS))
 def test_all_task_tools_have_entry_identity_even_on_validation_error(tmp_path, name):
-    recorder = configure("vaws-coordinator", root=tmp_path)
-    result = ops.vaws_call(name, {"invalid_field": True})["result"]
+    recorder = configure("mindie-coordinator", root=tmp_path)
+    result = ops.mindie_call(name, {"invalid_field": True})["result"]
     records = [json.loads(line) for line in Path(recorder.record_ref).read_text(encoding="utf-8").splitlines()]
     start = next(row for row in records if row["event"] == "operation.start")
     assert result["invocation_id"] == start["operation_id"] == result["diagnostics"]["operation_id"]
@@ -27,9 +27,9 @@ def test_all_task_tools_have_entry_identity_even_on_validation_error(tmp_path, n
 
 def test_owned_bundle_reads_only_selected_records_without_backend(owned, monkeypatch):
     owner, store, client, row = owned
-    configure("vaws-coordinator", root=store.state_dir / "diagnostic-log")
+    configure("mindie-coordinator", root=store.state_dir / "diagnostic-log")
     row["roles"] = [{"name": "default", "managed_job": "ours", "binding": {}}]
-    with configure("vaws-coordinator", root=store.state_dir / "diagnostic-log").operation("fixture"):
+    with configure("mindie-coordinator", root=store.state_dir / "diagnostic-log").operation("fixture"):
         row["diagnostics_context"] = current_context()
         with owner.pool.transaction() as db:
             for key, principal in [("ours", "alice"), ("unrelated", "bob")]:
@@ -94,17 +94,17 @@ def test_projection_write_failure_does_not_replace_business_exception(owned, mon
 
 def test_background_failure_has_separate_lifetime_from_completed_admission(owned, monkeypatch):
     from remote_dev.observability import observed_tool, observed_operation, current_tool
-    from vaws_diagnostics import wrap_context
+    from mindie_diagnostics import wrap_context
     owner, store, _, row = owned
-    recorder = configure("vaws-coordinator", root=store.state_dir / "logs")
+    recorder = configure("mindie-coordinator", root=store.state_dir / "logs")
     gate = threading.Event()
-    @observed_operation("background.prepare", component="vaws-coordinator")
+    @observed_operation("background.prepare", component="mindie-coordinator")
     def advance(*args):
         assert current_tool() is None
         raise RuntimeError("background preparation failure")
     monkeypatch.setattr(owner, "_advance_locked", advance)
     threads = []
-    @observed_tool("vaws.run", component="vaws-coordinator")
+    @observed_tool("mindie.run", component="mindie-coordinator")
     def admit():
         row["diagnostics_context"] = current_context()
         def later():
@@ -120,7 +120,7 @@ def test_background_failure_has_separate_lifetime_from_completed_admission(owned
     assert not threads[0].is_alive()
     assert reply["diagnostics"]["status"] == "success"
     records = [json.loads(line) for line in Path(recorder.record_ref).read_text().splitlines()]
-    finish = next(item for item in records if item["event"] == "operation.end" and item["operation"] == "vaws.run")
+    finish = next(item for item in records if item["event"] == "operation.end" and item["operation"] == "mindie.run")
     failure = next(item for item in records if item["event"] == "operation.end" and item["operation"] == "background.prepare")
     assert finish["status"] == "success" and failure["status"] == "error"
     assert finish["trace_id"] == failure["trace_id"]

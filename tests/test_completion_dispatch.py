@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from test_coordinator import Backend, runtime_spec
-from vaws_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.ready_runtime import RuntimePool
 
 
 @pytest.fixture
@@ -189,7 +189,7 @@ def test_real_owned_wait_returns_completion_and_allows_concurrent_stop(tmp_path,
     from concurrent.futures import ThreadPoolExecutor
     from remote_dev.processes.client import worker_source
     from remote_dev.processes.worker import control_job
-    from vaws_coordinator.backend import RemoteBackend
+    from mindie_coordinator.backend import RemoteBackend
     worker = worker_source()
     backend = RemoteBackend()
     def control(runtime, key, action, **kwargs):

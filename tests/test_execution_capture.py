@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from vaws_coordinator.execution_sources import capture_sources
-from vaws_coordinator import execution_capture, parity
+from mindie_coordinator.execution_sources import capture_sources
+from mindie_coordinator import execution_capture, parity
 from test_execution_inputs import git, repo
 
 

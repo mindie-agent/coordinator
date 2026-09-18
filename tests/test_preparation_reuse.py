@@ -11,11 +11,11 @@ from unittest import mock
 
 import pytest
 
-from vaws_coordinator import preparation_cache
-from vaws_coordinator.build_inputs import VLLM_ASCEND_REINSTALL_PATTERNS, build_input_fingerprints
-from vaws_coordinator.provision.task_environment import reusable_preparation
-from vaws_coordinator.prepare_runtime import REMOTE_COMMAND_CAPTURE_SUFFIX
-from vaws_coordinator.runtime_profile import command_launch_environment, file_digest, profile_key, verify
+from mindie_coordinator import preparation_cache
+from mindie_coordinator.build_inputs import VLLM_ASCEND_REINSTALL_PATTERNS, build_input_fingerprints
+from mindie_coordinator.provision.task_environment import reusable_preparation
+from mindie_coordinator.prepare_runtime import REMOTE_COMMAND_CAPTURE_SUFFIX
+from mindie_coordinator.runtime_profile import command_launch_environment, file_digest, profile_key, verify
 
 
 def test_content_keys_ignore_task_source_view_and_python_only_change():
@@ -42,7 +42,7 @@ def test_content_keys_ignore_task_source_view_and_python_only_change():
 
 def test_generic_launch_retains_image_paths_without_old_execution_sources():
     result = command_launch_environment({
-        'PATH': '/tmp/vaws-python-shim.abc:/old/.venv/bin:/usr/local/python/bin:/usr/bin',
+        'PATH': '/tmp/mindie-python-shim.abc:/old/.venv/bin:/usr/local/python/bin:/usr/bin',
         'PYTHONPATH': '/old/vllm:/vllm-workspace/executions/other/vllm:/image/acl',
         'LD_LIBRARY_PATH': '/image/cann/lib64:/old/vllm-ascend/lib',
         'ASCEND_CUSTOM_OPP_PATH': '/old/vllm-ascend/custom',
@@ -122,7 +122,7 @@ def test_native_view_copies_outputs_and_routes_exact_source_metadata(tmp_path, m
     exec((target / 'vllm/vllm/_version.py').read_text(), namespace)
     assert namespace['__version__'] == '0.28.0.dev2+g123456'
     assert namespace['__commit_id__'] == 'real-head'
-    metadata = next((target / '.vaws-runtime/metadata').glob('*/METADATA')).read_text()
+    metadata = next((target / '.mindie-runtime/metadata').glob('*/METADATA')).read_text()
     assert 'Version: 0.28.0.dev2+g123456.empty' in metadata
     assert 'Requires-Dist: torch' in metadata
 
@@ -133,12 +133,12 @@ def test_fixed_source_metadata_retry_rewrites_safely(tmp_path, monkeypatch):
     package.mkdir(parents=True)
     versions = {'vllm': {'version': '0.28.0.dev2+g123456', 'source_head': 'fixed-head'}}
     preparation_cache.write_source_metadata(tmp_path, versions)
-    metadata = next((tmp_path / '.vaws-runtime/metadata').glob('*/METADATA'))
+    metadata = next((tmp_path / '.mindie-runtime/metadata').glob('*/METADATA'))
     expected = metadata.read_text()
     metadata.write_text('interrupted prior preparation')
     preparation_cache.write_source_metadata(tmp_path, versions)
     assert metadata.read_text() == expected
-    assert len(list((tmp_path / '.vaws-runtime/metadata').glob('*.dist-info'))) == 1
+    assert len(list((tmp_path / '.mindie-runtime/metadata').glob('*.dist-info'))) == 1
     external = tmp_path.parent / (tmp_path.name + '-outside.txt')
     external.write_text('must remain unchanged')
     metadata.unlink()
@@ -179,7 +179,7 @@ def test_native_copy_requires_generated_metadata_proof(tmp_path, monkeypatch):
 
 
 def test_installed_outputs_include_import_time_build_metadata(tmp_path):
-    from vaws_coordinator.runtime_profile import installed_native_files
+    from mindie_coordinator.runtime_profile import installed_native_files
     package = tmp_path / 'vllm-ascend/vllm_ascend'
     vendor = package / '_cann_ops_custom/vendors/test'
     vendor.mkdir(parents=True)
@@ -189,7 +189,7 @@ def test_installed_outputs_include_import_time_build_metadata(tmp_path):
 
 
 def test_long_role_names_have_distinct_runtime_identity():
-    from vaws_coordinator.provision.task_environment import isolated_root, task_runtime_id
+    from mindie_coordinator.provision.task_environment import isolated_root, task_runtime_id
     names = ['tensor-parallel-worker-001', 'tensor-parallel-worker-002']
     roots = [isolated_root('execution', name, 'host') for name in names]
     identities = [task_runtime_id('execution', 'host', name) for name in names]
@@ -199,8 +199,8 @@ def test_long_role_names_have_distinct_runtime_identity():
 
 
 def test_historical_qualification_rejects_clean_native_commit_without_rebuild(tmp_path, monkeypatch):
-    from vaws_coordinator import backend
-    from vaws_coordinator.build_inputs import runtime_build_inputs
+    from mindie_coordinator import backend
+    from mindie_coordinator.build_inputs import runtime_build_inputs
     for name in ('vllm', 'vllm-ascend'):
         repo = tmp_path / name
         repo.mkdir()
@@ -214,7 +214,7 @@ def test_historical_qualification_rejects_clean_native_commit_without_rebuild(tm
         git('commit', '-m', 'compiled source')
     manifest = {'profile': {'build_env': {}}, 'profile_key': 'profile', 'build_key': 'original-artifact',
                 'build_inputs': runtime_build_inputs(tmp_path, {'build_env': {}}, 'profile')}
-    marker = tmp_path / '.vaws-runtime/ready-profile.json'
+    marker = tmp_path / '.mindie-runtime/ready-profile.json'
     marker.parent.mkdir()
     marker.write_text(json.dumps(manifest))
     # Artifact/environment verification already passed; this test exercises
@@ -225,9 +225,9 @@ def test_historical_qualification_rejects_clean_native_commit_without_rebuild(tm
     monkeypatch.setattr(backend, '_package_file', lambda name: probe if name == 'runtime_profile.py' else package_file(name))
     client = backend.RemoteBackend()
     def local_probe(endpoint, script):
-        prefix, body = script.split(" <<'VAWS_QUALIFY'\n", 1)
+        prefix, body = script.split(" <<'MINDIE_QUALIFY'\n", 1)
         request = shlex.split(prefix.splitlines()[-1])[-1]
-        code = body.rsplit('\nVAWS_QUALIFY', 1)[0]
+        code = body.rsplit('\nMINDIE_QUALIFY', 1)[0]
         result = subprocess.run([sys.executable, '-', request], input=code, text=True, capture_output=True, check=True)
         return result.stdout
     monkeypatch.setattr(client, 'bash', local_probe)
@@ -245,7 +245,7 @@ def test_historical_qualification_rejects_clean_native_commit_without_rebuild(tm
 
 
 def test_generic_profile_executes_without_native_packages_and_detects_identity_tampering(tmp_path):
-    import vaws_coordinator.runtime_profile as module
+    import mindie_coordinator.runtime_profile as module
     code = Path(module.__file__).read_text() + REMOTE_COMMAND_CAPTURE_SUFFIX
     request = {'root': str(tmp_path), 'image_digest': 'sha256:verified-image', 'source_id': 'fixed-source'}
     result = subprocess.run([sys.executable, '-c', 'import sys; exec(sys.stdin.read())', json.dumps(request)],
@@ -264,8 +264,8 @@ def test_generic_profile_executes_without_native_packages_and_detects_identity_t
 
 
 def test_artifact_donor_registration_preserves_fixed_proof_and_cannot_launch(tmp_path):
-    from vaws_coordinator.execution_sources import SCHEMA_VERSION, source_identity
-    from vaws_coordinator.ready_runtime import RuntimePool
+    from mindie_coordinator.execution_sources import SCHEMA_VERSION, source_identity
+    from mindie_coordinator.ready_runtime import RuntimePool
     class Backend:
         def __init__(self):
             self.inspected = []
@@ -282,7 +282,7 @@ def test_artifact_donor_registration_preserves_fixed_proof_and_cannot_launch(tmp
              'sources': {name: {'path': '/source/' + name, 'tree': 'a' * 40, 'commit': 'b' * 40} for name in ('vllm', 'vllm-ascend')},
              'records': [{'relpath': name, 'tree': 'a' * 40, 'commit': 'b' * 40} for name in ('vllm', 'vllm-ascend')], 'build_env': {}}
     fixed['id'] = source_identity(fixed)
-    spec = {'user': 'alice', 'python': '/donor/.venv/bin/python', 'container_name': 'vaws-alice',
+    spec = {'user': 'alice', 'python': '/donor/.venv/bin/python', 'container_name': 'mindie-alice',
             'host_endpoint': {'host': '192.0.2.1', 'port': 22, 'user': 'root'},
             'endpoint': {'host': '192.0.2.1', 'port': 46001, 'user': 'root', 'root': '/donor', 'cwd': '/donor'},
             'reuse_only': True, 'source_snapshot': fixed}

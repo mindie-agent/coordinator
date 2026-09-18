@@ -4,23 +4,23 @@ Local-process coordinator for one user's remote Ascend containers and host NPU
 allocation. It is not a hosted multi-user service.
 
 Consumer agents access it on the local machine; it operates the user's remote
-containers through `vaws-remote-dev`. Code identity is git. The API owns runtime
+containers through `remote-dev`. Code identity is git. The API owns runtime
 preparation, lifecycle transitions and resource release; callers provide the
 business command and constraints.
 
 ## Quick start
 
-Use the existing `vaws_run` / `vaws_execution` MCP tools when available.
+Use the existing `mindie_run` / `mindie_execution` MCP tools when available.
 Python callers can use the same task API below. The complete short example
 and its semantics are also available in one local command:
-`python -m vaws_coordinator.vaws --help` (or `help(TaskClient)` in Python).
+`python -m mindie_coordinator.mindie --help` (or `help(TaskClient)` in Python).
 
 ```python
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.task_client import TaskClient
 
 client = TaskClient("/local/task-context.json")
 run = client.run(
-    '"$VAWS_PYTHON" -c "import torch_npu; print(1)"',
+    '"$MINDIE_PYTHON" -c "import torch_npu; print(1)"',
     sources={"vllm": "/local/vllm", "vllm-ascend": "/local/vllm-ascend"},
     resources={"devices": [0]},
     topology={"host": "npu-host"},
@@ -33,9 +33,9 @@ print(run["state"], run["resources_released"], run.get("stdout", ""))
 A local shell file can be submitted directly, without a Python runner:
 
 ```bash
-vaws run --script-file business.sh --source app=/local/app --wait released --wait-timeout-seconds 180
-vaws execution --execution-id EXECUTION_ID --wait released --wait-timeout-seconds 180
-vaws execution --execution-id EXECUTION_ID --action evidence --section build --path kernel_name
+mindie run --script-file business.sh --source app=/local/app --wait released --wait-timeout-seconds 180
+mindie execution --execution-id EXECUTION_ID --wait released --wait-timeout-seconds 180
+mindie execution --execution-id EXECUTION_ID --action evidence --section build --path kernel_name
 ```
 
 `script_file` and `command` are mutually exclusive. The UTF-8 shell file is
@@ -46,11 +46,11 @@ change service identity. MCP accepts the same `script_file`, `wait_until` and
 `action="wait"`, `until="released"` and `timeout_seconds=180`.
 
 Replace the paths and host with your task's inputs. Use the native attachment's
-supplied `context_file`, or `TaskClient()` to resolve `VAWS_CONTEXT_FILE` / the
+supplied `context_file`, or `TaskClient()` to resolve `MINDIE_CONTEXT_FILE` / the
 actual native task context. No separate session or attach call is needed.
 `sources` captures edits from local Git worktrees; their names become remote
 subdirectories on `PYTHONPATH`. The command runs in that execution root and
-`VAWS_PYTHON` selects its prepared interpreter. Omitted sources use task defaults;
+`MINDIE_PYTHON` selects its prepared interpreter. Omitted sources use task defaults;
 `sources={}` runs without source dependencies. Resources default to no NPU;
 use `npu_count` for available devices or `devices` with `topology.host` for
 specific physical devices. Explicit sharing of one physical NPU adds
@@ -77,7 +77,7 @@ completed runs release their resources without a per-run finish call.
 
 ## Agent references and recorded launch facts
 
-`TaskClient()` uses an explicit context or `VAWS_CONTEXT_FILE` first. Local
+`TaskClient()` uses an explicit context or `MINDIE_CONTEXT_FILE` first. Local
 Codex commands can also resolve their actual `CODEX_THREAD_ID`, creating or
 resuming its native attachment locally when the hook did not export a context.
 Conflicting native identities require an explicit context. This does not bind
@@ -105,7 +105,7 @@ A completed failing preparation command ends that execution with its diagnostic
 log; an unavailable SSH transport remains uncertain. Correct the configuration
 and submit a new execution instead of repeating the failed preparation forever.
 
-`vaws_execution` accepts exactly one `execution_id` or task-scoped `service`.
+`mindie_execution` accepts exactly one `execution_id` or task-scoped `service`.
 The Python equivalent is `client.observe(service="model", action="status")`.
 An absent service returns `state: not_found` without contacting a runtime.
 An ambiguous live service requires an execution reference. Lookup never joins
@@ -143,7 +143,7 @@ workers and one active preparation per host.
 
 To share one explicitly selected physical NPU with existing external workers,
 pass `resources={"devices": [0], "allow_external_busy": True}` to `client.run`
-or `vaws_run`. Use `topology={"host": "selected-host"}` to bind the host too.
+or `mindie_run`. Use `topology={"host": "selected-host"}` to bind the host too.
 The option is fixed at admission and requires exactly one explicit device;
 omitting it keeps the normal occupancy checks. It permits observed external
 process/HBM use, without estimating or reserving free memory. Other coordinator
@@ -158,7 +158,7 @@ Changed inputs report the differing fields; `restart=True` replaces the service
 only after the old execution has stopped and released resources. Connecting
 with `observe(service="model")` does not capture the current worktree.
 
-Managed launch injects `VAWS_EXECUTION_OBSERVATION` and retains the same receipt
+Managed launch injects `MINDIE_EXECUTION_OBSERVATION` and retains the same receipt
 as `target.launch_observation`. It records the source snapshots, attested
 environment/native build identity, physical host, allocated devices and actual
 command. User environment values are represented by a digest. The variable is
@@ -169,7 +169,7 @@ topology and input parameters; missing facts remain unknown.
 
 ## Status observations
 
-`vaws-coordinator runtime-register` sends verification and registration to the
+`mindie-coordinator runtime-register` sends verification and registration to the
 running coordinator, which owns all catalog writes. Register an existing native
 artifact donor with `--reuse-only --source vllm=PATH --source vllm-ascend=PATH`;
 the source inputs are fixed before verification and the donor work root cannot
@@ -178,7 +178,7 @@ specification with `CoordinatorClient.runtime_register(runtime_id, spec)`.
 
 Task MCP/CLI execution status returns the latest persisted managed-job snapshot
 immediately. A sample older than two seconds schedules background progression.
-`vaws execution --refresh` (or tool argument `refresh: true`) requests
+`mindie execution --refresh` (or tool argument `refresh: true`) requests
 a new status observation. Replies include `observation_freshness` with snapshot
 completion time, age, freshness, source and whether a busy execution deferred
 refresh. Per-role `status_observed_at` preserves individual sampling times;
@@ -217,13 +217,13 @@ uv pip install git+https://github.com/mindie-agent/coordinator@main
 Or run without a permanent install:
 
 ```bash
-uvx --from git+https://github.com/mindie-agent/coordinator@main vaws-coordinator task-server
+uvx --from git+https://github.com/mindie-agent/coordinator@main mindie-coordinator task-server
 ```
 
-Replace `@main` with a commit or tag when you pin. `python -m vaws_coordinator`
-is the same entry as `vaws-coordinator`.
+Replace `@main` with a commit or tag when you pin. `python -m mindie_coordinator`
+is the same entry as `mindie-coordinator`.
 
-The package depends on `vaws-remote-dev>=0.7.0` (import `remote_dev`). It
+The package depends on `remote-dev>=0.7.0` (import `remote_dev`). It
 does not pin that package's git source; the workspace that installs this
 library chooses the tag. `uv sync` / `uv lock` are not the developer path
 here: a library that named remote-dev's git source in `pyproject.toml`
@@ -231,12 +231,12 @@ would pin every consumer to that tag.
 
 ## Start the task server
 
-`vaws-coordinator task-server` serves task and coordination tools over stdio MCP:
+`mindie-coordinator task-server` serves task and coordination tools over stdio MCP:
 
-`vaws_session`, `vaws_run`, `vaws_execution`, `vaws_finish`, `vaws_message`.
+`mindie_session`, `mindie_run`, `mindie_execution`, `mindie_finish`, `mindie_message`.
 
 For a substantive coordination request, pass a `coordination_peers[].reference`
-returned while waiting and the message text to `vaws_message`. Reply with the
+returned while waiting and the message text to `mindie_message`. Reply with the
 received `notifications[].reply_reference`. The task supplies the sender;
 there are no owner, host endpoint, thread, cursor or ACK parameters to fill in.
 Messages never execute commands, release leases or stop another user's task.
@@ -265,13 +265,13 @@ Example Cursor / Claude `.mcp.json` (or `.cursor/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "vaws-coordinator": {
+    "mindie-coordinator": {
       "type": "stdio",
       "command": "uvx",
       "args": [
         "--from",
         "git+https://github.com/mindie-agent/coordinator@main",
-        "vaws-coordinator",
+        "mindie-coordinator",
         "task-server"
       ]
     }
@@ -279,14 +279,14 @@ Example Cursor / Claude `.mcp.json` (or `.cursor/mcp.json`):
 }
 ```
 
-Start `vaws-coordinator daemon` for this user/state-dir. `task-server`, the
-`vaws` CLI, and `TaskClient` call that process. They do not each create a
+Start `mindie-coordinator daemon` for this user/state-dir. `task-server`, the
+`mindie` CLI, and `TaskClient` call that process. They do not each create a
 private scheduler.
 
-`vaws_session` exposes the local task identity. `vaws_finish` closes admission
+`mindie_session` exposes the local task identity. `mindie_finish` closes admission
 and stops the task's owned executions; the daemon then returns remaining
 bindings and marks the task finished without a second finish.
-`vaws_run` admits a business command plus environment/resource/topology needs;
+`mindie_run` admits a business command plus environment/resource/topology needs;
 the daemon places, prepares, launches and observes it. Pass the `context_file` supplied by the
 native session hook; never guess a task from cwd or history. Do not pass
 request IDs, profile hashes, or runtime IDs.
@@ -339,7 +339,7 @@ listening sockets and existing leases, and release ports with the execution.
 The scaffold imports the public allocation surface from one place:
 
 ```python
-from vaws_coordinator.host_queue import (
+from mindie_coordinator.host_queue import (
     HostQueue,
     HostQueueUnavailable,
     SCHEMA_VERSION,
@@ -350,32 +350,32 @@ from vaws_coordinator.host_queue import (
 )
 ```
 
-`host/vaws_npu_coordination.py` stays stdlib-only. It is shipped over SSH and
+`host/mindie_npu_coordination.py` stays stdlib-only. It is shipped over SSH and
 executed on the physical host. Durable host state defaults to
-`/tmp/vaws-npu-coordinator/v1/` and is overridden by
-`VAWS_NPU_COORDINATOR_STATE_DIR` or `request["state_dir"]`.
-`VAWS_HOST_QUEUE_MODULE` overrides the bundled file.
+`/tmp/mindie-npu-coordinator/v1/` and is overridden by
+`MINDIE_NPU_COORDINATOR_STATE_DIR` or `request["state_dir"]`.
+`MINDIE_HOST_QUEUE_MODULE` overrides the bundled file.
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `vaws_coordinator/cli.py` | `vaws-coordinator` / `python -m vaws_coordinator` |
-| `vaws_coordinator/task_server.py` | Stdio MCP for task and coordination tools |
-| `vaws_coordinator/host_queue.py` | Public host NPU API |
-| `vaws_coordinator/host/` | Host allocation module, shipped to the host |
-| `vaws_coordinator/backend.py` | Container/host probes via `remote_dev` |
-| `vaws_coordinator/prepare_runtime.py` | In-container attest / publish / restore |
-| `vaws_coordinator/workers/` | Linux supervisor source, shipped into a container |
-| `vaws_coordinator/run_manifest.py` | Run Manifest v1 (Git identity in `code`) |
-| `vaws_coordinator/code_identity.py` | Git snapshot identity for manifests |
-| `vaws_coordinator/parity.py` | Working-tree snapshot and remote materialization |
-| `vaws_coordinator/machine_directory.py` | Coordinator-owned machine directory |
+| `mindie_coordinator/cli.py` | `mindie-coordinator` / `python -m mindie_coordinator` |
+| `mindie_coordinator/task_server.py` | Stdio MCP for task and coordination tools |
+| `mindie_coordinator/host_queue.py` | Public host NPU API |
+| `mindie_coordinator/host/` | Host allocation module, shipped to the host |
+| `mindie_coordinator/backend.py` | Container/host probes via `remote_dev` |
+| `mindie_coordinator/prepare_runtime.py` | In-container attest / publish / restore |
+| `mindie_coordinator/workers/` | Linux supervisor source, shipped into a container |
+| `mindie_coordinator/run_manifest.py` | Run Manifest v1 (Git identity in `code`) |
+| `mindie_coordinator/code_identity.py` | Git snapshot identity for manifests |
+| `mindie_coordinator/parity.py` | Working-tree snapshot and remote materialization |
+| `mindie_coordinator/machine_directory.py` | Coordinator-owned machine directory |
 
 ## Development
 
 `uv sync` is not the setup path. This library declares
-`vaws-remote-dev>=0.7.0` without a git source: remote-dev is not on PyPI,
+`remote-dev>=0.7.0` without a git source: remote-dev is not on PyPI,
 so `uv sync` / `uv lock` fail with an unsatisfiable-dependency error.
 That is intentional. A library that pinned remote-dev's git URL would
 take the upgrade decision away from every consumer, and
@@ -386,7 +386,7 @@ dependencies from an index:
 
 ```bash
 uv venv
-uv pip install "vaws-remote-dev @ git+https://github.com/mindie-agent/remote-dev@89d197ef13bcae46f7bea809c22bbb058c4edfbf"
+uv pip install "remote-dev @ git+https://github.com/mindie-agent/remote-dev@13301ef7f52b53ffca0a6702a8a3c18f2edfcd52"
 uv pip install pytest "jsonschema>=4" "setuptools-scm>=8"
 uv pip install -e . --no-deps
 .venv/bin/python -m pytest
@@ -475,7 +475,7 @@ in the existing run events, without command contents or heartbeat log entries.
 Completed managed shared leases retain the host process-guard and port checks;
 they need no whole-device visibility scan to release their own ownership.
 
-Task MCP and `python -m vaws_coordinator.vaws` return compact observations by
+Task MCP and `python -m mindie_coordinator.mindie` return compact observations by
 default, with one local `record_ref` to the full response. MCP text is a summary;
 structuredContent holds the observation. Pass `full: true` / `--full` for the
 full response. Python TaskClient continues to return complete records. CLI
@@ -483,7 +483,7 @@ success and error output are each a single result object, without a text/result
 wrapper. Explicit target requests retain launch data exactly or point to the
 full record if oversized; truncated shell setup is never returned as executable.
 
-`vaws-coordinator daemon --action status` reads loaded and installed package
+`mindie-coordinator daemon --action status` reads loaded and installed package
 identities without starting a daemon. `--action restart-if-idle` asks the daemon
 to reject restart while work or unreleased leases remain; after an idle exit it
 starts the installed version. MCP tools report their own process identity and
@@ -524,8 +524,8 @@ that call; its asynchronous execution and later wait have separate lifetimes.
 Native MCP metadata propagates correlation automatically. Diagnostic IDs never
 grant task or endpoint authority and are excluded from launch-content identity.
 
-`VAWS_LOG_LEVEL=INFO` is the default. `DEBUG` adds RPC, lock and transport phase
-detail; `WARN`/`WARNING` retains warnings and errors. `VAWS_DIAGNOSTICS_ROOT`
+`MINDIE_LOG_LEVEL=INFO` is the default. `DEBUG` adds RPC, lock and transport phase
+detail; `WARN`/`WARNING` retains warnings and errors. `MINDIE_DIAGNOSTICS_ROOT`
 selects a private local log root. The shared diagnostics package rotates bounded
 per-process JSONL files and records package versions. Commands, file contents,
 environment values and credentials are not logging arguments. Business output
@@ -543,14 +543,14 @@ Cancellation/observation timeout does not fabricate quiet or resource release.
 Logging/export disk errors do not change business results or ownership; failures
 to persist authoritative execution state still fail.
 
-For a local issue attachment, the shared `vaws-diagnostics bundle` command makes
+For a local issue attachment, the shared `mindie-diagnostics bundle` command makes
 an offline, bounded public projection from diagnostic events. Use the returned
 operation ID. It excludes raw commands, paths, endpoints and business logs, and
 reports missing or truncated evidence. It never replays work or uploads an issue
 by itself. Monotonic clocks are process-local: do not subtract remote/local UTC
 stamps or sum overlapping RPC, command and parallel-role phase durations.
 
-For an owned execution, `python -m vaws_coordinator.vaws execution
+For an owned execution, `python -m mindie_coordinator.mindie execution
 --execution-id ID --action evidence --section diagnostics` returns its retained
 pool operations, stage timing and a redacted `support_bundle`. This path reads
 only the selected execution's local records, never global host status, housekeeping,

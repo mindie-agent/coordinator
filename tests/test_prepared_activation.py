@@ -7,15 +7,15 @@ from unittest.mock import Mock
 import pytest
 
 import test_coordinator as fixtures
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.host import vaws_npu_coordination as host
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.host import mindie_npu_coordination as host
 
 
 @pytest.fixture
 def supervisor(monkeypatch):
     guard = {"marker": "a" * 32, "boot_id": "boot-one", "retain_until_release": True}
     receipt = {"pid": 42, "start_ticks": "9001", "boot_id": "boot-one", "process_guard": guard}
-    prepared = {"container_name": "vaws-test", "container_id": "container-one", "receipt": receipt}
+    prepared = {"container_name": "mindie-test", "container_id": "container-one", "receipt": receipt}
     state = {"container_id": "container-one", "boot_id": "boot-one", "pids": [810],
              "namespace": 42, "start_ticks": "9001", "state": "S", "marker": "a" * 32}
     original_text, original_bytes = Path.read_text, Path.read_bytes
@@ -37,7 +37,7 @@ def supervisor(monkeypatch):
         return original_bytes(path, *args, **kwargs)
 
     def docker(argv, **kwargs):
-        if argv == ["docker", "inspect", "--format", "{{json .}}", "vaws-test"]:
+        if argv == ["docker", "inspect", "--format", "{{json .}}", "mindie-test"]:
             return json.dumps({"Id": state["container_id"]})
         assert argv == ["docker", "top", "container-one", "-eo", "pid"]
         return "PID\n" + "\n".join(map(str, state["pids"]))
@@ -151,7 +151,7 @@ def test_backend_sends_one_fixed_code_rpc_without_pid_shell(monkeypatch):
     backend = RemoteBackend()
     backend.bash = Mock(side_effect=AssertionError("separate PID shell must not run"))
     runtime = {"host_endpoint": {"host": "host.invalid", "port": 22, "user": "root"},
-               "container_name": "vaws-test", "attestation": {"container_id": "container-one"}}
+               "container_name": "mindie-test", "attestation": {"container_id": "container-one"}}
     receipt = {"pid": 42}
     request = {"action": "activate", "task_id": "cpu-task", "fence_token": 7, "coordination_epoch": "epoch-one"}
     result = backend.activate_prepared(runtime, request, receipt)
@@ -159,7 +159,7 @@ def test_backend_sends_one_fixed_code_rpc_without_pid_shell(monkeypatch):
     python.assert_called_once()
     sent = python.call_args.args[2]
     assert all(sent[key] == value for key, value in request.items())
-    assert sent["prepared_supervisor"] == {"container_name": "vaws-test", "container_id": "container-one", "receipt": receipt}
+    assert sent["prepared_supervisor"] == {"container_name": "mindie-test", "container_id": "container-one", "receipt": receipt}
     backend.bash.assert_not_called()
 
 

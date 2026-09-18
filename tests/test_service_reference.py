@@ -2,8 +2,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.task_client import TaskClient
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def test_reference_is_scoped_and_missing_does_not_contact_runtime(clients):
     eid = add(store, first, "one")
     assert second.observe(service="model", action="stop")["state"] == "not_found"
     owner.advance.assert_not_called()
-    with pytest.raises(ValueError, match="another VAWS task"):
+    with pytest.raises(ValueError, match="another MindIE task"):
         second.observe(eid, "stop")
     assert first.observe(service="model")["execution_id"] == eid
 

@@ -11,8 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from vaws_coordinator import preparation_cache as cache, runtime_profile as profile
-from vaws_coordinator.build_inputs import BUILD_INPUT_ENV_KEYS
+from mindie_coordinator import preparation_cache as cache, runtime_profile as profile
+from mindie_coordinator.build_inputs import BUILD_INPUT_ENV_KEYS
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def donor(tmp_path, monkeypatch):
             path.mkdir(parents=True)
             (path / '__init__.py').write_text("raise RuntimeError('changed Python ran')\n")
     for name, package in (('vllm', 'vllm'), ('vllm-ascend', 'vllm_ascend')):
-        metadata = source / '.vaws-runtime/metadata' / (package + '-2.0.dist-info')
+        metadata = source / '.mindie-runtime/metadata' / (package + '-2.0.dist-info')
         metadata.mkdir(parents=True)
         (metadata / 'METADATA').write_text('Name: ' + name + '\nVersion: 2.0\n')
     dependencies = tmp_path / 'dependencies'
@@ -45,8 +45,8 @@ def donor(tmp_path, monkeypatch):
     settings = {name: '1.0' for name in profile.PROFILE_FIELDS}
     settings.update(vllm='2.0', vllm_ascend='2.0', python_abi=sysconfig.get_config_var('SOABI'),
                     build_env={}, launch_env={'PYTHONPATH': ':'.join([*(str(source / suffix) for suffix in
-                        ('.vaws-runtime/metadata', 'vllm', 'vllm-ascend')), str(dependencies)])},
-                    compatibility_evidence='.vaws-runtime/profile-evidence/smoke.json', system_files={})
+                        ('.mindie-runtime/metadata', 'vllm', 'vllm-ascend')), str(dependencies)])},
+                    compatibility_evidence='.mindie-runtime/profile-evidence/smoke.json', system_files={})
     settings['launch_env'].update(
         LD_LIBRARY_PATH=str(source / 'vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/test') + ':/image/lib',
         ASCEND_CUSTOM_OPP_PATH=str(source / 'vllm-ascend/vllm_ascend/_cann_ops_custom'))
@@ -55,21 +55,21 @@ def donor(tmp_path, monkeypatch):
         system = tmp_path / name
         system.write_text('system version')
         settings['system_files'][name] = {'path': str(system), 'sha256': profile.file_digest(system)}
-        evidence[name] = '.vaws-runtime/profile-evidence/' + name + '.json'
+        evidence[name] = '.mindie-runtime/profile-evidence/' + name + '.json'
         path = source / evidence[name]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(settings['system_files'][name]))
-    evidence['smoke'] = '.vaws-runtime/profile-evidence/smoke.json'
+    evidence['smoke'] = '.mindie-runtime/profile-evidence/smoke.json'
     original = {'passed': True, 'profile_key': profile.profile_key(settings), 'stdout': 'original import proof'}
     (source / evidence['smoke']).write_text(json.dumps(original))
     inputs = {name: {'native': 'a' * 64, 'dependencies': 'b' * 64, 'build_env': 'c' * 64}
               for name in ('vllm', 'vllm-ascend')}
     manifest = profile.capture(source, settings, inputs, files, evidence)
-    marker = source / '.vaws-runtime/ready-profile.json'
+    marker = source / '.mindie-runtime/ready-profile.json'
     marker.write_text(json.dumps(manifest))
     for name in ('vllm', 'vllm_ascend'):
         monkeypatch.delitem(sys.modules, name, raising=False)
-    for suffix in ('vllm', 'vllm-ascend', '.vaws-runtime/metadata'):
+    for suffix in ('vllm', 'vllm-ascend', '.mindie-runtime/metadata'):
         monkeypatch.syspath_prepend(str(source / suffix))
     monkeypatch.syspath_prepend(str(dependencies))
     monkeypatch.setenv('PYTHONPATH', str(dependencies))
@@ -105,7 +105,7 @@ def test_publication_reuses_native_proof_once_and_changed_python_still_fails(don
     assert 'files' not in reply['manifest']
     current = {**reply['manifest'], 'files': old['files']}
     assert reply['manifest_digest'] == profile.digest(current)
-    assert json.loads((view / '.vaws-runtime/ready-profile.json').read_text()) == current
+    assert json.loads((view / '.mindie-runtime/ready-profile.json').read_text()) == current
     assert hashes == [view / name for name in old['files']]
     assert current['build_key'] != old['build_key']
     assert current['profile']['vllm'] == current['profile']['vllm_ascend'] == '2.1'
@@ -169,7 +169,7 @@ def test_missing_vendor_loader_path_requires_one_owned_import_then_reuses_new_pr
     if not passed:
         with pytest.raises(ValueError, match='loader upgrade import smoke failed'):
             cache.prepare_native_view(view, source, old, args)
-        assert not (view / '.vaws-runtime/ready-profile.json').exists()
+        assert not (view / '.mindie-runtime/ready-profile.json').exists()
     else:
         first = cache.prepare_native_view(view, source, old, args)
         current = {**first['manifest'], 'files': old['files']}
@@ -190,7 +190,7 @@ def test_missing_vendor_loader_path_requires_one_owned_import_then_reuses_new_pr
         second = cache.prepare_native_view(later, view, current, following)
         next_profile = {**second['manifest'], 'files': current['files']}
         assert profile.native_compatibility_receipt(later, next_profile) == proof
-    evidence = json.loads((view / '.vaws-runtime/profile-evidence/smoke.json').read_text())
+    evidence = json.loads((view / '.mindie-runtime/profile-evidence/smoke.json').read_text())
     assert evidence['reason'] == 'native-loader-environment-upgrade'
     assert evidence['elapsed_seconds'] == .01 and evidence['passed'] is passed
     assert calls == [view]
@@ -212,12 +212,12 @@ def test_failed_publication_never_marks_the_view_ready(donor, change):
         (source / path).write_bytes(b'changed after original proof')
     with pytest.raises(ValueError):
         cache.prepare_native_view(view, source, old, args)
-    assert not (view / '.vaws-runtime/ready-profile.json').exists()
+    assert not (view / '.mindie-runtime/ready-profile.json').exists()
 
 
 def test_actual_backend_script_publishes_once_and_launch_checks_only_mutable_facts(donor, monkeypatch, tmp_path):
-    from vaws_coordinator import backend as adapters, parity_support
-    from vaws_coordinator.parity_support import SshStreamingResult, RemoteCommandError
+    from mindie_coordinator import backend as adapters, parity_support
+    from mindie_coordinator.parity_support import SshStreamingResult, RemoteCommandError
     source, view, old, args, _ = donor
     backend = adapters.RemoteBackend()
     previous = {'python': sys.executable, 'endpoint': {'root': str(source)},
@@ -242,7 +242,7 @@ def test_actual_backend_script_publishes_once_and_launch_checks_only_mutable_fac
 
     monkeypatch.setattr(parity_support, 'ssh_exec_stream', stream)
     attestation = backend._prepare_native_view(spec, previous, args['versions'])
-    assert len(calls) == 1 and 'VAWS_CAPTURE_PROBE' not in calls[0]
+    assert len(calls) == 1 and 'MINDIE_CAPTURE_PROBE' not in calls[0]
     assert attestation['files'] == old['files'] and attestation['container_id'] == 'same-container'
     # The real launch adapter must not run either whole-bundle verification or
     # native-input recapture. Fixed Git checks remain in its common runner.
@@ -279,13 +279,13 @@ def test_actual_backend_script_publishes_once_and_launch_checks_only_mutable_fac
 
 @pytest.mark.parametrize('mode', ['combined', 'oversized', 'uncertain', 'cancelled-before'])
 def test_hot_preparation_has_one_publication_and_no_separate_capture(monkeypatch, mode):
-    from vaws_coordinator import backend as adapters, parity, parity_support
+    from mindie_coordinator import backend as adapters, parity, parity_support
     backend = adapters.RemoteBackend()
     seen = []
     published = {'completed': 'native-view'}
     from types import SimpleNamespace
     publication = SimpleNamespace(accept=lambda reply: published if reply == {'published': True} else pytest.fail('wrong native proof'))
-    monkeypatch.setattr('vaws_coordinator.native_publication.NativeViewPublication', lambda *args: publication)
+    monkeypatch.setattr('mindie_coordinator.native_publication.NativeViewPublication', lambda *args: publication)
     snapshot = {'id': 'accepted', 'records': [
         {'relpath': name, 'scm_version': '2.1', 'source_head': 'accepted-head'}
         for name in ('vllm', 'vllm-ascend')]}
@@ -294,7 +294,7 @@ def test_hot_preparation_has_one_publication_and_no_separate_capture(monkeypatch
             'host_endpoint': {'host': 'local.invalid', 'port': 22, 'user': 'root'},
             'source_snapshot': snapshot}
     def materialize(**kwargs):
-        from vaws_coordinator.preparation_process import PreparationProcess
+        from mindie_coordinator.preparation_process import PreparationProcess
         assert kwargs['source_snapshot'] is snapshot
         assert kwargs['endpoint'] is spec['endpoint']
         assert isinstance(kwargs['process'], PreparationProcess)
@@ -302,7 +302,7 @@ def test_hot_preparation_has_one_publication_and_no_separate_capture(monkeypatch
         assert kwargs['native_publication'] is publication
         seen.append('materialize')
         if mode == 'uncertain':
-            from vaws_coordinator.preparation_process import PreparationUncertain
+            from mindie_coordinator.preparation_process import PreparationUncertain
             raise PreparationUncertain('lost composite operation')
         return {'native_view': {'published': True}} if mode == 'combined' else {}
     monkeypatch.setattr(parity, 'materialize_fixed_sources', materialize)
@@ -321,13 +321,13 @@ def test_hot_preparation_has_one_publication_and_no_separate_capture(monkeypatch
             on_progress=lambda event: progress.append(event['step']), on_preparation_job=lambda *a, **k: None,
             cancel_requested=lambda: mode == 'cancelled-before')
     if mode == 'cancelled-before':
-        from vaws_coordinator.preparation_process import PreparationCancelled
+        from mindie_coordinator.preparation_process import PreparationCancelled
         with pytest.raises(PreparationCancelled):
             prepare()
         assert seen == [] and progress == []
         return
     if mode == 'uncertain':
-        from vaws_coordinator.preparation_process import PreparationUncertain
+        from mindie_coordinator.preparation_process import PreparationUncertain
         with pytest.raises(PreparationUncertain):
             prepare()
         assert seen == ['materialize']
@@ -341,9 +341,9 @@ def test_hot_preparation_has_one_publication_and_no_separate_capture(monkeypatch
 @pytest.mark.parametrize('uncertain', [False, True])
 def test_preparation_handoff_binds_only_a_completed_result(tmp_path, monkeypatch, uncertain):
     from test_coordinator import Backend, RuntimePool
-    from vaws_coordinator.backend import PreparedNativeView
-    from vaws_coordinator.preparation_process import PreparationUncertain
-    from vaws_coordinator.provision.task_environment import prepare_task_environment
+    from mindie_coordinator.backend import PreparedNativeView
+    from mindie_coordinator.preparation_process import PreparationUncertain
+    from mindie_coordinator.provision.task_environment import prepare_task_environment
     backend = Backend(tmp_path / 'host')
     pool = RuntimePool(tmp_path / 'pool', backend)
     session = pool.session_open('alice', 'execution', {})
@@ -356,7 +356,7 @@ def test_preparation_handoff_binds_only_a_completed_result(tmp_path, monkeypatch
 
     monkeypatch.setattr(backend, 'prepare_task_root', prepare)
     donor = {'host': '192.0.2.1', 'host_endpoint': {'host': '192.0.2.1', 'port': 22, 'user': 'root'},
-             'ssh_port': 46001, 'python': '/original/bin/python', 'container_name': 'vaws-alice'}
+             'ssh_port': 46001, 'python': '/original/bin/python', 'container_name': 'mindie-alice'}
     kwargs = dict(user='alice', session_id='execution', role_name='default', environment={}, donor=donor,
                   sources={}, source_snapshot={'id': 'accepted', 'records': []}, checkout_session=session['id'])
     if uncertain:

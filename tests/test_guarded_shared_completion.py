@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from vaws_coordinator.host import vaws_npu_coordination as protocol
+from mindie_coordinator.host import mindie_npu_coordination as protocol
 from test_external_busy import BUSY, GUARD, FREE, start
 
 

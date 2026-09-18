@@ -3,9 +3,9 @@ import json
 from pathlib import Path
 import pytest
 
-from vaws_coordinator.host.vaws_npu_coordination import NpuCoordinator, CoordinationError, handle_request
-from vaws_coordinator.managed_execution import task_preamble
-from vaws_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.host.mindie_npu_coordination import NpuCoordinator, CoordinationError, handle_request
+from mindie_coordinator.managed_execution import task_preamble
+from mindie_coordinator.ready_runtime import RuntimePool
 
 
 def test_cpu_command_bypasses_waiting_npu_job_without_claiming_a_device(tmp_path):
@@ -63,7 +63,7 @@ def test_cpu_lifecycle_never_probes_npu_and_cannot_release_unknown_npu_lease(tmp
     assert granted["occupancy"] is None
     assert call("preflight", fence_token=token)["status"] == "starting"
     assert call("status")["occupancy"] is None
-    monkeypatch.setattr("vaws_coordinator.host.vaws_npu_coordination.process_guard_busy", lambda *args, **kwargs: not kwargs.get("completion_confirmed",False))
+    monkeypatch.setattr("mindie_coordinator.host.mindie_npu_coordination.process_guard_busy", lambda *args, **kwargs: not kwargs.get("completion_confirmed",False))
     assert call("release", fence_token=token)["status"] == "orphaned_busy"
     assert call("release", fence_token=token, completion_confirmed=True)["status"] == "released"
     assert host.release("npu", npu["fence_token"], None, completion_confirmed=True)["status"] == "orphaned_busy"

@@ -8,12 +8,12 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions
-from vaws_coordinator.parity_support import PROGRESS_SENTINEL, RemoteCommandError, SshEndpoint, ssh_exec_stream
-from vaws_coordinator.preparation_process import (
+from mindie_coordinator.agent_session import AgentSessions
+from mindie_coordinator.parity_support import PROGRESS_SENTINEL, RemoteCommandError, SshEndpoint, ssh_exec_stream
+from mindie_coordinator.preparation_process import (
     PreparationCancelled, PreparationProcess, PreparationUncertain, stop_preparation_process,
 )
-from vaws_coordinator.service import CoordinatorService
+from mindie_coordinator.service import CoordinatorService
 
 
 ENDPOINT = {"host": "example.invalid", "port": 22, "user": "user", "root": "/tmp/task", "cwd": "/tmp/task"}
@@ -45,7 +45,7 @@ def test_receipt_saved_before_launch_and_progress_survives_split_chunks(monkeypa
             assert kwargs["stdout_offset"] == 4 and kwargs["stderr_offset"] == 30
             assert kwargs["wait_for_exit"] is True and kwargs["yield_time_ms"] == 1000
         return next(chunks)
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     process = PreparationProcess(ENDPOINT, "build", lambda row: saved.append(copy.deepcopy(row)), lambda: False)
     events = []
     result = ssh_exec_stream(SshEndpoint("example.invalid", 22, "user"), "build", stream_progress=False,
@@ -63,7 +63,7 @@ def test_short_preparation_returns_initial_output_and_exit_receipt_without_anoth
                                  "stdout": "complete", "stderr": "warning",
                                  "stdout_offset": 8, "stderr_offset": 7,
                                  "result": {"exit_code": exit_code}, "timings": {"prepare_ms": 10}})
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     result = PreparationProcess(ENDPOINT, "build", lambda row: saved.append(copy.deepcopy(row)), lambda: False).run(
         "build", on_output=lambda *args: output.append(args))
     assert result.returncode == exit_code
@@ -84,7 +84,7 @@ def test_quiet_launch_drains_remaining_output_from_initial_offsets(monkeypatch):
         assert action == "exchange" and kwargs["stdout_offset"] == 5
         return {"state": "succeeded", "quiet": True, "stdout": "last\n",
                 "stdout_offset": 10, "stdout_bytes_remaining": 0, "result": {"exit_code": 0}}
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     result = PreparationProcess(ENDPOINT, "build", lambda row: saved.append(copy.deepcopy(row)), lambda: False).run(
         "build", on_output=lambda *args: output.append(args))
     assert result.returncode == 0 and output == [("stdout", "firstlast\n")]
@@ -98,7 +98,7 @@ def test_quiet_launch_drains_remaining_output_from_initial_offsets(monkeypatch):
 def test_initial_unknown_launch_observation_is_retained_without_relaunch(monkeypatch, observation):
     saved = []
     control = Mock(return_value=observation)
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     with pytest.raises(PreparationUncertain, match="outcome is unknown"):
         PreparationProcess(ENDPOINT, "build", lambda row: saved.append(copy.deepcopy(row)), lambda: False).run(
             "build", on_output=lambda *args: None)
@@ -115,7 +115,7 @@ def test_lost_launch_reply_retains_job_and_can_stop_without_an_initial_receipt(m
             raise OSError("lost launch reply")
         assert action == "stop"
         return {"state": "cancelled", "quiet": True, "receipt": {"pid": 456}}
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     with pytest.raises(PreparationUncertain, match="was not replayed"):
         PreparationProcess(ENDPOINT, "build", lambda row: saved.append(copy.deepcopy(row)), lambda: False).run("build", on_output=lambda *a: None)
     assert actions == ["launch"]
@@ -138,7 +138,7 @@ def test_cancel_stops_owned_job_and_requires_quiet(monkeypatch, unknown):
             return {"state": "uncertain" if unknown else "cancelled", "quiet": not unknown,
                     "unknown": ["lost supervisor"] if unknown else []}
         return {"state": "cancelled", "quiet": True, "stdout": "last output\n", "stdout_offset": 12}
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     output = []
     with pytest.raises(PreparationUncertain if unknown else PreparationCancelled):
         PreparationProcess(ENDPOINT, "build", lambda row: saved.append(copy.deepcopy(row)), lambda: cancelled[0]).run("build", on_output=lambda *a: output.append(a))
@@ -149,7 +149,7 @@ def test_cancel_stops_owned_job_and_requires_quiet(monkeypatch, unknown):
 
 def test_cancel_before_launch_has_no_remote_side_effect(monkeypatch):
     control, save = Mock(), Mock()
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     with pytest.raises(PreparationCancelled, match="before command launch"):
         PreparationProcess(ENDPOINT, "build", save, lambda: True).run("build", on_output=lambda *a: None)
     control.assert_not_called()
@@ -157,7 +157,7 @@ def test_cancel_before_launch_has_no_remote_side_effect(monkeypatch):
 
 
 def test_stop_transport_failure_is_unknown(monkeypatch):
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", Mock(side_effect=OSError("offline")))
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", Mock(side_effect=OSError("offline")))
     record = {"endpoint": ENDPOINT, "job_id": "prepare-retained", "quiet": False}
     assert stop_preparation_process(record, lambda _: None) is False
     assert record["state"] == "uncertain" and record["quiet"] is False
@@ -177,7 +177,7 @@ def test_restarted_service_stops_persisted_preparation_before_marking_cancelled(
     observed = {"state": "cancelled" if quiet else "uncertain", "quiet": quiet,
                 "unknown": [] if quiet else ["ownership uncertain"]}
     control = Mock(return_value=observed)
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     reply = service.advance(str(tmp_path / "sessions"), "user", row["id"], action="stop")
     assert reply["state"] == ("cancelled" if quiet else "uncertain")
     assert reply["resources_released"] is quiet
@@ -215,7 +215,7 @@ def test_cancel_while_waiting_for_other_executions_compiler(tmp_path, monkeypatc
     def prepare_environment(*args, **kwargs):
         with kwargs['compile_scope']('install-vllm-ascend'):
             prepared()
-    monkeypatch.setattr('vaws_coordinator.provision.prepare_task_environment', prepare_environment)
+    monkeypatch.setattr('mindie_coordinator.provision.prepare_task_environment', prepare_environment)
     host_lock = service._lock_for("compile-host", "host-a")
     host_lock.acquire()
     result = []
@@ -246,7 +246,7 @@ def test_actual_supervisor_stop_drains_child_and_preserves_output(tmp_path, monk
     saved, output = [], []
     def control(endpoint, job_id, action, **kwargs):
         return control_job({"root": endpoint["root"], "job_id": job_id, "action": action, **kwargs}, worker_source())
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     def cancelled():
         return (tmp_path / "ready").exists()
     process = PreparationProcess(endpoint, "compiler", lambda row: saved.append(copy.deepcopy(row)), cancelled)
@@ -277,7 +277,7 @@ def test_actual_supervisor_can_stop_after_losing_the_launch_reply(tmp_path, monk
         if action == "launch":
             raise OSError("launch completed remotely but its reply was lost")
         return result
-    monkeypatch.setattr("vaws_coordinator.preparation_process.control", control)
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     try:
         with pytest.raises(PreparationUncertain, match="was not replayed"):
             PreparationProcess(endpoint, "compiler", lambda row: saved.append(copy.deepcopy(row)), lambda: False).run(

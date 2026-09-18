@@ -4,9 +4,9 @@ import sqlite3
 
 import pytest
 
-from vaws_coordinator.host import vaws_npu_coordination as host_protocol
-from vaws_coordinator.host.vaws_npu_coordination import CoordinationError, NpuCoordinator, handle_request
-from vaws_coordinator.placement import normalize_resources, role_plan
+from mindie_coordinator.host import mindie_npu_coordination as host_protocol
+from mindie_coordinator.host.mindie_npu_coordination import CoordinationError, NpuCoordinator, handle_request
+from mindie_coordinator.placement import normalize_resources, role_plan
 
 
 BUSY = {"status": "ok", "devices": [0, 1], "busy": {"0": [{"kind": "process", "pid": 4321}]}, "free": [1]}

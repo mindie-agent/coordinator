@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vaws_coordinator.shared_native_discovery import DISCOVER, export_verified_donor
+from mindie_coordinator.shared_native_discovery import DISCOVER, export_verified_donor
 
 
 @pytest.mark.parametrize('mismatch', [None, 'image', 'mount', 'unmanaged', 'no-profile', 'failed-export'])
@@ -13,7 +13,7 @@ def test_discovery_exports_only_compatible_verified_roots(mismatch):
     calls = []
     request = {'image_digest': 'sha256:same', 'preparation': {'native': {'vllm': 'same'}},
                'export_source': 'publish verified outputs only'}
-    container = {'Id': 'container-id', 'Name': '/vaws-alice', 'Image': 'sha256:same',
+    container = {'Id': 'container-id', 'Name': '/mindie-alice', 'Image': 'sha256:same',
                  'Mounts': [{'Type': 'bind', 'Source': '/tmp', 'Destination': '/tmp', 'RW': True}]}
     if mismatch == 'image':
         container['Image'] = 'sha256:other'
@@ -49,7 +49,7 @@ def test_discovery_exports_only_compatible_verified_roots(mismatch):
 def test_global_exact_priority_and_finite_donor_inventory(failed_exact, unavailable):
     calls, exported = [], []
     request = {'image_digest': 'sha256:same', 'preparation': {}, 'export_source': 'verify then publish'}
-    containers = [{'Id': name + '-id', 'Name': '/vaws-' + name, 'Image': 'sha256:same',
+    containers = [{'Id': name + '-id', 'Name': '/mindie-' + name, 'Image': 'sha256:same',
                    'Mounts': [{'Type': 'bind', 'Source': '/tmp', 'Destination': '/tmp', 'RW': True}]}
                   for name in ('base', 'exact', 'other-base', 'unavailable')]
     def run(argv, **kwargs):
@@ -92,10 +92,10 @@ def test_global_exact_priority_and_finite_donor_inventory(failed_exact, unavaila
 
 @pytest.mark.parametrize('failure', ['cancelled', 'uncertain', 'remote-unknown'])
 def test_export_interruption_is_not_an_ordinary_cache_miss(monkeypatch, failure):
-    from vaws_coordinator.backend import RemoteBackend
-    from vaws_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
+    from mindie_coordinator.backend import RemoteBackend
+    from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
     backend = RemoteBackend()
-    spec = {'container_name': 'vaws-recipient', 'host_endpoint': {'host': 'host', 'port': 22, 'user': 'root'}}
+    spec = {'container_name': 'mindie-recipient', 'host_endpoint': {'host': 'host', 'port': 22, 'user': 'root'}}
     monkeypatch.setattr(backend, 'bash', lambda *args: json.dumps({
         'Id': 'recipient-generation', 'Image': 'sha256:same', 'State': {'Running': True}}))
     result = {'status': 'failed', 'remote_outcome': 'unknown'} if failure == 'remote-unknown' else {'status': failure}
@@ -107,7 +107,7 @@ def test_export_interruption_is_not_an_ordinary_cache_miss(monkeypatch, failure)
 @pytest.mark.parametrize('mismatch', [None, 'soc', 'build_env', 'native', 'unqualified'])
 def test_actual_metadata_discovery_accepts_equivalent_image_request(tmp_path, mismatch):
     root = tmp_path / 'executions/alice/host/default'
-    marker = root / '.vaws-runtime/ready-profile.json'
+    marker = root / '.mindie-runtime/ready-profile.json'
     marker.parent.mkdir(parents=True)
     prior = {'dependencies': {'vllm': 'deps'}, 'native': {'vllm': 'v', 'vllm-ascend': 'a'},
              'environment': {'environment': {}, 'build_env': {}}}

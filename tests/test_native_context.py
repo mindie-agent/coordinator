@@ -2,18 +2,18 @@ from unittest.mock import Mock
 
 import pytest
 
-from vaws_coordinator.agent_session import AgentSessions, load_context
-from vaws_coordinator.task_client import TaskClient
+from mindie_coordinator.agent_session import AgentSessions, load_context
+from mindie_coordinator.task_client import TaskClient
 from test_execution_inputs import repo
 
 
 @pytest.fixture
 def native_env(tmp_path, monkeypatch):
-    for name in ("VAWS_CONTEXT_FILE", "VAWS_PARENT_CONTEXT", "VAWS_ATTACH_CONTEXT",
+    for name in ("MINDIE_CONTEXT_FILE", "MINDIE_PARENT_CONTEXT", "MINDIE_ATTACH_CONTEXT",
                  "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GROK_SESSION_ID", "KIMI_SESSION_ID", "KIMI_AGENT_ID", "CURSOR_CONVERSATION_ID"):
         monkeypatch.delenv(name, raising=False)
     state = tmp_path / "sessions"
-    monkeypatch.setenv("VAWS_AGENT_SESSIONS_DIR", str(state))
+    monkeypatch.setenv("MINDIE_AGENT_SESSIONS_DIR", str(state))
     monkeypatch.setenv("CODEX_THREAD_ID", "native-first")
     return state
 
@@ -45,14 +45,14 @@ def test_missing_or_conflicting_identity_does_not_create_state(native_env, monke
         load_context()
     assert not native_env.exists()
     monkeypatch.delenv("CODEX_THREAD_ID")
-    with pytest.raises(ValueError, match="VAWS context is required"):
+    with pytest.raises(ValueError, match="MindIE context is required"):
         load_context()
     assert not native_env.exists()
 
 
 def test_mcp_does_not_adopt_the_server_process_native_identity(native_env):
-    from vaws_coordinator.task_server import call_tool
-    reply = call_tool("vaws_session", {})
+    from mindie_coordinator.task_server import call_tool
+    reply = call_tool("mindie_session", {})
     assert reply["isError"]
     assert not native_env.exists()
 
@@ -89,19 +89,19 @@ def test_kimi_native_child_does_not_fall_back_to_parent(native_env, monkeypatch,
 
 def test_kimi_mcp_call_metadata_is_per_call_and_visible_as_text(native_env, monkeypatch, tmp_path):
     import json
-    from vaws_coordinator.task_server import call_tool
+    from mindie_coordinator.task_server import call_tool
     store = AgentSessions(native_env)
     first = store.attach("kimi", "first", str(tmp_path))
     second = store.attach("kimi", "second", str(tmp_path))
     for native, expected in (("first", first), ("second", second), ("first", first)):
-        reply = call_tool("vaws_session", {"full": True}, {"kimi_code/session_id": native, "kimi_code/agent_id": "main"})
+        reply = call_tool("mindie_session", {"full": True}, {"kimi_code/session_id": native, "kimi_code/agent_id": "main"})
         assert not reply["isError"]
         assert reply["structuredContent"]["data"]["session"]["id"] == expected["session"]["id"]
         assert json.loads(reply["content"][0]["text"]) == reply["structuredContent"]
     with pytest.raises(ValueError, match="differs from this native Kimi caller"):
-        call_tool("vaws_session", {"context_file": first["context_file"]}, {"kimi_code/session_id": "second"})
+        call_tool("mindie_session", {"context_file": first["context_file"]}, {"kimi_code/session_id": "second"})
     with pytest.raises(ValueError, match="missing or ambiguous"):
-        call_tool("vaws_session", {}, {"kimi_code/session_id": "first", "kimi_code/agent_id": "unknown-child"})
+        call_tool("mindie_session", {}, {"kimi_code/session_id": "first", "kimi_code/agent_id": "unknown-child"})
 
 
 def codex_call_metadata(native):
@@ -118,18 +118,18 @@ def codex_call_metadata(native):
 
 def test_codex_native_call_metadata_routes_each_call_to_existing_attachment(native_env, monkeypatch, tmp_path):
     import json
-    from vaws_coordinator.task_server import handle
+    from mindie_coordinator.task_server import handle
     store = AgentSessions(native_env)
     first = store.attach("codex", "first", str(tmp_path / "first"))
     second = store.attach("codex", "second", str(tmp_path / "second"))
     monkeypatch.setenv("CODEX_THREAD_ID", "unrelated-server-thread")
     monkeypatch.setenv("CODEX_SESSION_ID", "unrelated-server-session")
     monkeypatch.setattr(store, "attach", Mock(side_effect=AssertionError("call must not attach")))
-    monkeypatch.setattr("vaws_coordinator.task_server.AgentSessions", lambda: store)
+    monkeypatch.setattr("mindie_coordinator.task_server.AgentSessions", lambda: store)
     for native, expected in (("first", first), ("second", second), ("first", first)):
         arguments = {"full": True}
         response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-            "name": "vaws_session", "arguments": arguments, "_meta": codex_call_metadata(native)}})
+            "name": "mindie_session", "arguments": arguments, "_meta": codex_call_metadata(native)}})
         reply = response["result"]
         assert not reply["isError"]
         assert reply["structuredContent"]["data"]["session"]["id"] == expected["session"]["id"]
@@ -141,45 +141,45 @@ def test_codex_native_call_metadata_routes_each_call_to_existing_attachment(nati
 
 
 def test_codex_native_metadata_preserves_matching_context_and_rejects_conflict(native_env, tmp_path):
-    from vaws_coordinator.task_server import call_tool
+    from mindie_coordinator.task_server import call_tool
     store = AgentSessions(native_env)
     first = store.attach("codex", "first", str(tmp_path))
     second = store.attach("codex", "second", str(tmp_path))
-    assert not call_tool("vaws_session", {"context_file": first["context_file"]}, codex_call_metadata("first"))["isError"]
+    assert not call_tool("mindie_session", {"context_file": first["context_file"]}, codex_call_metadata("first"))["isError"]
     with pytest.raises(ValueError, match="differs from this native Codex caller"):
-        call_tool("vaws_session", {"context_file": second["context_file"]}, codex_call_metadata("first"))
+        call_tool("mindie_session", {"context_file": second["context_file"]}, codex_call_metadata("first"))
 
 
 @pytest.mark.parametrize("turn", [None, "{\"thread_id\":\"native-first\"}", {},
                                     {"session_id": "native-first"}, {"thread_id": ""}, {"thread_id": 42}])
 def test_codex_invalid_metadata_never_falls_back_to_process_identity(native_env, turn):
-    from vaws_coordinator.task_server import call_tool
+    from mindie_coordinator.task_server import call_tool
     with pytest.raises(ValueError, match="invalid native Codex call identity"):
-        call_tool("vaws_session", {}, {"threadId": "native-first", "x-codex-turn-metadata": turn})
+        call_tool("mindie_session", {}, {"threadId": "native-first", "x-codex-turn-metadata": turn})
     assert not native_env.exists()
 
 
 @pytest.mark.parametrize("metadata", [None, {}, {"threadId": "native-first"}, {"session_id": "native-first"}])
 def test_codex_missing_call_metadata_has_no_alias_or_process_fallback(native_env, metadata):
-    from vaws_coordinator.task_server import call_tool
-    assert call_tool("vaws_session", {}, metadata)["isError"]
+    from mindie_coordinator.task_server import call_tool
+    assert call_tool("mindie_session", {}, metadata)["isError"]
     assert not native_env.exists()
 
 
 def test_codex_unknown_metadata_does_not_create_or_reassign_attachment(native_env, tmp_path):
-    from vaws_coordinator.task_server import call_tool
+    from mindie_coordinator.task_server import call_tool
     store = AgentSessions(native_env)
     known = store.attach("codex", "known", str(tmp_path))
     metadata = codex_call_metadata("unknown")
     metadata["threadId"] = metadata["x-codex-turn-metadata"]["session_id"] = "known"
     with pytest.raises(ValueError, match="missing or ambiguous"):
-        call_tool("vaws_session", {"context_file": known["context_file"]}, metadata)
+        call_tool("mindie_session", {"context_file": known["context_file"]}, metadata)
     assert len(store.sessions()) == 1
     assert store.native_context("codex", "known")["context_file"] == known["context_file"]
 
 
 def test_kimi_nested_agent_hooks_keep_exact_parent(native_env, tmp_path):
-    from vaws_coordinator.hooks.vaws_session import handle
+    from mindie_coordinator.hooks.mindie_session import handle
     store = AgentSessions(native_env)
     base = {"session_id": "native-kimi", "cwd": str(tmp_path)}
     handle("kimi", {**base, "hook_event_name": "SessionStart", "agent_id": "main"}, store)
@@ -203,7 +203,7 @@ def test_native_status_preserves_a_finished_task(native_env):
 def test_explicit_parent_preserves_association(native_env, monkeypatch):
     parent = load_context()
     monkeypatch.setenv("CODEX_THREAD_ID", "child-native")
-    monkeypatch.setenv("VAWS_PARENT_CONTEXT", parent["context_file"])
+    monkeypatch.setenv("MINDIE_PARENT_CONTEXT", parent["context_file"])
     child = load_context()
     assert child["session"]["id"] == parent["session"]["id"]
     assert child["attachment"]["parent_id"] == parent["attachment"]["id"]
@@ -224,7 +224,7 @@ def test_first_native_cli_binds_sources_once_and_shell_cd_keeps_them(native_env,
     assert later["source_defaults"] == first["source_defaults"]
 
 
-@pytest.mark.parametrize("association_env", ["VAWS_PARENT_CONTEXT", "VAWS_ATTACH_CONTEXT"])
+@pytest.mark.parametrize("association_env", ["MINDIE_PARENT_CONTEXT", "MINDIE_ATTACH_CONTEXT"])
 def test_first_native_association_preserves_explicit_task_sources(native_env, tmp_path, monkeypatch, association_env):
     project = repo(tmp_path / "project")
     child_root = repo(tmp_path / "child")
@@ -254,7 +254,7 @@ def test_native_cli_without_git_still_attaches_locally(native_env, tmp_path, mon
 
 
 def test_cursor_shell_first_call_and_hook_share_exact_native_context(native_env, tmp_path, monkeypatch):
-    from vaws_coordinator.hooks.vaws_session import handle
+    from mindie_coordinator.hooks.mindie_session import handle
     project = repo(tmp_path / "project")
     native = "4c009c90-471a-4be5-b9b9-963f0ab6fb4b"
     monkeypatch.delenv("CODEX_THREAD_ID")
@@ -274,14 +274,14 @@ def test_cursor_shell_first_call_and_hook_share_exact_native_context(native_env,
 
 
 def test_existing_user_container_needs_no_image_selection(monkeypatch):
-    from vaws_coordinator import provision
-    from vaws_coordinator.service import CoordinatorService
+    from mindie_coordinator import provision
+    from mindie_coordinator.service import CoordinatorService
     verify = Mock(side_effect=AssertionError("implicit image must keep the existing hot path"))
     monkeypatch.setattr(provision, "provision_user_container", verify)
     service = object.__new__(CoordinatorService)
     service.backend = Mock()
     record = {"host": {"ip": "192.0.2.10", "machine_type": "A3"},
-              "container": {"name": "vaws-alice", "ssh_port": 2201}, "user": "alice"}
+              "container": {"name": "mindie-alice", "ssh_port": 2201}, "user": "alice"}
     service._configured_machines = lambda: [record]
     donor = service._ensure_user_container("alice", {}, {}, set())
     assert donor["ssh_port"] == 2201
@@ -298,28 +298,28 @@ def test_existing_user_container_needs_no_image_selection(monkeypatch):
 
 @pytest.mark.parametrize("image", ["registry.example/ascend:v1.2.3", "registry.example/ascend@sha256:" + "a" * 64])
 def test_first_run_can_provision_an_explicit_fixed_image(image, monkeypatch):
-    from vaws_coordinator import provision
-    from vaws_coordinator.service import CoordinatorService
+    from mindie_coordinator import provision
+    from mindie_coordinator.service import CoordinatorService
     service = object.__new__(CoordinatorService)
     service.backend = Mock()
     record = {"host": {"ip": "192.0.2.10", "machine_type": "A3"},
-              "container": {"name": "vaws-donor", "ssh_port": 2201}, "user": "donor"}
+              "container": {"name": "mindie-donor", "ssh_port": 2201}, "user": "donor"}
     service._configured_machines = lambda: [record]
     create = Mock(return_value={"ssh_port": 2202})
     monkeypatch.setattr(provision, "provision_user_container", create)
     donor = service._ensure_user_container("recipient", {"image": image}, {"host": "192.0.2.10"}, set())
     assert donor["recipe"] == image
-    assert donor["container_name"] == "vaws-recipient"
+    assert donor["container_name"] == "mindie-recipient"
     assert donor["ssh_port"] == 2202
     assert create.call_args.kwargs["image"] == image
     assert create.call_args.kwargs["user"] == "recipient"
-    assert record["container"]["name"] == "vaws-donor"
+    assert record["container"]["name"] == "mindie-donor"
 
 
 @pytest.mark.parametrize("image", ["typo", "registry.example/ascend", "registry.example/ascend:latest", "auto"])
 def test_first_run_does_not_provision_implicit_or_unsupported_images(image, monkeypatch):
-    from vaws_coordinator import provision
-    from vaws_coordinator.service import CoordinatorService
+    from mindie_coordinator import provision
+    from mindie_coordinator.service import CoordinatorService
     service = object.__new__(CoordinatorService)
     service.backend = Mock()
     service._configured_machines = lambda: [{"host": {"ip": "192.0.2.10"}}]
@@ -332,12 +332,12 @@ def test_first_run_does_not_provision_implicit_or_unsupported_images(image, monk
 @pytest.mark.parametrize("selector", ["image", "recipe"])
 @pytest.mark.parametrize("image", ["registry.example/ascend:v1.2.3", "registry.example/ascend@sha256:" + "a" * 64])
 def test_existing_user_container_verifies_explicit_image_before_returning_donor(selector, image, monkeypatch):
-    from vaws_coordinator import provision
-    from vaws_coordinator.service import CoordinatorService
+    from mindie_coordinator import provision
+    from mindie_coordinator.service import CoordinatorService
     service = object.__new__(CoordinatorService)
     service.backend = Mock()
     record = {"host": {"ip": "192.0.2.10", "machine_type": "A3"},
-              "container": {"name": "vaws-alice", "ssh_port": 2201}, "user": "alice"}
+              "container": {"name": "mindie-alice", "ssh_port": 2201}, "user": "alice"}
     service._configured_machines = lambda: [record]
     verify = Mock(return_value={"ssh_port": 2201})
     monkeypatch.setattr(provision, "provision_user_container", verify)
@@ -352,15 +352,15 @@ def test_existing_user_container_verifies_explicit_image_before_returning_donor(
 
 
 def test_existing_container_image_mismatch_cannot_be_relabelled_as_requested_image(monkeypatch):
-    from vaws_coordinator import provision
-    from vaws_coordinator.provision import existing_container
-    from vaws_coordinator.provision.host_ops import MachineManagementError, RemoteResult, SshTarget
-    from vaws_coordinator.service import CoordinatorService
+    from mindie_coordinator import provision
+    from mindie_coordinator.provision import existing_container
+    from mindie_coordinator.provision.host_ops import MachineManagementError, RemoteResult, SshTarget
+    from mindie_coordinator.service import CoordinatorService
     service = object.__new__(CoordinatorService)
     service.backend = Mock()
     service.backend.host.return_value = {"port": 2201}
     record = {"host": {"ip": "192.0.2.10"},
-              "container": {"name": "vaws-alice", "ssh_port": 2201}, "user": "alice",
+              "container": {"name": "mindie-alice", "ssh_port": 2201}, "user": "alice",
               "image": {"requested": "registry.example/ascend:old"}}
     service._configured_machines = lambda: [record]
     monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'unknown'})
@@ -376,11 +376,11 @@ def test_existing_container_image_mismatch_cannot_be_relabelled_as_requested_ima
     with pytest.raises(MachineManagementError, match="existing container image does not match"):
         service._ensure_user_container("alice", {"image": "registry.example/ascend:new"}, {}, set())
     assert record["image"]["requested"] == "registry.example/ascend:old"
-    assert record["container"] == {"name": "vaws-alice", "ssh_port": 2201}
+    assert record["container"] == {"name": "mindie-alice", "ssh_port": 2201}
     # Exercise the real provision owner: mismatch fails before smoke/upsert,
     # and the bootstrap is explicitly forbidden to replace an existing image.
     assert remote.call_count == 2
     bootstrap = remote.call_args_list[1]
-    assert bootstrap.kwargs["args"][0:2] == ["vaws-alice", "2201"]
+    assert bootstrap.kwargs["args"][0:2] == ["mindie-alice", "2201"]
     assert bootstrap.kwargs["args"][6] == "false"
     service.backend.machines.upsert_machine.assert_not_called()

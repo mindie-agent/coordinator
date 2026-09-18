@@ -8,7 +8,7 @@ import sysconfig
 
 import pytest
 
-from vaws_coordinator.parity import ATB_CXX_ABI_PROBE, DEFAULT_ENV_PREAMBLE
+from mindie_coordinator.parity import ATB_CXX_ABI_PROBE, DEFAULT_ENV_PREAMBLE
 
 
 @pytest.fixture
@@ -17,7 +17,7 @@ def recorded_abi(tmp_path):
     metadata.mkdir(parents=True)
     (metadata / 'METADATA').write_text('Name: torch\nVersion: 1.0\n')
     (metadata.parent / 'torch.py').write_text('raise RuntimeError("must not import torch to source ATB")\n')
-    receipt = tmp_path / '.vaws-runtime/reuse.json'
+    receipt = tmp_path / '.mindie-runtime/reuse.json'
     receipt.parent.mkdir()
     receipt.write_text(json.dumps({'atb_abi': {'cxx_abi': '1', 'torch': '1.0',
                                              'python_abi': sysconfig.get_config_var('SOABI')}}))
@@ -54,7 +54,7 @@ def test_atb_setup_receives_supported_argument_or_keeps_native_detection(recorde
     # Both the fixed allowlisted ATB path and loop member map to the fixture.
     script = '\n'.join(DEFAULT_ENV_PREAMBLE).replace('/usr/local/Ascend/nnal/atb/set_env.sh', str(setup))
     subprocess.run(['bash', '-eu', '-c', script], capture_output=True, text=True, check=True,
-                   env={**env, 'VAWS_RUNTIME_ROOT': str(tmp_path),
+                   env={**env, 'MINDIE_RUNTIME_ROOT': str(tmp_path),
                         'PATH': str(Path(sys.executable).parent) + ':' + env['PATH']}, timeout=20)
     # Bash source without arguments keeps safe_source's original $1 (the
     # filename); ATB ignores it and performs its original ABI detection.

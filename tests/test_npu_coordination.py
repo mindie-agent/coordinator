@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from vaws_coordinator.host.vaws_npu_coordination import (
+from mindie_coordinator.host.mindie_npu_coordination import (
     CoordinationError,
     DEFAULT_SERVING_PORT_RANGE,
     JOB_TOKEN_ENV,
@@ -92,7 +92,7 @@ class CoordinationTests(unittest.TestCase):
         token = granted["task"]["fence_token"]
         self.coordinator.preflight("guarded-task", token, occupancy())
         guard = {"marker": "a" * 32, "boot_id": "test"}
-        with mock.patch("vaws_coordinator.host.vaws_npu_coordination.process_guard_busy", return_value=True):
+        with mock.patch("mindie_coordinator.host.mindie_npu_coordination.process_guard_busy", return_value=True):
             self.coordinator.activate("guarded-task", token, pid=1234, process_guard=guard, heartbeat_ttl_seconds=1)
             import sqlite3
             from contextlib import closing
@@ -104,7 +104,7 @@ class CoordinationTests(unittest.TestCase):
             self.assertEqual(self.coordinator.release("guarded-task", token, occupancy())["status"], "orphaned_busy")
             self.submit("waiting-task", devices=[0])
             self.assertNotEqual(self.coordinator.acquire("waiting-task", occupancy())["status"], "granted")
-        with mock.patch("vaws_coordinator.host.vaws_npu_coordination.process_guard_busy", return_value=False):
+        with mock.patch("mindie_coordinator.host.mindie_npu_coordination.process_guard_busy", return_value=False):
             self.assertEqual(self.coordinator.acquire("waiting-task", occupancy())["status"], "granted")
 
     def test_subreaper_lease_requires_completion_even_after_supervisor_disappears(self):
@@ -112,12 +112,12 @@ class CoordinationTests(unittest.TestCase):
         token = self.coordinator.acquire("retained-task", occupancy())["task"]["fence_token"]
         self.coordinator.preflight("retained-task", token, occupancy())
         guard = {"marker": "b" * 32, "boot_id": "test", "retain_until_release": True}
-        with mock.patch("vaws_coordinator.host.vaws_npu_coordination.process_guard_busy", return_value=True):
+        with mock.patch("mindie_coordinator.host.mindie_npu_coordination.process_guard_busy", return_value=True):
             self.coordinator.activate("retained-task", token, pid=1234, process_guard=guard, heartbeat_ttl_seconds=1)
         # No marked process is left, but GC lacks a descendant completion receipt.
         def retained(value, *, completion_confirmed=False):
             return bool(value) and not completion_confirmed
-        with mock.patch("vaws_coordinator.host.vaws_npu_coordination.process_guard_busy", side_effect=retained):
+        with mock.patch("mindie_coordinator.host.mindie_npu_coordination.process_guard_busy", side_effect=retained):
             self.clock.advance(2)
             self.assertEqual(self.coordinator.snapshot(occupancy())["tasks"][0]["state"], "orphaned_busy")
             self.assertEqual(self.coordinator.release("retained-task", token, occupancy())["status"], "orphaned_busy")
@@ -127,10 +127,10 @@ class CoordinationTests(unittest.TestCase):
             self.assertEqual(self.coordinator.acquire("retained-waiter", occupancy())["status"], "granted")
 
     def test_process_guard_source_scans_public_remote_dev_marker(self):
-        from vaws_coordinator.host import vaws_npu_coordination as module
+        from mindie_coordinator.host import mindie_npu_coordination as module
         source = Path(module.__file__).read_text(encoding="utf-8")
         self.assertIn('JOB_TOKEN_ENV = "REMOTE_DEV_JOB_TOKEN"', source)
-        self.assertNotIn("VAWS_REMOTE_JOB_TOKEN", source)
+        self.assertNotIn("MINDIE_REMOTE_JOB_TOKEN", source)
 
     def _job_child_env(self, *, public: str | None, legacy: str | None) -> dict[str, str]:
         env = os.environ.copy()
@@ -139,9 +139,9 @@ class CoordinationTests(unittest.TestCase):
         else:
             env[JOB_TOKEN_ENV] = public
         if legacy is None:
-            env.pop("VAWS_REMOTE_JOB_TOKEN", None)
+            env.pop("MINDIE_REMOTE_JOB_TOKEN", None)
         else:
-            env["VAWS_REMOTE_JOB_TOKEN"] = legacy
+            env["MINDIE_REMOTE_JOB_TOKEN"] = legacy
         return env
 
     def _spawn_ready_child(self, env: dict[str, str]) -> subprocess.Popen:
@@ -261,7 +261,7 @@ class CoordinationTests(unittest.TestCase):
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         marker = os.urandom(16).hex()
         public_token = f"{JOB_TOKEN_ENV}={marker}".encode()
-        legacy_token = f"VAWS_REMOTE_JOB_TOKEN={marker}".encode()
+        legacy_token = f"MINDIE_REMOTE_JOB_TOKEN={marker}".encode()
         guard = {"marker": marker, "boot_id": boot_id}
         proc = None
         leftover = None
@@ -574,7 +574,7 @@ class ContainerPortOwnershipTests(unittest.TestCase):
             grant = self.coordinator.acquire(task_id, occupancy(), listening=listening)
             self.assertEqual(grant["status"], "granted")
             self.assertEqual(grant["task"]["granted_service_port"], first_port + index + 1)
-            self.assertEqual(grant["environment"]["VAWS_SERVICE_PORT"], str(first_port + index + 1))
+            self.assertEqual(grant["environment"]["MINDIE_SERVICE_PORT"], str(first_port + index + 1))
             grants.append(grant)
         released = self.coordinator.release(
             "automatic-0", grants[0]["task"]["fence_token"], occupancy(),
@@ -597,21 +597,21 @@ class ContainerPortOwnershipTests(unittest.TestCase):
 
     def test_user_ssh_reservation_blocks_service_collision_and_survives_release(self) -> None:
         reserved = self.coordinator.reserve_container_ssh(
-            {"user": "maoxx241", "container_name": "vaws-maoxx241", "port": 46001}
+            {"user": "maoxx241", "container_name": "mindie-maoxx241", "port": 46001}
         )
         self.assertEqual(reserved["status"], "reserved")
         self.assertEqual(reserved["port"], 46001)
         again = self.coordinator.reserve_container_ssh(
-            {"user": "maoxx241", "container_name": "vaws-maoxx241", "port": 46001}
+            {"user": "maoxx241", "container_name": "mindie-maoxx241", "port": 46001}
         )
         self.assertTrue(again["reused"])
         with self.assertRaisesRegex(Exception, "already has SSH port"):
             self.coordinator.reserve_container_ssh(
-                {"user": "maoxx241", "container_name": "vaws-maoxx241", "port": 46002}
+                {"user": "maoxx241", "container_name": "mindie-maoxx241", "port": 46002}
             )
-        with self.assertRaisesRegex(Exception, "must be vaws-maoxx241"):
+        with self.assertRaisesRegex(Exception, "must be mindie-maoxx241"):
             self.coordinator.reserve_container_ssh(
-                {"user": "maoxx241", "container_name": "vaws-other", "port": 46001}
+                {"user": "maoxx241", "container_name": "mindie-other", "port": 46001}
             )
         self.coordinator.submit(
             {
@@ -628,7 +628,7 @@ class ContainerPortOwnershipTests(unittest.TestCase):
         granted = self.coordinator.acquire("exec-1", occupancy(), listening=listening)
         self.assertEqual(granted["status"], "granted")
         self.assertEqual(granted["task"]["granted_service_port"], 48001)
-        self.assertEqual(granted["environment"]["VAWS_SERVICE_PORT"], "48001")
+        self.assertEqual(granted["environment"]["MINDIE_SERVICE_PORT"], "48001")
         token = granted["task"]["fence_token"]
         busy_port = self.coordinator.release(
             "exec-1", token, occupancy(), completion_confirmed=True,

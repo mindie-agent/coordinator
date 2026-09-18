@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaws_coordinator.backend import RemoteBackend
-from vaws_coordinator.runtime_profile import capture_launch_environment, installed_native_files
+from mindie_coordinator.backend import RemoteBackend
+from mindie_coordinator.runtime_profile import capture_launch_environment, installed_native_files
 
 
 class PreparedProfileTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class PreparedProfileTests(unittest.TestCase):
             "ASCEND_OPP_PATH": "/image/cann/opp", "ASCEND_AICPU_PATH": "/image/cann",
             "ASCEND_TOOLKIT_HOME": "/image/cann", "ATB_HOME_PATH": "/image/atb",
             "SOC_VERSION": "ascend910_9391", "ASCEND_RT_VISIBLE_DEVICES": "7",
-            "VAWS_PYTHON_SHIM_DIR": "/tmp/owned-shim",
+            "MINDIE_PYTHON_SHIM_DIR": "/tmp/owned-shim",
             "PATH": "/tmp/owned-shim:/task/.venv/bin:/tmp/owned-shim:/usr/bin",
             "API_TOKEN": "must-not-be-captured",
         })
@@ -96,9 +96,9 @@ class PreparedProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invalid captured manifest'):
                 backend._write_ready_profile(spec, {"recipe": "test"})
         command = bash.call_args_list[1].args[1]
-        self.assertIn("/etc/profile.d/vaws-ascend-env.sh", command)
-        self.assertLess(command.index("/etc/profile.d/vaws-ascend-env.sh"),
-                        command.index("export VAWS_PYTHON="))
+        self.assertIn("/etc/profile.d/mindie-ascend-env.sh", command)
+        self.assertLess(command.index("/etc/profile.d/mindie-ascend-env.sh"),
+                        command.index("export MINDIE_PYTHON="))
         self.assertIn("'/owned root/.venv/bin/python' - ", command)
 
 
