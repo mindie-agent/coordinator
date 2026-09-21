@@ -223,11 +223,9 @@ uvx --from git+https://github.com/mindie-agent/coordinator@main mindie-coordinat
 Replace `@main` with a commit or tag when you pin. `python -m mindie_coordinator`
 is the same entry as `mindie-coordinator`.
 
-The package depends on `remote-dev>=0.7.0` (import `remote_dev`). It
-does not pin that package's git source; the workspace that installs this
-library chooses the tag. `uv sync` / `uv lock` are not the developer path
-here: a library that named remote-dev's git source in `pyproject.toml`
-would pin every consumer to that tag.
+`pyproject.toml` pins reviewed public Git commits of `remote-dev` (import
+`remote_dev`) and `mindie-diagnostics`. Normal installation resolves this
+compatible set together; no separate remote-dev preinstallation is required.
 
 ## Start the task server
 
@@ -374,27 +372,20 @@ executed on the physical host. Durable host state defaults to
 
 ## Development
 
-`uv sync` is not the setup path. This library declares
-`remote-dev>=0.7.0` without a git source: remote-dev is not on PyPI,
-so `uv sync` / `uv lock` fail with an unsatisfiable-dependency error.
-That is intentional. A library that pinned remote-dev's git URL would
-take the upgrade decision away from every consumer, and
-`constraint-dependencies` cannot carry a git URL.
-
-Install the git source first, then this tree without resolving
-dependencies from an index:
+Install the package and its test dependencies in one resolution:
 
 ```bash
 uv venv
-uv pip install "remote-dev @ git+https://github.com/mindie-agent/remote-dev@13301ef7f52b53ffca0a6702a8a3c18f2edfcd52"
-uv pip install pytest "jsonschema>=4" "setuptools-scm>=8"
-uv pip install -e . --no-deps
+uv pip install -e ".[test]"
 .venv/bin/python -m pytest
 ```
 
-`uv venv` is the first command so an unreadable project config fails
-before install. Do not add `[tool.uv.sources]` for remote-dev: that table
-travels to consumers. Requires Python 3.11+.
+Requires Python 3.11+. Dependency revisions are declared in `pyproject.toml`;
+there is no separate `[tool.uv.sources]` table or CI-only version list.
+For deliberate development overrides, install the selected dependency checkout
+with `--no-deps` only after preparing its complete compatible environment. That
+bypasses dependency resolution and does not establish compatibility with the
+reviewed set. Run `pip check` and the relevant acceptance for that override.
 
 On native Windows, run the same setup commands and use
 `.venv/Scripts/python.exe -m pytest tests`. The local daemon uses a locked state
