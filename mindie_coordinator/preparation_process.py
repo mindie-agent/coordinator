@@ -141,7 +141,16 @@ class PreparationProcess:
                             try:
                                 event = json.loads(line.split('=', 1)[1])
                                 if event.get('phase') in record.get('setup_steps', []) and isinstance(event.get('elapsed_seconds'), (int, float)):
-                                    record.setdefault('stage_timings', {})[event['phase']] = event['elapsed_seconds']
+                                    timings = record.setdefault('stage_timings', {})
+                                    if timings.get(event['phase']) != event['elapsed_seconds']:
+                                        timings[event['phase']] = event['elapsed_seconds']
+                                        # The remote observation was saved before emit.
+                                        # Retain its timing even if no further exchange
+                                        # occurs or the output callback fails.
+                                        try:
+                                            save_record(record)
+                                        except Exception as exc:
+                                            raise PreparationPostprocessError('persistence', record, exc) from exc
                             except (ValueError, TypeError):
                                 pass
                         try:

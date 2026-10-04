@@ -74,6 +74,102 @@ def test_short_preparation_returns_initial_output_and_exit_receipt_without_anoth
     assert saved[-1]["timings"] == {"prepare_ms": 10}
 
 
+@pytest.mark.parametrize('initial_quiet', [False, True])
+@pytest.mark.parametrize('newline', [False, True])
+def test_stage_timing_is_saved_from_final_output_before_callback(monkeypatch, initial_quiet, newline):
+    progress = PROGRESS_SENTINEL + json.dumps({'phase': 'prepare-root', 'elapsed_seconds': .125})
+    text = progress + ('\n' if newline else '')
+    complete = {'state': 'succeeded', 'quiet': True, 'result': {'exit_code': 0}}
+    chunks = ([dict(complete, stderr=text)] if initial_quiet else [
+        {'state': 'running', 'quiet': False, 'stderr': text[:20], 'stderr_offset': 20},
+        dict(complete, stderr=text[20:], stderr_offset=len(text)),
+    ])
+    remote = Mock(side_effect=chunks)
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved, output = [], []
+    def on_output(channel, line):
+        assert saved[-1]['quiet'] and saved[-1]['result']['exit_code'] == 0
+        assert saved[-1]['stage_timings'] == {'prepare-root': .125}
+        output.append((channel, line))
+    process = PreparationProcess(ENDPOINT, 'build', lambda row: saved.append(copy.deepcopy(row)), lambda: False,
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    assert process.run('build', on_output=on_output).returncode == 0
+    assert output == [('stderr', text)]
+    assert [call.args[2] for call in remote.call_args_list] == (['launch'] if initial_quiet else ['launch', 'exchange'])
+    assert not ({'stdout', 'stderr'} & saved[-1].keys())
+
+
+def test_stage_timing_only_saves_new_or_changed_values(monkeypatch):
+    lines = [PROGRESS_SENTINEL + json.dumps({'phase': 'prepare-root', 'elapsed_seconds': value}) + '\n'
+             for value in (.125, .125, .25)]
+    remote = Mock(return_value={'state': 'succeeded', 'quiet': True, 'result': {'exit_code': 0},
+                                'stderr': ''.join(lines)})
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved = []
+    process = PreparationProcess(ENDPOINT, 'build', lambda row: saved.append(copy.deepcopy(row)), lambda: False,
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    process.run('build', on_output=lambda *args: None)
+    assert [row['stage_timings'] for row in saved if 'stage_timings' in row] == [
+        {'prepare-root': .125}, {'prepare-root': .25}]
+    assert remote.call_count == 1
+
+
+@pytest.mark.parametrize('stage', ['persistence', 'output'])
+@pytest.mark.parametrize('exit_code', [0, 17])
+def test_stage_timing_postprocess_failure_preserves_completion(monkeypatch, stage, exit_code):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    remote = Mock(return_value={'state': 'succeeded' if exit_code == 0 else 'failed', 'quiet': True,
+                                'result': {'exit_code': exit_code}, 'stderr': PROGRESS_SENTINEL +
+                                json.dumps({'phase': 'prepare-root', 'elapsed_seconds': .125}) + '\n'})
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved = []
+    persist_error, output_error = OSError('timing receipt unavailable'), RuntimeError('output callback unavailable')
+    def save(row):
+        if stage == 'persistence' and 'stage_timings' in row:
+            raise persist_error
+        saved.append(copy.deepcopy(row))
+    output = Mock(side_effect=output_error)
+    process = PreparationProcess(ENDPOINT, 'build', save, lambda: False,
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    with pytest.raises(PreparationPostprocessError) as caught:
+        process.run('build', on_output=output)
+    failure = caught.value
+    assert failure.stage == stage
+    assert failure.original_error is (persist_error if stage == 'persistence' else output_error)
+    assert failure.completed.returncode == exit_code and failure.automatic_retry is False
+    assert failure.preparation_record['stage_timings'] == {'prepare-root': .125}
+    assert saved[-1]['quiet'] and saved[-1]['result']['exit_code'] == exit_code
+    if stage == 'persistence':
+        assert 'stage_timings' not in saved[-1]
+        output.assert_not_called()  # The second configured failure cannot hide the first.
+    else:
+        assert saved[-1]['stage_timings'] == {'prepare-root': .125}
+        output.assert_called_once()
+    assert remote.call_count == 1
+
+
+def test_cancel_drain_saves_split_stage_timing_without_final_newline(monkeypatch):
+    progress = PROGRESS_SENTINEL + json.dumps({'phase': 'prepare-root', 'elapsed_seconds': .125})
+    saved, actions, cancelled = [], [], [False]
+    def control(endpoint, job_id, action, **kwargs):
+        actions.append(action)
+        if action == 'launch':
+            cancelled[0] = True
+            return {'state': 'running', 'quiet': False, 'stderr': progress[:20], 'stderr_offset': 20}
+        if action == 'stop':
+            return {'state': 'cancelled', 'quiet': True, 'result': {'exit_code': -15}}
+        assert action == 'exchange' and kwargs['stderr_offset'] == 20
+        return {'state': 'cancelled', 'quiet': True, 'stderr': progress[20:], 'stderr_offset': len(progress)}
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', control)
+    process = PreparationProcess(ENDPOINT, 'build', lambda row: saved.append(copy.deepcopy(row)), lambda: cancelled[0],
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    with pytest.raises(PreparationCancelled):
+        process.run('build', on_output=lambda *args: None)
+    assert saved[-1]['stage_timings'] == {'prepare-root': .125}
+    assert saved[-1]['quiet'] and saved[-1]['result']['exit_code'] == -15
+    assert actions == ['launch', 'stop', 'exchange']
+
+
 def test_quiet_launch_drains_remaining_output_from_initial_offsets(monkeypatch):
     saved, output = [], []
     def control(endpoint, job_id, action, **kwargs):
