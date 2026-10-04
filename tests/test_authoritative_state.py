@@ -336,3 +336,20 @@ def test_event_cursor_schema_cannot_silently_lose_monotonicity(kind, tmp_path):
     with pytest.raises(ERRORS, match="schema"):
         open_store(kind, tmp_path)
     assert rows(store.db_path) == before
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("replaced", ["database", "marker"])
+def test_live_authority_rejects_even_valid_replacement(kind, replaced, tmp_path):
+    store = open_store(kind, tmp_path)
+    seed(store)
+    checkpoint(store.db_path)
+    path = store.db_path if replaced == "database" else store.db_path.with_name(store.db_path.name + ".owner")
+    before = rows(store.db_path)
+    replacement = path.with_name(path.name + ".replacement")
+    replacement.write_bytes(path.read_bytes())
+    replacement.replace(path)
+    with pytest.raises(ERRORS, match="replaced"):
+        with transaction(store) as db:
+            pytest.fail("replaced authority reached the business transaction")
+    assert rows(store.db_path) == before

@@ -733,11 +733,18 @@ class NpuCoordinator:
         self.expected_epoch = expected_epoch
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        self._authority_identity = self._current_identity()
+
+    def _current_identity(self):
+        marker = self.db_path.with_name(self.db_path.name + ".owner")
+        return tuple((info.st_dev, info.st_ino) for info in (self.db_path.lstat(), marker.lstat()))
 
     def _connect(self) -> sqlite3.Connection:
         self._check_marker()
         if not self.db_path.is_file() or self.db_path.stat().st_size == 0:
             raise self._state_error("database is missing, empty or invalid")
+        if self._current_identity() != self._authority_identity:
+            raise self._state_error("database or marker was replaced while this store was in use")
         connection = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=rw", uri=True,
                                      timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row

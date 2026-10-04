@@ -110,6 +110,10 @@ class LocalAuthority:
                         # replacing schema, identities or operation outcomes.
                         write_marker(self.marker, self.identity)
                 db.execute("PRAGMA journal_mode=WAL")
+        self._authority_identity = self._current_identity()
+
+    def _current_identity(self):
+        return tuple((info.st_dev, info.st_ino) for info in (self.path.lstat(), self.marker.lstat()))
 
     def _error(self, reason):
         return AuthorityStateError(f"authoritative state {self.path}: {reason}; existing state was preserved, not rebuilt")
@@ -138,6 +142,8 @@ class LocalAuthority:
     def transaction(self, *, read_only=False):
         self._check_marker()
         self._check_file()
+        if self._current_identity() != self._authority_identity:
+            raise self._error("database or marker was replaced while this store was in use")
         mode = "ro" if read_only else "rw"
         with contextlib.closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=" + mode, uri=True,
                                                timeout=self.timeout)) as db:
