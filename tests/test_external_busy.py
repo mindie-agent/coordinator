@@ -221,12 +221,15 @@ def test_unguarded_shared_legacy_activation_cannot_be_released_from_occupancy(qu
     assert result["state"] == "orphaned_busy"
 
 
-def test_existing_host_database_keeps_strict_policy_on_upgrade(queue, tmp_path):
+def test_incomplete_host_policy_schema_is_not_silently_repaired(queue, tmp_path):
     host, _ = queue
     submit(host, "existing", allow_external_busy=False)
     with sqlite3.connect(host.db_path) as db:
         db.execute("ALTER TABLE tasks DROP COLUMN allow_external_busy")
         db.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
-    upgraded = NpuCoordinator(tmp_path, clock=host.clock)
-    result = upgraded.acquire("existing", BUSY)
-    assert result["status"] == "waiting" and result["task"]["allow_external_busy"] is False
+    with pytest.raises(CoordinationError, match="schema version is missing or incompatible"):
+        NpuCoordinator(tmp_path, clock=host.clock)
+    with sqlite3.connect(host.db_path) as db:
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "5"
+        assert db.execute("SELECT task_id,state FROM tasks").fetchall() == [("existing", "queued")]
+        assert "allow_external_busy" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
