@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-import sqlite3
 import threading
 import time
 import uuid
@@ -21,6 +20,7 @@ from typing import Any
 from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERMINAL, ManagedExecution
 from mindie_coordinator.runtime_profile import digest
 from mindie_coordinator.run_manifest import utc_now
+from mindie_coordinator.owned_sqlite import LocalAuthority, POOL_SCHEMA
 
 TERMINAL = {"released", "cancelled", "expired"}
 _PROCESS_INSTANCE = uuid.uuid4().hex
@@ -75,9 +75,8 @@ class RuntimePool(ManagedExecution):
         # or another run's heartbeat (which the host expires after its TTL).
         self.lock = threading.RLock()
         self._entity_locks: dict[tuple[str, str], threading.Lock] = {}
-        with self.transaction() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS records(kind TEXT, id TEXT, data TEXT NOT NULL, PRIMARY KEY(kind,id))")
-            db.execute("CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, data TEXT NOT NULL)")
+        self._authority = LocalAuthority(self.db_path, identity="mindie.runtime-pool.v1",
+                                         schema=POOL_SCHEMA, residue=("runs", "results", "coordinator.ipc"), timeout=60)
 
     def _entity_lock(self, kind: str, key: str) -> threading.Lock:
         """Per-entity lock serializing remote-call sections for one resource."""
@@ -86,13 +85,8 @@ class RuntimePool(ManagedExecution):
 
     @contextlib.contextmanager
     def transaction(self):
-        # The connection context manager commits/rolls back but never closes.
-        with contextlib.closing(sqlite3.connect(self.db_path, timeout=60)) as db:
-            with db:
-                db.execute("PRAGMA journal_mode=WAL")
-                db.execute("PRAGMA synchronous=FULL")
-                db.execute("BEGIN IMMEDIATE")
-                yield db
+        with self._authority.transaction() as db:
+            yield db
 
     @staticmethod
     def get(db, kind, key):
@@ -549,8 +543,7 @@ class RuntimePool(ManagedExecution):
         if not keys:
             return {"operations": [], "truncated": False}
         limit = max(1, min(512, int(limit)))
-        uri = self.db_path.resolve().as_uri() + "?mode=ro"
-        with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        with self._authority.transaction(read_only=True) as db:
             for key in keys:
                 self.owned(db, "run", key, owner)
             marks = ",".join("?" for _ in keys)

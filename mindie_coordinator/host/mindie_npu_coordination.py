@@ -10,13 +10,14 @@ Managed leases, holds, owned processes and service ports remain protected.
 The module is stdlib-only because the agent-facing wrapper sends this source to
 the bare-metal host and executes it there.  State defaults to
 ``/tmp/mindie-npu-coordinator/v1`` (override with ``MINDIE_NPU_COORDINATOR_STATE_DIR``
-or ``request["state_dir"]``) and is expected to disappear after a host or
-``/tmp`` reset; a missing database simply starts a new coordination epoch.
+or ``request["state_dir"]``). Only demonstrably fresh state starts a new epoch;
+a missing database beside existing state or an expected epoch is a failure.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 from contextvars import ContextVar
 import json
 import os
@@ -29,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _DIAGNOSTIC_PHASES = ContextVar("host_diagnostic_phases", default=None)
 _DIAGNOSTIC_PROCESS = uuid.uuid4().hex
 
@@ -587,6 +588,136 @@ def probe_npu_occupancy() -> dict[str, Any]:
     return parsed
 
 
+# One declared host schema; previous complete v6 stores may only relax the
+# queue deadline's nullability. Missing authority is never schema migration.
+_HOST_SCHEMA = tuple(statement.strip() for statement in """
+CREATE TABLE meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE tasks (
+    task_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    agent_alias TEXT,
+    session_id TEXT,
+    container_name TEXT,
+    requested_count INTEGER NOT NULL,
+    requested_devices TEXT,
+    allow_external_busy INTEGER NOT NULL DEFAULT 0,
+    not_before REAL NOT NULL,
+    latest_start REAL,
+    estimated_duration_seconds INTEGER NOT NULL,
+    preemptible INTEGER NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL,
+    submitted_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    granted_devices TEXT,
+    activation_deadline REAL,
+    fence_token INTEGER,
+    started_at REAL,
+    expected_end REAL,
+    heartbeat_at REAL,
+    heartbeat_deadline REAL,
+    pid INTEGER,
+    message TEXT,
+    requested_service_port INTEGER,
+    service_port_choices TEXT,
+    granted_service_port INTEGER,
+    process_guard TEXT
+);
+
+CREATE INDEX idx_tasks_queue
+    ON tasks(state, priority DESC, submitted_at ASC);
+
+CREATE TABLE holds (
+    hold_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    devices TEXT NOT NULL,
+    not_before REAL NOT NULL,
+    end_at REAL NOT NULL,
+    reason TEXT,
+    state TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE INDEX idx_holds_window
+    ON holds(state, not_before, end_at);
+
+CREATE TABLE ports (
+    port INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX idx_ports_task
+    ON ports(task_id);
+
+CREATE TABLE events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    task_id TEXT,
+    data TEXT NOT NULL
+);
+
+CREATE TABLE message_peers (
+    user TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seen_at REAL NOT NULL,
+    PRIMARY KEY(user, session_id)
+);
+
+CREATE TABLE messages (
+    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL UNIQUE,
+    sender TEXT NOT NULL,
+    sender_session TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    recipient_session TEXT NOT NULL,
+    data TEXT NOT NULL
+);
+
+CREATE INDEX idx_messages_recipient
+    ON messages(recipient, recipient_session, cursor);
+""".split(";") if statement.strip())
+_HOST_RELEASE_TRIGGER = """
+CREATE TRIGGER protect_managed_process_release
+BEFORE UPDATE OF state ON tasks
+WHEN OLD.process_guard IS NOT NULL AND NEW.process_guard IS NOT NULL
+     AND NEW.state IN ('released', 'cancelled', 'expired')
+BEGIN
+    SELECT RAISE(ABORT, 'managed process guard must be verified before release');
+END
+"""
+_HOST_OWNER = "mindie.host-coordinator.v1\n"
+
+
+def _host_schema_objects(db):
+    result = {}
+    for name, kind, sql in db.execute("SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"):
+        if kind == "table":
+            quoted = name.replace('"', '""')
+            columns = {row[1]: tuple(row[2:]) for row in db.execute('PRAGMA table_info("' + quoted + '")')}
+            unique = sorted(tuple(row[2] for row in db.execute('PRAGMA index_info("' + idx[1].replace('"', '""') + '")'))
+                            for idx in db.execute('PRAGMA index_list("' + quoted + '")') if idx[2])
+            result[name] = (kind, columns, unique, bool(re.search(r"\bAUTOINCREMENT\b", sql, re.I)))
+        else:
+            result[name] = (kind, re.sub(r"\s+", "", sql.replace("IF NOT EXISTS ", "")).rstrip(";"))
+    return result
+
+
+with contextlib.closing(sqlite3.connect(":memory:")) as _model:
+    for _statement in _HOST_SCHEMA:
+        _model.execute(_statement)
+    _model.execute(_HOST_RELEASE_TRIGGER)
+    _HOST_SHAPES = _host_schema_objects(_model)
+
+
 class NpuCoordinator:
     """SQLite-backed cooperative queue for one bare-metal host."""
 
@@ -605,156 +736,152 @@ class NpuCoordinator:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.db_path), timeout=30, isolation_level=None)
+        self._check_marker()
+        if not self.db_path.is_file() or self.db_path.stat().st_size == 0:
+            raise self._state_error("database is missing, empty or invalid")
+        connection = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=rw", uri=True,
+                                     timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=30000")
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
+        try:
+            connection.execute("PRAGMA busy_timeout=30000")
+            connection.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
+    def _state_error(self, reason):
+        return CoordinationError(f"authoritative host state {self.db_path}: {reason}; state and leases were preserved, not rebuilt",
+                                 error_code="authority_state_invalid")
+
+    def _check_marker(self, *, required=True):
+        marker = self.db_path.with_name(self.db_path.name + ".owner")
+        if marker.is_symlink() or self.db_path.is_symlink():
+            raise self._state_error("database and ownership marker must be regular local files")
+        if not marker.exists():
+            if required:
+                raise self._state_error("ownership marker is missing")
+            return
+        if not marker.is_file() or marker.read_text(encoding="utf-8") != _HOST_OWNER:
+            raise self._state_error("ownership marker is invalid")
+
+    def _write_marker(self):
+        marker = self.db_path.with_name(self.db_path.name + ".owner")
+        with marker.open("x", encoding="utf-8") as stream:
+            os.chmod(marker, 0o600)
+            stream.write(_HOST_OWNER)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name != "nt":
+            fd = os.open(marker.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+    def _validate(self, connection, *, allow_previous=False):
+        actual = _host_schema_objects(connection)
+        expected = _HOST_SHAPES
+        meta_shape = actual.get("meta")
+        if meta_shape != expected["meta"]:
+            raise self._state_error("required meta schema is missing or incompatible")
+        meta = dict(connection.execute("SELECT key,value FROM meta"))
+        version = meta.get("schema_version")
+        if version not in ({"6", str(SCHEMA_VERSION)} if allow_previous else {str(SCHEMA_VERSION)}):
+            raise self._state_error("schema version is missing or incompatible")
+        if allow_previous and version == "6" and "tasks" in actual:
+            # The sole supported semantic change is removing an implicit
+            # queue deadline. All other tables, columns and guards must match.
+            tasks = actual["tasks"]
+            latest = tasks[1].get("latest_start")
+            if latest == ("REAL", 1, None, 0):
+                tasks[1]["latest_start"] = ("REAL", 0, None, 0)
+        if actual != expected:
+            raise self._state_error("required table, column, index or guard schema is missing or incompatible")
+        epoch = meta.get("coordination_epoch")
+        if not isinstance(epoch, str) or not epoch.strip():
+            raise self._state_error("coordination epoch is missing or invalid")
+        if (self.expected_epoch is not None and epoch != self.expected_epoch
+                or getattr(self, "_epoch", epoch) != epoch):
+            raise CoordinationError("coordination epoch changed; reconcile ownership before retrying")
+        if not re.fullmatch(r"0|[1-9][0-9]*", meta.get("next_fence", "")):
+            raise self._state_error("next fencing token is missing or invalid")
+        return version, epoch
+
+    def _migrate_queue_deadline(self, connection):
+        columns = [row["name"] for row in connection.execute("PRAGMA table_info(tasks)")]
+        task_schema = next(sql for sql in _HOST_SCHEMA if sql.startswith("CREATE TABLE tasks"))
+        connection.execute(task_schema.replace("CREATE TABLE tasks", "CREATE TABLE tasks_next", 1))
+        names = ",".join('"' + column + '"' for column in columns)
+        connection.execute(f"INSERT INTO tasks_next ({names}) SELECT {names} FROM tasks")
+        connection.execute("DROP TABLE tasks")
+        connection.execute("ALTER TABLE tasks_next RENAME TO tasks")
+        connection.execute(next(sql for sql in _HOST_SCHEMA if sql.startswith("CREATE INDEX idx_tasks_queue")))
+        connection.execute(_HOST_RELEASE_TRIGGER)
+        connection.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
+        self._event(connection, "schema-migrated", data={"from": 6, "to": SCHEMA_VERSION,
+                    "change": "queue deadline accepts null; existing task deadlines and ownership preserved"})
+
     def _initialize(self) -> None:
-        connection = self._connect()
-        try:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS tasks (
-                    task_id TEXT PRIMARY KEY,
-                    agent_id TEXT NOT NULL,
-                    agent_alias TEXT,
-                    session_id TEXT,
-                    container_name TEXT,
-                    requested_count INTEGER NOT NULL,
-                    requested_devices TEXT,
-                    allow_external_busy INTEGER NOT NULL DEFAULT 0,
-                    not_before REAL NOT NULL,
-                    latest_start REAL NOT NULL,
-                    estimated_duration_seconds INTEGER NOT NULL,
-                    preemptible INTEGER NOT NULL DEFAULT 0,
-                    priority INTEGER NOT NULL DEFAULT 0,
-                    state TEXT NOT NULL,
-                    submitted_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    granted_devices TEXT,
-                    activation_deadline REAL,
-                    fence_token INTEGER,
-                    started_at REAL,
-                    expected_end REAL,
-                    heartbeat_at REAL,
-                    heartbeat_deadline REAL,
-                    pid INTEGER,
-                    message TEXT,
-                    requested_service_port INTEGER,
-                    service_port_choices TEXT,
-                    granted_service_port INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS idx_tasks_queue
-                    ON tasks(state, priority DESC, submitted_at ASC);
-                CREATE TABLE IF NOT EXISTS holds (
-                    hold_id TEXT PRIMARY KEY,
-                    owner TEXT NOT NULL,
-                    devices TEXT NOT NULL,
-                    not_before REAL NOT NULL,
-                    end_at REAL NOT NULL,
-                    reason TEXT,
-                    state TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_holds_window
-                    ON holds(state, not_before, end_at);
-                CREATE TABLE IF NOT EXISTS ports (
-                    port INTEGER PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    owner TEXT NOT NULL,
-                    created_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_ports_task
-                    ON ports(task_id);
-                CREATE TABLE IF NOT EXISTS events (
-                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    at REAL NOT NULL,
-                    kind TEXT NOT NULL,
-                    task_id TEXT,
-                    data TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS message_peers (
-                    user TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    seen_at REAL NOT NULL,
-                    PRIMARY KEY(user, session_id)
-                );
-                CREATE TABLE IF NOT EXISTS messages (
-                    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
-                    message_id TEXT NOT NULL UNIQUE,
-                    sender TEXT NOT NULL,
-                    sender_session TEXT NOT NULL,
-                    recipient TEXT NOT NULL,
-                    recipient_session TEXT NOT NULL,
-                    data TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_messages_recipient
-                    ON messages(recipient, recipient_session, cursor);
-                """
-            )
-            task_columns = {
-                row["name"] for row in connection.execute("PRAGMA table_info(tasks)")
-            }
-            if "agent_alias" not in task_columns:
-                try:
-                    connection.execute("ALTER TABLE tasks ADD COLUMN agent_alias TEXT")
-                except sqlite3.OperationalError as exc:
-                    if "duplicate column" not in str(exc).lower():
-                        raise
-            if "process_guard" not in task_columns:
-                try:
-                    connection.execute("ALTER TABLE tasks ADD COLUMN process_guard TEXT")
-                except sqlite3.OperationalError as exc:
-                    if "duplicate column" not in str(exc).lower():
-                        raise
-            for column, decl in (
-                ("allow_external_busy", "INTEGER NOT NULL DEFAULT 0"),
-                ("requested_service_port", "INTEGER"),
-                ("service_port_choices", "TEXT"),
-                ("granted_service_port", "INTEGER"),
-            ):
-                if column not in task_columns:
+        # This source executes alone on Linux hosts. Its OS lock is independent
+        # of SQLite so concurrent true first use has only one initializer.
+        lock = self.db_path.with_name(self.db_path.name + ".init.lock")
+        with lock.open("a+b") as guard:
+            if os.name == "nt":
+                # Host execution uses Linux; the native Windows test/runtime
+                # also keeps the lock OS-owned, including an empty lock file.
+                import msvcrt
+                while True:
                     try:
-                        connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} {decl}")
-                    except sqlite3.OperationalError as exc:
-                        if "duplicate column" not in str(exc).lower():
+                        guard.seek(0)
+                        msvcrt.locking(guard.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in (errno.EACCES, errno.EAGAIN):
                             raise
-            # Older clients send the host protocol source with each request.
-            # They do not know about process guards. Do not let their generic
-            # "hardware free" UPDATE release a guarded CPU-initializing job.
-            connection.execute("""
-                CREATE TRIGGER IF NOT EXISTS protect_managed_process_release
-                BEFORE UPDATE OF state ON tasks
-                WHEN OLD.process_guard IS NOT NULL AND NEW.process_guard IS NOT NULL
-                     AND NEW.state IN ('released', 'cancelled', 'expired')
-                BEGIN
-                    SELECT RAISE(ABORT, 'managed process guard must be verified before release');
-                END
-            """)
-            connection.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
-            connection.execute(
-                "UPDATE meta SET value=? WHERE key='schema_version'",
-                (str(SCHEMA_VERSION),),
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES('coordination_epoch', ?)",
-                (str(uuid.uuid4()),),
-            )
-            connection.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('next_fence', '0')")
-        finally:
-            connection.close()
+                        time.sleep(.01)
+            else:
+                import fcntl
+                fcntl.flock(guard, fcntl.LOCK_EX)
+            self._check_marker(required=False)
+            marker = self.db_path.with_name(self.db_path.name + ".owner")
+            fresh = not self.db_path.exists()
+            if fresh:
+                residue = [self.db_path.with_name(self.db_path.name + suffix)
+                           for suffix in ("-wal", "-shm", "-journal")]
+                if self.expected_epoch is not None or marker.exists() or any(p.exists() or p.is_symlink() for p in residue):
+                    raise self._state_error("database is missing; existing coordination cannot start a new epoch")
+                self._write_marker()
+            elif not self.db_path.is_file() or self.db_path.stat().st_size == 0:
+                raise self._state_error("database is empty or invalid")
+            uri = self.db_path.resolve().as_uri() + "?mode=rw"
+            with contextlib.closing(sqlite3.connect(self.db_path if fresh else uri, uri=not fresh,
+                                                   timeout=30, isolation_level=None)) as connection:
+                connection.row_factory = sqlite3.Row
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    if fresh:
+                        for statement in _HOST_SCHEMA:
+                            connection.execute(statement)
+                        connection.execute(_HOST_RELEASE_TRIGGER)
+                        connection.executemany("INSERT INTO meta(key,value) VALUES(?,?)", [
+                            ("schema_version", str(SCHEMA_VERSION)),
+                            ("coordination_epoch", str(uuid.uuid4())), ("next_fence", "0")])
+                    version, epoch = self._validate(connection, allow_previous=True)
+                    if not marker.exists():
+                        self._write_marker()
+                    if version == "6":
+                        self._migrate_queue_deadline(connection)
+                        self._validate(connection)
+                    connection.execute("COMMIT")
+                except BaseException as exc:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error as rollback_error:
+                        exc.add_note(f"initialization rollback also failed: {rollback_error}")
+                    raise
+                connection.execute("PRAGMA journal_mode=WAL")
+                self._epoch = epoch
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -763,10 +890,7 @@ class NpuCoordinator:
         try:
             connection.execute("BEGIN IMMEDIATE")
             _diagnostic_elapsed("state_lock_wait_ms", started)
-            if self.expected_epoch is not None:
-                epoch = connection.execute("SELECT value FROM meta WHERE key='coordination_epoch'").fetchone()
-                if epoch is None or epoch["value"] != self.expected_epoch:
-                    raise CoordinationError("coordination epoch changed; reconcile ownership before retrying")
+            self._validate(connection)
             yield connection
             connection.execute("COMMIT")
         except Exception:

@@ -11,13 +11,13 @@ import contextlib
 import hashlib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
 
+from mindie_coordinator.owned_sqlite import LocalAuthority, RECORDS_SCHEMA
 from mindie_coordinator.state_paths import agent_sessions_root
 from mindie_coordinator.client_paths import client_path
 
@@ -71,18 +71,13 @@ class AgentSessions:
         self.state_dir = Path(client_path(state_dir or agent_sessions_root())).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db_path = self.state_dir / "sessions.sqlite3"
-        with self.transaction() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS records(kind TEXT, id TEXT, data TEXT NOT NULL, PRIMARY KEY(kind,id))")
+        self._authority = LocalAuthority(self.db_path, identity="mindie.agent-sessions.v1",
+                                         schema=RECORDS_SCHEMA, residue=("contexts", "source-inputs"))
 
     @contextlib.contextmanager
     def transaction(self):
-        # `with sqlite3.connect(...)` commits or rolls back but never closes.
-        with contextlib.closing(sqlite3.connect(self.db_path, timeout=10)) as db:
-            with db:
-                db.execute("PRAGMA journal_mode=WAL")
-                db.execute("PRAGMA synchronous=FULL")
-                db.execute("BEGIN IMMEDIATE")
-                yield db
+        with self._authority.transaction() as db:
+            yield db
 
     @staticmethod
     def get(db, kind, key):
