@@ -52,3 +52,30 @@ def test_first_job_bootstraps_from_existing_parent_once(tmp_path, monkeypatch):
     assert saved[0]['endpoint']['root'] == str(tmp_path)
     assert saved[-1]['endpoint']['root'] == str(root)
     assert any('prepare-root' in row.get('stage_timings', {}) for row in saved)
+
+
+@pytest.mark.skipif(sys.platform not in ('linux', 'darwin'), reason='actual preparation uses POSIX descriptor paths')
+def test_completed_local_bootstrap_persists_stage_timing_in_first_observation(tmp_path, monkeypatch):
+    """A real command finishes before the controller receives its first reply."""
+    from mindie_coordinator.preparation_process import PreparationProcess
+    root = tmp_path / 'execution'
+    endpoint = {'host': 'local.invalid', 'port': 22, 'user': 'test', 'root': str(root), 'cwd': str(root)}
+    saved, actions = [], []
+    def control(endpoint, job_id, action, **kwargs):
+        assert action == 'launch' and saved[-1]['state'] == 'pending'
+        actions.append((job_id, action))
+        result = subprocess.run(['bash', '-c', kwargs['spec']['command']], cwd=endpoint['cwd'],
+                                capture_output=True, text=True, timeout=10)
+        return {'state': 'succeeded' if result.returncode == 0 else 'failed', 'quiet': True,
+                'stdout': result.stdout, 'stderr': result.stderr, 'result': {'exit_code': result.returncode}}
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', control)
+    process = PreparationProcess(endpoint, 'materialize', lambda row: saved.append(copy.deepcopy(row)), lambda: False,
+        setup=[('prepare-root', 'mkdir -p ' + shlex.quote(str(root)) + '; echo setup >> ' + shlex.quote(str(root / 'count')))],
+        bootstrap_root=str(tmp_path))
+    output = []
+    result = process.run('printf materialized', on_output=lambda *args: output.append(args))
+    assert result.returncode == 0 and len(actions) == 1
+    assert (root / 'count').read_text().splitlines() == ['setup']
+    assert saved[-1]['stage_timings']['prepare-root'] >= 0
+    assert saved[-1]['quiet'] and saved[-1]['result']['exit_code'] == 0
+    assert ('stdout', 'materialized') in output

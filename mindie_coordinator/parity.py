@@ -317,7 +317,7 @@ def _export_existing_source_objects(host_endpoint, records, legacy_cache):
     script = inspect.getsource(export_existing_objects)
     script += '\nimport json,sys\nprint(json.dumps(export_existing_objects(json.load(sys.stdin))))\n'
     result = run_remote_python(resolve_endpoint({**host_endpoint, 'root': '/', 'cwd': '/'}), script,
-        {'records': records, 'legacy_cache': legacy_cache, 'export_source': source}, timeout_ms=360000)
+        {'records': records, 'legacy_cache': legacy_cache, 'export_source': source}, timeout_ms=None)
     if result.get('status') == 'cancelled':
         raise PreparationCancelled('fixed object export cancelled; it was not replayed')
     if (result.get('status') == 'failed' and result.get('exit_code') is not None
@@ -613,7 +613,7 @@ ASCEND_PIP_TRUSTED_HOST = 'mirrors.huaweicloud.com'
 
 DEFAULT_CONTAINER_CACHE_ROOT = '/root/.cache/mindie/remote-code-parity'
 DEFAULT_MARKER_DIRNAME = '.remote-code-parity'
-DEFAULT_GIT_TRANSPORT_TIMEOUT_SECONDS = 900.0
+DEFAULT_GIT_TRANSPORT_TIMEOUT_SECONDS = None
 DEFAULT_CONTAINER_LOCK_STALE_SECONDS = 3600
 # Keep runtime-private state and profiling artifacts that may be needed for
 # post-run analysis across parity refreshes.

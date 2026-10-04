@@ -42,8 +42,8 @@ def task_preamble(binding):
 
 class ManagedExecution:
     def managed_start(self, owner, binding_id, request_id, snapshots, expected_build_key,
-                      devices, npu_count, command, env, timeout_seconds=1800,
-                      priority=0, queue_seconds=1800, service_port=None, hold_go=False,
+                      devices, npu_count, command, env, timeout_seconds=None,
+                      priority=0, queue_seconds=None, service_port=None, hold_go=False,
                       allow_external_busy=False):
         if not isinstance(command, str) or not command.strip() or len(command) > 200000:
             raise ValueError("a bounded nonempty shell command is required")
@@ -52,10 +52,10 @@ class ManagedExecution:
                                            or key in {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", ENV_NAME}
                                            or not isinstance(value, str) for key, value in env.items()):
             raise ValueError("invalid environment or attempted override of managed device or service-port ownership")
-        if timeout_seconds is not None and (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400):
-            raise ValueError("timeout_seconds must be None or 1..86400")
-        if type(queue_seconds) is not int or not 1 <= queue_seconds <= 86400:
-            raise ValueError("queue_seconds must be 1..86400")
+        if timeout_seconds is not None and (type(timeout_seconds) is not int or timeout_seconds < 1):
+            raise ValueError("timeout_seconds must be None or a positive integer")
+        if queue_seconds is not None and (type(queue_seconds) is not int or queue_seconds < 1):
+            raise ValueError("queue_seconds must be None or a positive integer")
         if service_port is not None and (type(service_port) is not int or service_port < 0):
             raise ValueError("service_port must be None, 0, or a positive declared runtime service port")
         if type(allow_external_busy) is not bool or (allow_external_busy and (
@@ -242,8 +242,7 @@ class ManagedExecution:
                     specification = {**job["spec"], "command": command, "cwd": binding["endpoint"]["cwd"],
                                      "env": {**job["spec"]["env"], **run["environment"],
                                              ENV_NAME: json.dumps(receipt, sort_keys=True)},
-                                     "prepared_timeout_seconds": max(120, job["request"]["queue_seconds"])
-                                     if job.get("hold_go") else 120}
+                                     "prepared_timeout_seconds": job["request"]["queue_seconds"]}
                     job["service_port"] = run.get("service_port")
                     with self._run_operation(run, "prepare"):
                         observed = self.backend.job(runtime, job["job_id"], "prepare", spec=specification)

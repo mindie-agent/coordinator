@@ -37,7 +37,7 @@ def test_root_rpc_uses_subsequent_job_endpoint_and_preserves_logs(preparation, m
     assert len(calls) == 1
     assert endpoint.root == endpoint.effective_cwd == preparation.endpoint['root']
     assert (endpoint.host, endpoint.port, endpoint.user) == ('fixture.invalid', 46001, 'root')
-    assert options == {'timeout_ms': 45000}
+    assert options == {'timeout_ms': None}
     assert 'mkdir -p /new-execution' in script
     assert (tmp_path / 'prepare-root.log').read_text() == 'created\nwarning\n'
     assert len(preparation.finished) == 1

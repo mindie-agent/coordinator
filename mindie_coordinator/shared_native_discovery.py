@@ -104,7 +104,7 @@ def export_verified_donor(request: dict, run=subprocess.run) -> dict:
         exports = '\n'.join('export ' + key + '=' + shlex.quote(value) for key, value in environment.items())
         command = exports + '\nexec python3 - ' + shlex.quote(json.dumps({'root': donor['root']}))
         exported = run(['docker', 'exec', '-i', donor['container_id'], 'bash', '-c', command],
-                       input=request['export_source'], capture_output=True, text=True, timeout=60)
+                       input=request['export_source'], capture_output=True, text=True, timeout=None)
         if exported.returncode == 0:
             result = json.loads(exported.stdout)
             if result.get('status') == 'stored':

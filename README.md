@@ -63,7 +63,10 @@ resource release; business success also requires `state == "succeeded"`.
 If a bounded wait returns `wait_timed_out=True`, inspect its facts and wait on
 the same id again as needed; that timeout does not stop or resubmit the work.
 Wait budgets are 0–600 seconds and are separate from the command's execution
-timeout. The owner handles waiting; no Agent status loop is required. Terminal
+timeout. Commands, preparation, uploads and NPU queue admission have no default
+execution deadline; a caller may supply an explicit limit. Renewable host leases,
+process ownership and observed device occupancy still govern health and release.
+A bounded wait only ends observation. The owner handles waiting; no Agent status loop is required. Terminal
 wait returns `stdout` / `stderr` / `tail`, collected once and cached on the execution.
 A slow log read can return `logs_pending=True`; a failed read returns `tail_error`.
 Neither changes the business state or release facts. Waiting again on the same

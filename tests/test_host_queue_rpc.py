@@ -49,7 +49,7 @@ def test_default_backend_executes_fixed_host_code_with_separate_payloads(tmp_pat
     assert len({code for _, code, _, _ in calls}) == 1
     assert "def handle_request(" in calls[0][1]
     assert "cpu-task" not in calls[0][1]
-    assert all(endpoint.root == "/" and endpoint.cwd == "/" and timeout == 45000
+    assert all(endpoint.root == "/" and endpoint.cwd == "/" and timeout is None
                for endpoint, _, _, timeout in calls)
     backend.bash.assert_not_called()
 

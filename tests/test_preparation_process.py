@@ -34,7 +34,7 @@ def test_receipt_saved_before_launch_and_progress_survives_split_chunks(monkeypa
         if action == "launch":
             assert saved[-1]["state"] == "pending"
             assert kwargs["spec"] == {"command": "build", "cwd": ENDPOINT["cwd"], "env": {},
-                                      "timeout_seconds": 7200, "interactive": False}
+                                      "timeout_seconds": None, "interactive": False}
             assert kwargs["authorization"] == {}
             assert kwargs["stdout_offset"] == kwargs["stderr_offset"] == 0
             assert kwargs["max_bytes"] == 32768 and kwargs["yield_time_ms"] == 1000
@@ -72,6 +72,102 @@ def test_short_preparation_returns_initial_output_and_exit_receipt_without_anoth
     assert saved[-1]["quiet"] is True and saved[-1]["stdout_offset"] == 8
     assert not ({"stdout", "stderr"} & saved[-1].keys())
     assert saved[-1]["timings"] == {"prepare_ms": 10}
+
+
+@pytest.mark.parametrize('initial_quiet', [False, True])
+@pytest.mark.parametrize('newline', [False, True])
+def test_stage_timing_is_saved_from_final_output_before_callback(monkeypatch, initial_quiet, newline):
+    progress = PROGRESS_SENTINEL + json.dumps({'phase': 'prepare-root', 'elapsed_seconds': .125})
+    text = progress + ('\n' if newline else '')
+    complete = {'state': 'succeeded', 'quiet': True, 'result': {'exit_code': 0}}
+    chunks = ([dict(complete, stderr=text)] if initial_quiet else [
+        {'state': 'running', 'quiet': False, 'stderr': text[:20], 'stderr_offset': 20},
+        dict(complete, stderr=text[20:], stderr_offset=len(text)),
+    ])
+    remote = Mock(side_effect=chunks)
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved, output = [], []
+    def on_output(channel, line):
+        assert saved[-1]['quiet'] and saved[-1]['result']['exit_code'] == 0
+        assert saved[-1]['stage_timings'] == {'prepare-root': .125}
+        output.append((channel, line))
+    process = PreparationProcess(ENDPOINT, 'build', lambda row: saved.append(copy.deepcopy(row)), lambda: False,
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    assert process.run('build', on_output=on_output).returncode == 0
+    assert output == [('stderr', text)]
+    assert [call.args[2] for call in remote.call_args_list] == (['launch'] if initial_quiet else ['launch', 'exchange'])
+    assert not ({'stdout', 'stderr'} & saved[-1].keys())
+
+
+def test_stage_timing_only_saves_new_or_changed_values(monkeypatch):
+    lines = [PROGRESS_SENTINEL + json.dumps({'phase': 'prepare-root', 'elapsed_seconds': value}) + '\n'
+             for value in (.125, .125, .25)]
+    remote = Mock(return_value={'state': 'succeeded', 'quiet': True, 'result': {'exit_code': 0},
+                                'stderr': ''.join(lines)})
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved = []
+    process = PreparationProcess(ENDPOINT, 'build', lambda row: saved.append(copy.deepcopy(row)), lambda: False,
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    process.run('build', on_output=lambda *args: None)
+    assert [row['stage_timings'] for row in saved if 'stage_timings' in row] == [
+        {'prepare-root': .125}, {'prepare-root': .25}]
+    assert remote.call_count == 1
+
+
+@pytest.mark.parametrize('stage', ['persistence', 'output'])
+@pytest.mark.parametrize('exit_code', [0, 17])
+def test_stage_timing_postprocess_failure_preserves_completion(monkeypatch, stage, exit_code):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    remote = Mock(return_value={'state': 'succeeded' if exit_code == 0 else 'failed', 'quiet': True,
+                                'result': {'exit_code': exit_code}, 'stderr': PROGRESS_SENTINEL +
+                                json.dumps({'phase': 'prepare-root', 'elapsed_seconds': .125}) + '\n'})
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved = []
+    persist_error, output_error = OSError('timing receipt unavailable'), RuntimeError('output callback unavailable')
+    def save(row):
+        if stage == 'persistence' and 'stage_timings' in row:
+            raise persist_error
+        saved.append(copy.deepcopy(row))
+    output = Mock(side_effect=output_error)
+    process = PreparationProcess(ENDPOINT, 'build', save, lambda: False,
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    with pytest.raises(PreparationPostprocessError) as caught:
+        process.run('build', on_output=output)
+    failure = caught.value
+    assert failure.stage == stage
+    assert failure.original_error is (persist_error if stage == 'persistence' else output_error)
+    assert failure.completed.returncode == exit_code and failure.automatic_retry is False
+    assert failure.preparation_record['stage_timings'] == {'prepare-root': .125}
+    assert saved[-1]['quiet'] and saved[-1]['result']['exit_code'] == exit_code
+    if stage == 'persistence':
+        assert 'stage_timings' not in saved[-1]
+        output.assert_not_called()  # The second configured failure cannot hide the first.
+    else:
+        assert saved[-1]['stage_timings'] == {'prepare-root': .125}
+        output.assert_called_once()
+    assert remote.call_count == 1
+
+
+def test_cancel_drain_saves_split_stage_timing_without_final_newline(monkeypatch):
+    progress = PROGRESS_SENTINEL + json.dumps({'phase': 'prepare-root', 'elapsed_seconds': .125})
+    saved, actions, cancelled = [], [], [False]
+    def control(endpoint, job_id, action, **kwargs):
+        actions.append(action)
+        if action == 'launch':
+            cancelled[0] = True
+            return {'state': 'running', 'quiet': False, 'stderr': progress[:20], 'stderr_offset': 20}
+        if action == 'stop':
+            return {'state': 'cancelled', 'quiet': True, 'result': {'exit_code': -15}}
+        assert action == 'exchange' and kwargs['stderr_offset'] == 20
+        return {'state': 'cancelled', 'quiet': True, 'stderr': progress[20:], 'stderr_offset': len(progress)}
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', control)
+    process = PreparationProcess(ENDPOINT, 'build', lambda row: saved.append(copy.deepcopy(row)), lambda: cancelled[0],
+                                 setup=[('prepare-root', 'true')], bootstrap_root='/tmp')
+    with pytest.raises(PreparationCancelled):
+        process.run('build', on_output=lambda *args: None)
+    assert saved[-1]['stage_timings'] == {'prepare-root': .125}
+    assert saved[-1]['quiet'] and saved[-1]['result']['exit_code'] == -15
+    assert actions == ['launch', 'stop', 'exchange']
 
 
 def test_quiet_launch_drains_remaining_output_from_initial_offsets(monkeypatch):
@@ -161,6 +257,22 @@ def test_stop_transport_failure_is_unknown(monkeypatch):
     record = {"endpoint": ENDPOINT, "job_id": "prepare-retained", "quiet": False}
     assert stop_preparation_process(record, lambda _: None) is False
     assert record["state"] == "uncertain" and record["quiet"] is False
+
+
+def test_diagnostic_failure_preserves_completed_remote_command(monkeypatch):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    control = Mock(return_value={"state": "succeeded", "quiet": True,
+                                 "result": {"exit_code": 0}, "timings": {"prepare_ms": 10}})
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
+    recorder = Mock()
+    recorder.event.side_effect = OSError("diagnostic disk unavailable")
+    monkeypatch.setattr("mindie_coordinator.preparation_process.get_recorder", lambda _: recorder)
+    with pytest.raises(PreparationPostprocessError) as caught:
+        PreparationProcess(ENDPOINT, "build", lambda _: None, lambda: False).run("build", on_output=lambda *a: None)
+    assert caught.value.stage == "diagnostics"
+    assert caught.value.completed.returncode == 0
+    assert caught.value.preparation_record["quiet"] is True
+    assert control.call_count == 1
 
 
 @pytest.mark.parametrize("quiet", [False, True])
@@ -292,3 +404,65 @@ def test_actual_supervisor_can_stop_after_losing_the_launch_reply(tmp_path, monk
     finally:
         if saved:
             stop_preparation_process(saved[-1], lambda _: None, force=True)
+
+
+@pytest.mark.parametrize('stage', ['persistence', 'output'])
+@pytest.mark.parametrize('exit_code', [0, 17])
+def test_completed_remote_fact_survives_local_postprocessing_failure(monkeypatch, stage, exit_code):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    observed = {"state": "succeeded" if exit_code == 0 else "failed", "quiet": True,
+                "stdout": "terminal output\n", "result": {"exit_code": exit_code}}
+    remote = Mock(return_value=observed)
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved = []
+    error = OSError('local recording unavailable')
+    def save(row):
+        saved.append(copy.deepcopy(row))
+        if stage == 'persistence' and len(saved) > 1:
+            raise error
+    def output(*args):
+        if stage == 'output':
+            raise error
+    with pytest.raises(PreparationPostprocessError) as caught:
+        PreparationProcess(ENDPOINT, 'build', save, lambda: False).run('build', on_output=output)
+    failure = caught.value
+    assert failure.original_error is error and failure.stage == stage
+    assert failure.completed.returncode == exit_code
+    assert failure.preparation_record['quiet'] is True
+    assert failure.preparation_record['result']['exit_code'] == exit_code
+    assert len(saved) == 2 and remote.call_count == 1
+
+
+def test_transport_failure_is_not_hidden_by_second_persistence_failure(monkeypatch):
+    transport = OSError('original SSH failure')
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', Mock(side_effect=transport))
+    saved = []
+    def save(row):
+        saved.append(copy.deepcopy(row))
+        if len(saved) > 1:
+            raise OSError('disk failure')
+    with pytest.raises(PreparationUncertain) as caught:
+        PreparationProcess(ENDPOINT, 'build', save, lambda: False).run('build', on_output=lambda *a: None)
+    assert caught.value.__cause__ is transport
+    assert caught.value.preparation_record['job_id'] == saved[0]['job_id']
+    assert len(saved) == 2
+
+
+def test_verified_stop_cleanup_failure_preserves_quiet_receipt(monkeypatch):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', Mock(return_value={
+        'state': 'cancelled', 'quiet': True, 'result': {'exit_code': -15}}))
+    record = {'endpoint': ENDPOINT, 'job_id': 'prepare-owned', 'quiet': False}
+    save = Mock(side_effect=OSError('disk failure'))
+    with pytest.raises(PreparationPostprocessError) as caught:
+        stop_preparation_process(record, save)
+    assert caught.value.preparation_record['quiet'] is True
+    assert caught.value.completed.returncode == -15 and save.call_count == 1
+
+
+def test_explicit_preparation_timeout_is_reported(monkeypatch):
+    remote = Mock(return_value={'state': 'timeout', 'quiet': True, 'result': {'exit_code': -15, 'timed_out': True}})
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    result = PreparationProcess(ENDPOINT, 'build', lambda _: None, lambda: False,
+                                timeout_seconds=7).run('build', on_output=lambda *a: None)
+    assert result.timed_out is True and remote.call_args.kwargs['spec']['timeout_seconds'] == 7

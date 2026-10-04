@@ -11,13 +11,13 @@ import contextlib
 import hashlib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
 
+from mindie_coordinator.owned_sqlite import LocalAuthority, RECORDS_SCHEMA
 from mindie_coordinator.state_paths import agent_sessions_root
 from mindie_coordinator.client_paths import client_path
 
@@ -29,7 +29,7 @@ def git_common_directory(path: str | Path) -> Path:
     directory = Path(client_path(path)).expanduser().resolve(strict=True)
     result = subprocess.run(
         ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=None, check=True,
     )
     return Path(client_path(result.stdout.strip())).resolve(strict=True)
 
@@ -56,12 +56,12 @@ def worktree_reference(path: str) -> dict:
     source = Path(client_path(path)).expanduser().resolve(strict=True)
     result = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=None, check=True,
     )
     root = Path(result.stdout.strip()).resolve()
     info = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--git-common-dir", "HEAD"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=None, check=True,
     ).stdout.splitlines()
     return {"path": str(root), "git_common_dir": str((root / info[0]).resolve()), "head_at_bind": info[1]}
 
@@ -71,18 +71,13 @@ class AgentSessions:
         self.state_dir = Path(client_path(state_dir or agent_sessions_root())).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db_path = self.state_dir / "sessions.sqlite3"
-        with self.transaction() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS records(kind TEXT, id TEXT, data TEXT NOT NULL, PRIMARY KEY(kind,id))")
+        self._authority = LocalAuthority(self.db_path, identity="mindie.agent-sessions.v1",
+                                         schema=RECORDS_SCHEMA, residue=("contexts", "source-inputs"))
 
     @contextlib.contextmanager
     def transaction(self):
-        # `with sqlite3.connect(...)` commits or rolls back but never closes.
-        with contextlib.closing(sqlite3.connect(self.db_path, timeout=10)) as db:
-            with db:
-                db.execute("PRAGMA journal_mode=WAL")
-                db.execute("PRAGMA synchronous=FULL")
-                db.execute("BEGIN IMMEDIATE")
-                yield db
+        with self._authority.transaction() as db:
+            yield db
 
     @staticmethod
     def get(db, kind, key):

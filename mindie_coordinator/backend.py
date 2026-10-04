@@ -57,11 +57,11 @@ def _package_file(relative: str) -> Path:
 class RemoteDev:
     """Explicit-endpoint shell via the installed `remote_dev` package."""
 
-    def run(self, target: dict, command: str, *, timeout_ms: int = 45000) -> dict:
+    def run(self, target: dict, command: str, *, timeout_ms: int | None = None) -> dict:
         return remote_shell(target, command, timeout_ms=timeout_ms)
 
 
-def remote_shell(target: dict, command: str, *, timeout_ms: int = 45000) -> dict:
+def remote_shell(target: dict, command: str, *, timeout_ms: int | None = None) -> dict:
     """Run one command through remote-dev's explicit-endpoint shell."""
     if not target.get("host") or not target.get("port"):
         raise ValueError("remote-dev calls require an explicit host and port")
@@ -110,7 +110,7 @@ class RemoteBackend:
         from mindie_coordinator.managed_execution import ExecutionRequestError, task_preamble
         script = "set -e\n" + "\n".join(f"export {key}={shlex.quote(value)}" for key, value in env.items())
         script += "\n" + task_preamble(binding) + "\nexport MINDIE_SERVICE_PORT=0\n" + command
-        result = self.shell.run(binding["endpoint"], script, timeout_ms=120000)
+        result = self.shell.run(binding["endpoint"], script, timeout_ms=None)
         if result["outcome"] != "success":
             refs = result.get("refs") or {}
             detail = Path(refs["stderr"]).read_text(errors="replace") if refs.get("stderr") else str(result)
@@ -175,7 +175,7 @@ print(json.dumps({'pid':matches[0]}))
         return self.host_queue.request(runtime["host_endpoint"], request)
 
     def bash(self, target, command):
-        result = self.shell.run(target, command, timeout_ms=45000)
+        result = self.shell.run(target, command, timeout_ms=None)
         if result["outcome"] != "success":
             from mindie_coordinator.parity_support import RemoteCommandError
             refs = result.get("refs") or {}
@@ -469,7 +469,7 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
                 # same RPC connection used by the subsequent owned job. The
                 # Python RPC does not require its endpoint root to exist yet.
                 try:
-                    completed = run_rpc_script(resolve_endpoint(endpoint), script, timeout_ms=45000)
+                    completed = run_rpc_script(resolve_endpoint(endpoint), script, timeout_ms=None)
                 except Exception as exc:
                     if log:
                         with Path(log).open('a', encoding='utf-8') as stream:
@@ -709,7 +709,7 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
                    'machine_type': spec.get('machine_type'), 'export_source': source}
         if donors is not None:
             request['donors'] = donors
-        reply = run_remote_python(resolve_endpoint(host), script, request, timeout_ms=120000)
+        reply = run_remote_python(resolve_endpoint(host), script, request, timeout_ms=None)
         if reply.get('status') == 'cancelled':
             raise PreparationCancelled('shared native export cancelled')
         if reply.get('status') == 'uncertain' or reply.get('remote_outcome') == 'unknown':

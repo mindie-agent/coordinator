@@ -24,28 +24,30 @@ path or environment variable.
 - Reach back into the scaffold. No `MINDIE_PARITY_SCRIPT`, no
   `MINDIE_MACHINE_INVENTORY`, no file-path imports of `.agents/`.
 - Construct SSH options. That belongs to `remote-dev`.
-- Pin `remote-dev`'s git source in `pyproject.toml` or
-  `[tool.uv.sources]`. The consumer chooses the tag.
+- Reimplement or override `remote-dev` transport policy in the coordinator.
+  Package metadata pins the reviewed public runtime combination; changes to
+  those pins require the same design-principles and installation review as code.
 
 ## Developer setup
 
-`uv sync` is not the path. `remote-dev` is not on PyPI, so a lock
-that named its git URL would pin every consumer to that tag.
+Install the package and its declared public dependencies in one resolution, as
+shown in README and CI. Use a dedicated virtual environment; do not alter the
+user's active environment.
 
 ```bash
 uv venv
-uv pip install "remote-dev @ git+https://github.com/mindie-agent/remote-dev@13301ef7f52b53ffca0a6702a8a3c18f2edfcd52"
-uv pip install pytest "jsonschema>=4" "setuptools-scm>=8"
-uv pip install -e . --no-deps
+uv pip install -e ".[test]"
+.venv/bin/python -m pytest
 ```
 
-`uv venv` is first so an unreadable project config fails before install.
 Requires Python 3.11+.
 
 ## Tests
 
 ```bash
-HOME="$(mktemp -d)" .venv/bin/python -m pytest
+.venv/bin/python -m pytest
 ```
 
-No NPU, no Docker, no `torch` / `torch_npu`. Empty `HOME`.
+Component tests use isolated temporary state and do not require NPU, Docker,
+`torch` or `torch_npu`. Hardware, real SSH and native host acceptance remain
+separate evidence; passing component tests does not establish those results.

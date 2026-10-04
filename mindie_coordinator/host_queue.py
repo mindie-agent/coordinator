@@ -164,7 +164,7 @@ class HostQueue:
                 from remote_dev.core.ssh_transport import run_remote_python
 
                 payload = run_remote_python(resolve_endpoint(target), source + "\n" + RUNNER,
-                                            request, timeout_ms=45000)
+                                            request, timeout_ms=None)
             else:
                 payload = json.loads(self._run(target, self.command(request)))
         except Exception as exc:

@@ -10,6 +10,7 @@ import time
 import pytest
 
 from mindie_coordinator.service import CoordinatorClient, ensure_daemon, socket_path
+from mindie_coordinator.ready_runtime import RuntimePool
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows IPC")
@@ -44,6 +45,13 @@ def stop(client):
 def test_parallel_start_authentication_restart_and_stale_marker(tmp_path):
     state = tmp_path / ("中文 directory " + "long-" * 20)
     state.mkdir()
+    # A published endpoint belongs to an initialized authority. Exercise a
+    # stale endpoint over that retained database; IPC residue with no database
+    # is lost authority and must fail instead of creating an empty replacement.
+    authority = RuntimePool(state, None)
+    retained = {"id": "retained-state", "outcome": "unknown"}
+    with authority.transaction() as db:
+        authority.put(db, "fixture", retained)
     socket_path(state).write_text("{partial", encoding="utf-8")
     client = None
     try:
@@ -60,9 +68,13 @@ def test_parallel_start_authentication_restart_and_stale_marker(tmp_path):
             reply = json.loads(conn.makefile("rb").readline())
         assert not reply["ok"] and "authentication" in reply["error"]
         assert client.call("ping")["runtime"][0]["loaded"]["pid"] == old_pid
+        with authority.transaction() as db:
+            assert authority.get(db, "fixture", retained["id"]) == retained
         stop(client)
         client = ensure_daemon(state)
         assert client.call("ping")["runtime"][0]["loaded"]["pid"] != old_pid
+        with authority.transaction() as db:
+            assert authority.get(db, "fixture", retained["id"]) == retained
         assert not list(state.glob("*.tmp"))
     finally:
         if client is not None and socket_path(state).exists():
