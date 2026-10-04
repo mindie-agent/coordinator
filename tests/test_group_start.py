@@ -29,7 +29,7 @@ def test_group_wait_uses_renewable_active_lease_past_old_grant_deadline(tmp_path
         job = pool.managed_start("alice", binding["id"], "one", {}, "native-a", [], 0, "true", {}, hold_go=True, queue_seconds=7200)
     prepared = next(call.kwargs["spec"] for call in remote.call_args_list if call.args[2] == "prepare")
     assert prepared["prepared_timeout_seconds"] == 7200
-    assert prepared["timeout_seconds"] == 1800
+    assert prepared["timeout_seconds"] is None
     assert (job["state"], job["lease_state"], job["remote"]["state"]) == ("waiting", "active", "prepared")
     assert ("job", "go") not in backend.calls
     for _ in range(3):

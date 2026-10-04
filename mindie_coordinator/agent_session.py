@@ -29,7 +29,7 @@ def git_common_directory(path: str | Path) -> Path:
     directory = Path(client_path(path)).expanduser().resolve(strict=True)
     result = subprocess.run(
         ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=None, check=True,
     )
     return Path(client_path(result.stdout.strip())).resolve(strict=True)
 
@@ -56,12 +56,12 @@ def worktree_reference(path: str) -> dict:
     source = Path(client_path(path)).expanduser().resolve(strict=True)
     result = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=None, check=True,
     )
     root = Path(result.stdout.strip()).resolve()
     info = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--git-common-dir", "HEAD"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=None, check=True,
     ).stdout.splitlines()
     return {"path": str(root), "git_common_dir": str((root / info[0]).resolve()), "head_at_bind": info[1]}
 

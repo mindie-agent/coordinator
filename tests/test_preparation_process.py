@@ -34,7 +34,7 @@ def test_receipt_saved_before_launch_and_progress_survives_split_chunks(monkeypa
         if action == "launch":
             assert saved[-1]["state"] == "pending"
             assert kwargs["spec"] == {"command": "build", "cwd": ENDPOINT["cwd"], "env": {},
-                                      "timeout_seconds": 7200, "interactive": False}
+                                      "timeout_seconds": None, "interactive": False}
             assert kwargs["authorization"] == {}
             assert kwargs["stdout_offset"] == kwargs["stderr_offset"] == 0
             assert kwargs["max_bytes"] == 32768 and kwargs["yield_time_ms"] == 1000
@@ -161,6 +161,22 @@ def test_stop_transport_failure_is_unknown(monkeypatch):
     record = {"endpoint": ENDPOINT, "job_id": "prepare-retained", "quiet": False}
     assert stop_preparation_process(record, lambda _: None) is False
     assert record["state"] == "uncertain" and record["quiet"] is False
+
+
+def test_diagnostic_failure_preserves_completed_remote_command(monkeypatch):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    control = Mock(return_value={"state": "succeeded", "quiet": True,
+                                 "result": {"exit_code": 0}, "timings": {"prepare_ms": 10}})
+    monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
+    recorder = Mock()
+    recorder.event.side_effect = OSError("diagnostic disk unavailable")
+    monkeypatch.setattr("mindie_coordinator.preparation_process.get_recorder", lambda _: recorder)
+    with pytest.raises(PreparationPostprocessError) as caught:
+        PreparationProcess(ENDPOINT, "build", lambda _: None, lambda: False).run("build", on_output=lambda *a: None)
+    assert caught.value.stage == "diagnostics"
+    assert caught.value.completed.returncode == 0
+    assert caught.value.preparation_record["quiet"] is True
+    assert control.call_count == 1
 
 
 @pytest.mark.parametrize("quiet", [False, True])
@@ -292,3 +308,65 @@ def test_actual_supervisor_can_stop_after_losing_the_launch_reply(tmp_path, monk
     finally:
         if saved:
             stop_preparation_process(saved[-1], lambda _: None, force=True)
+
+
+@pytest.mark.parametrize('stage', ['persistence', 'output'])
+@pytest.mark.parametrize('exit_code', [0, 17])
+def test_completed_remote_fact_survives_local_postprocessing_failure(monkeypatch, stage, exit_code):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    observed = {"state": "succeeded" if exit_code == 0 else "failed", "quiet": True,
+                "stdout": "terminal output\n", "result": {"exit_code": exit_code}}
+    remote = Mock(return_value=observed)
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    saved = []
+    error = OSError('local recording unavailable')
+    def save(row):
+        saved.append(copy.deepcopy(row))
+        if stage == 'persistence' and len(saved) > 1:
+            raise error
+    def output(*args):
+        if stage == 'output':
+            raise error
+    with pytest.raises(PreparationPostprocessError) as caught:
+        PreparationProcess(ENDPOINT, 'build', save, lambda: False).run('build', on_output=output)
+    failure = caught.value
+    assert failure.original_error is error and failure.stage == stage
+    assert failure.completed.returncode == exit_code
+    assert failure.preparation_record['quiet'] is True
+    assert failure.preparation_record['result']['exit_code'] == exit_code
+    assert len(saved) == 2 and remote.call_count == 1
+
+
+def test_transport_failure_is_not_hidden_by_second_persistence_failure(monkeypatch):
+    transport = OSError('original SSH failure')
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', Mock(side_effect=transport))
+    saved = []
+    def save(row):
+        saved.append(copy.deepcopy(row))
+        if len(saved) > 1:
+            raise OSError('disk failure')
+    with pytest.raises(PreparationUncertain) as caught:
+        PreparationProcess(ENDPOINT, 'build', save, lambda: False).run('build', on_output=lambda *a: None)
+    assert caught.value.__cause__ is transport
+    assert caught.value.preparation_record['job_id'] == saved[0]['job_id']
+    assert len(saved) == 2
+
+
+def test_verified_stop_cleanup_failure_preserves_quiet_receipt(monkeypatch):
+    from mindie_coordinator.preparation_process import PreparationPostprocessError
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', Mock(return_value={
+        'state': 'cancelled', 'quiet': True, 'result': {'exit_code': -15}}))
+    record = {'endpoint': ENDPOINT, 'job_id': 'prepare-owned', 'quiet': False}
+    save = Mock(side_effect=OSError('disk failure'))
+    with pytest.raises(PreparationPostprocessError) as caught:
+        stop_preparation_process(record, save)
+    assert caught.value.preparation_record['quiet'] is True
+    assert caught.value.completed.returncode == -15 and save.call_count == 1
+
+
+def test_explicit_preparation_timeout_is_reported(monkeypatch):
+    remote = Mock(return_value={'state': 'timeout', 'quiet': True, 'result': {'exit_code': -15, 'timed_out': True}})
+    monkeypatch.setattr('mindie_coordinator.preparation_process.control', remote)
+    result = PreparationProcess(ENDPOINT, 'build', lambda _: None, lambda: False,
+                                timeout_seconds=7).run('build', on_output=lambda *a: None)
+    assert result.timed_out is True and remote.call_args.kwargs['spec']['timeout_seconds'] == 7

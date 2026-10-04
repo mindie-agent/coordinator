@@ -54,7 +54,6 @@ def resolve_host_state_dir(explicit: str | Path | None = None) -> str:
     if explicit:
         return str(explicit)
     return os.environ.get(HOST_STATE_DIR_ENV) or DEFAULT_STATE_DIR
-DEFAULT_QUEUE_TTL_SECONDS = 3600
 DEFAULT_GRANT_TTL_SECONDS = 60
 DEFAULT_START_TTL_SECONDS = 60
 DEFAULT_HEARTBEAT_TTL_SECONDS = 120
@@ -1100,12 +1099,12 @@ class NpuCoordinator:
         if not_before is None:
             not_before = now
         latest_start = parse_instant(request.get("latest_start"))
-        if latest_start is None:
-            queue_ttl = int(request.get("queue_ttl_seconds") or DEFAULT_QUEUE_TTL_SECONDS)
-            if queue_ttl < 1:
+        if latest_start is None and request.get("queue_ttl_seconds") is not None:
+            queue_ttl = request["queue_ttl_seconds"]
+            if type(queue_ttl) is not int or queue_ttl < 1:
                 raise CoordinationError("queue_ttl_seconds must be >= 1")
             latest_start = now + queue_ttl
-        if latest_start < not_before:
+        if latest_start is not None and latest_start < not_before:
             raise CoordinationError("latest_start must not be earlier than not_before")
         priority = int(request.get("priority") or 0)
         container_name = request.get("container_name")
@@ -1692,7 +1691,7 @@ class NpuCoordinator:
             head = connection.execute(
                 """
                 SELECT * FROM tasks
-                WHERE state='queued' AND not_before<=? AND latest_start>?
+                WHERE state='queued' AND not_before<=? AND (latest_start IS NULL OR latest_start>?)
                 ORDER BY priority DESC, submitted_at ASC, task_id ASC
                 LIMIT 1
                 """,
@@ -1827,7 +1826,7 @@ class NpuCoordinator:
             else:
                 conflicts = sorted((set(devices) & busy) | (set(devices) - visible))
             if conflicts:
-                next_state = "queued" if float(row["latest_start"]) > now else "expired"
+                next_state = "queued" if row["latest_start"] is None or float(row["latest_start"]) > now else "expired"
                 connection.execute(
                     """
                     UPDATE tasks

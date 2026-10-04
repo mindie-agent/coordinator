@@ -17,7 +17,7 @@ def copy_fixed_objects(source, destination, row):
 
     def git(path, *args, check=True):
         result = subprocess.run(['git', '-C', str(path), *args], capture_output=True,
-                                text=True, timeout=60)
+                                text=True, timeout=None)
         if result.returncode < 0:
             raise subprocess.SubprocessError('fixed object copy interrupted: ' + result.stderr.strip())
         if check and result.returncode:
@@ -101,7 +101,7 @@ def export_existing_objects(request, run=None):
         try:
             reply = run(['docker', 'exec', '-i', identifier, 'python3', '-c', request['export_source']],
                         input=json.dumps({'records': pending, 'legacy_cache': request['legacy_cache']}),
-                        capture_output=True, text=True, timeout=300)
+                        capture_output=True, text=True, timeout=None)
         except subprocess.TimeoutExpired as exc:
             return {'status': 'uncertain', 'reason': str(exc)}
         except OSError as exc:

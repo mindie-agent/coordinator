@@ -363,13 +363,13 @@ def ssh_exec_stream(
     )
 
 
-def ssh_stream_to_file(endpoint: SshEndpoint, remote_path: str, payload: str) -> None:
+def ssh_stream_to_file(endpoint: SshEndpoint, remote_path: str, payload: str, *, timeout_ms: int | None = None) -> None:
     from remote_dev.core.ssh_transport import run_bytes
 
     script = f'mkdir -p {quoted(str(PurePosixPath(remote_path).parent))} && cat > {quoted(remote_path)}'
     try:
         result = run_bytes(_remote_endpoint(endpoint, long_stream=True), script,
-                           stdin=payload.encode('utf-8'), timeout_ms=120000)
+                           stdin=payload.encode('utf-8'), timeout_ms=timeout_ms)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(f'SSH upload to {remote_path} timed out; remote outcome is unknown; payload was not replayed') from exc
     stdout = (result.stdout or b'').decode('utf-8', errors='replace')
@@ -380,7 +380,7 @@ def ssh_stream_to_file(endpoint: SshEndpoint, remote_path: str, payload: str) ->
         )
 
 
-def ssh_stream_bytes_to_file(endpoint: SshEndpoint, remote_path: str, payload: bytes) -> None:
+def ssh_stream_bytes_to_file(endpoint: SshEndpoint, remote_path: str, payload: bytes, *, timeout_ms: int | None = None) -> None:
     from remote_dev.core.ssh_transport import run_bytes
 
     script = (
@@ -389,7 +389,7 @@ def ssh_stream_bytes_to_file(endpoint: SshEndpoint, remote_path: str, payload: b
     )
     try:
         result = run_bytes(_remote_endpoint(endpoint, long_stream=True), script,
-                           stdin=payload, timeout_ms=1800000)
+                           stdin=payload, timeout_ms=timeout_ms)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(f'SSH binary upload to {remote_path} timed out; remote outcome is unknown; payload was not replayed') from exc
     if result.returncode != 0:

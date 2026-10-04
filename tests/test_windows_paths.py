@@ -48,7 +48,7 @@ def test_remote_upload_uses_posix_parent_and_exact_bytes(monkeypatch):
     def capture(endpoint, script, *, stdin, timeout_ms):
         assert endpoint.keepalive is True
         assert endpoint.ssh_mux is False
-        assert timeout_ms in (120000, 1800000)
+        assert timeout_ms is None
         calls.append((script, stdin))
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 

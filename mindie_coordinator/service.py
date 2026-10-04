@@ -48,7 +48,7 @@ from mindie_coordinator.placement import (
 )
 from mindie_coordinator.provision.task_environment import TaskRootBusy
 from mindie_coordinator.preparation_process import (
-    PreparationCancelled, PreparationUncertain, stop_preparation_process,
+    PreparationCancelled, PreparationUncertain, PreparationPostprocessError, stop_preparation_process,
 )
 from mindie_coordinator.ready_runtime import RuntimePool, user_container_name
 from mindie_coordinator.state_paths import coordinator_state_dir
@@ -1117,7 +1117,7 @@ class CoordinatorService(TaskMessages):
         environment.update(binding["environment"])
         with (directory / "parity.json").open("w") as stdout, (directory / "parity.log").open("w") as stderr:
             result = subprocess.run(args, stdout=stdout, stderr=stderr,
-                                    env=environment, timeout=600, check=False)
+                                    env=environment, timeout=None, check=False)
         try:
             payload = json.loads((directory / "parity.json").read_text(encoding="utf-8"))
         except (ValueError, OSError):
@@ -1225,6 +1225,18 @@ class CoordinatorService(TaskMessages):
 
     def _record_execution_error(self, store, row, exc) -> dict[str, Any]:
         permanent = isinstance(exc, PERMANENT_ERRORS)
+        retained = getattr(exc, "preparation_record", None)
+        if retained is not None:
+            # The exception carries the exact observed job even when the
+            # execution database rejected its latest save. Never replace a
+            # known exit receipt with an inferred transport outcome.
+            row["preparation_failure"] = dict(job=retained,
+                stage=getattr(exc, "stage", "transport"), automatic_retry=False)
+            for records in (row.get("preparation_jobs") or {}).values():
+                if retained["job_id"] in records:
+                    records[retained["job_id"]] = retained
+            if isinstance(exc, PreparationPostprocessError) and exc.completed is not None:
+                permanent = True
         # A build/preparation command that exited nonzero has a known result.
         # Repeating the same source preparation cannot resolve that failure.
         # Lost SSH transport (255) and already-bound/live work remain recoverable.
@@ -1235,18 +1247,35 @@ class CoordinatorService(TaskMessages):
                for job in records.values()):
             permanent = False
         path = self.state_dir / "runs" / row["id"] / "error.log"
+        diagnostics_failures = []
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as stream:
                 stream.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)) + "\n")
             row["error_ref"] = str(path)
         except OSError as log_exc:
-            get_recorder("mindie-coordinator").event("WARNING", "diagnostics.persistence_failed", error_type=type(log_exc).__name__)
+            diagnostics_failures.append(dict(stage="error_log", error_type=type(log_exc).__name__))
+            try:
+                get_recorder("mindie-coordinator").event("WARNING", "diagnostics.persistence_failed", error_type=type(log_exc).__name__)
+            except Exception as recording_error:
+                diagnostics_failures.append(dict(stage="diagnostics", error_type=type(recording_error).__name__))
         row["error"] = f"{type(exc).__name__}: {exc}"[:500]
         row["error_details"] = error_details(exc)
         row["phase"] = "failed" if permanent else "uncertain"
-        self._save_execution(store, row)
-        return self._reply(row)
+        try:
+            self._save_execution(store, row)
+        except Exception as persistence:
+            exc.add_note("Execution error persistence also failed: " + type(persistence).__name__)
+            reply = self._reply(row)
+            reply["persistence"] = dict(status="failed", error_type=type(persistence).__name__,
+                                        automatic_retry=False, original_error=row["error"])
+        else:
+            reply = self._reply(row)
+        if row.get("preparation_failure"):
+            reply["preparation_failure"] = row["preparation_failure"]
+        if diagnostics_failures:
+            reply["diagnostics_failures"] = diagnostics_failures
+        return reply
 
     def _record_daemon_error(self, message: str) -> None:
         get_recorder("mindie-coordinator").event("ERROR", "daemon.error", message=message)

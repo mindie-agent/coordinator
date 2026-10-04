@@ -278,14 +278,14 @@ def attest(root: Path, spec: dict):
     inputs = runtime_build_inputs(root, profile, key)
     try:
         smoke = subprocess.run([sys.executable, "-c", "import torch_npu, vllm, vllm_ascend, acl; import vllm_ascend.vllm_ascend_C"], env=environment,
-                               capture_output=True, text=True, encoding="utf-8", timeout=60)
+                               capture_output=True, text=True, encoding="utf-8", timeout=None)
     except subprocess.TimeoutExpired as exc:
         stderr = exc.stderr or ""
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", "replace")
         (evidence_dir / "smoke.json").write_text(json.dumps({"passed": False,
                                                              "build_inputs": inputs, "profile_key": key,
-                                                             "error": "import smoke timed out after 60s",
+                                                             "error": "import smoke timed out",
                                                              "stderr": stderr[-8000:]}, indent=2))
         raise ValueError("import smoke timed out; inspect .mindie-runtime/profile-evidence/smoke.json") from exc
     (evidence_dir / "smoke.json").write_text(json.dumps({"passed": smoke.returncode == 0,

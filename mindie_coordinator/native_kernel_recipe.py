@@ -192,7 +192,7 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
         info.write_text(ini, encoding='utf-8')
         tools = root / 'vllm-ascend/csrc/cmake/scripts/util'
         result = subprocess.run([sys.executable, str(tools / 'ascendc_bin_param_build.py'),
-                                 str(info), str(generated), plan['unit']], env=environment, timeout=60)
+                                 str(info), str(generated), plan['unit']], env=environment, timeout=None)
         if result.returncode:
             if result.returncode < 0:
                 raise subprocess.CalledProcessError(result.returncode, result.args)

@@ -163,7 +163,7 @@ class TaskClient:
 
     @observed_tool("mindie.run", component="mindie-coordinator")
     def run(self, command=None, *, script_file=None, sources=None, env=None, environment=None, resources=None, topology=None,
-            timeout_seconds=1800, service=None, restart=False, preflight=None,
+            timeout_seconds=None, service=None, restart=False, preflight=None,
             wait_until=None, wait_timeout_seconds=30):
         """Admit fixed inputs and resources for one supervised execution.
 

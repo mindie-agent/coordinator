@@ -410,7 +410,7 @@ class RuntimePool(ManagedExecution):
 
     def request_run(self, owner: str, binding_id: str, request_id: str, snapshots: dict[str, str],
                     expected_build_key: str, devices: list[int], npu_count: int,
-                    priority: int = 0, queue_seconds: int = 1800, service_port: int | None = None,
+                    priority: int = 0, queue_seconds: int | None = None, service_port: int | None = None,
                     allow_external_busy: bool = False):
         return self._request_run(owner, binding_id, request_id, snapshots, expected_build_key,
                                  devices, npu_count, priority, queue_seconds, service_port,
@@ -418,7 +418,7 @@ class RuntimePool(ManagedExecution):
 
     def _request_run(self, owner: str, binding_id: str, request_id: str, snapshots: dict[str, str],
                      expected_build_key: str, devices: list[int], npu_count: int,
-                     priority: int = 0, queue_seconds: int = 1800, service_port: int | None = None,
+                     priority: int = 0, queue_seconds: int | None = None, service_port: int | None = None,
                      allow_external_busy: bool = False, *, check_remote=True, _managed=False):
         try:
             safe_id(request_id)
@@ -428,8 +428,8 @@ class RuntimePool(ManagedExecution):
                 or (devices and npu_count) or any(type(d) is not int or d < 0 for d in devices)
                 or len(set(devices)) != len(devices)):
             raise ExecutionRequestError("supply distinct physical devices or a nonnegative npu_count")
-        if not 1 <= queue_seconds <= 86400:
-            raise ExecutionRequestError("queue_seconds must be between 1 and 86400")
+        if queue_seconds is not None and (type(queue_seconds) is not int or queue_seconds < 1):
+            raise ExecutionRequestError("queue_seconds must be None or a positive integer")
         if service_port is not None and (type(service_port) is not int or service_port < 0):
             raise ExecutionRequestError("service_port must be 0 or a positive declared runtime service port")
         if type(allow_external_busy) is not bool or (allow_external_busy and (len(devices) != 1 or npu_count)):
@@ -464,7 +464,7 @@ class RuntimePool(ManagedExecution):
                     raise ExecutionRequestError("runtime/profile changed since checkout")
             run = {"id": key, "owner": owner, "binding_id": binding_id, "intent": intent,
                    "task_id": "pool-" + uuid.uuid4().hex, "state": "pending", "epoch": None,
-                   "deadline": self.clock() + queue_seconds, "last_poll": 0, "created_at": utc_now(), "submitted": False}
+                   "deadline": None if queue_seconds is None else self.clock() + queue_seconds, "last_poll": 0, "created_at": utc_now(), "submitted": False}
             with self.lock, self.transaction() as db:
                 # Re-validate after the lock-free probe: a concurrent return or
                 # refresh must not be overwritten by this stale snapshot.
@@ -616,7 +616,7 @@ class RuntimePool(ManagedExecution):
                     # activate/preflight action. Caller observes before retry.
                     action = "poll"
                 if run["epoch"] is None:
-                    if action == "cancel" or self.clock() >= run["deadline"]:
+                    if action == "cancel" or (run["deadline"] is not None and self.clock() >= run["deadline"]):
                         # No mutating host request was ever sent for this run,
                         # so a local cancel/expire is safe even while the host
                         # stays unreachable; it is the escape hatch for a
@@ -644,7 +644,7 @@ class RuntimePool(ManagedExecution):
                     existing = [task for task in status["tasks"] if task["task_id"] == run["task_id"]]
                     if existing:
                         run["task"], run["state"], run["submitted"] = existing[0], existing[0]["state"], True
-                    elif self.clock() >= run["deadline"] or action == "cancel":
+                    elif (run["deadline"] is not None and self.clock() >= run["deadline"]) or action == "cancel":
                         run["state"] = "expired" if action != "cancel" else "cancelled"
                 if run["state"] == "pending" and action == "poll" and _preflight_new:
                     candidate = getattr(self.backend, "submit_and_preflight", None)

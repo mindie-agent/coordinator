@@ -10,7 +10,7 @@ from mindie_coordinator.parity_support import SshEndpoint, ssh_stream_to_file, s
     (ssh_stream_to_file, 'metadata\n', 120000),
     (ssh_stream_bytes_to_file, b'archive\x00', 1800000),
 ])
-def test_upload_timeout_is_bounded_unknown_and_never_replayed(monkeypatch, upload, payload, expected_timeout):
+def test_explicit_upload_timeout_is_unknown_and_never_replayed(monkeypatch, upload, payload, expected_timeout):
     calls = []
 
     def stalled(endpoint, script, *, stdin, timeout_ms):
@@ -19,9 +19,21 @@ def test_upload_timeout_is_bounded_unknown_and_never_replayed(monkeypatch, uploa
 
     monkeypatch.setattr('remote_dev.core.ssh_transport.run_bytes', stalled)
     with pytest.raises(TimeoutError, match='remote outcome is unknown; payload was not replayed'):
-        upload(SshEndpoint(host='example.invalid', port=22, user='user'), '/tmp/upload-target', payload)
+        upload(SshEndpoint(host='example.invalid', port=22, user='user'), '/tmp/upload-target', payload, timeout_ms=expected_timeout)
     assert len(calls) == 1
     endpoint, script, actual, timeout = calls[0]
     assert timeout == expected_timeout
     assert endpoint.keepalive is True and endpoint.ssh_mux is False
     assert actual == (payload.encode() if isinstance(payload, str) else payload)
+
+
+@pytest.mark.parametrize('upload,payload', [(ssh_stream_to_file, 'metadata'), (ssh_stream_bytes_to_file, b'archive')])
+def test_upload_has_no_implicit_business_deadline(monkeypatch, upload, payload):
+    from types import SimpleNamespace
+    captured = []
+    def completed(endpoint, script, **kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+    monkeypatch.setattr('remote_dev.core.ssh_transport.run_bytes', completed)
+    upload(SshEndpoint(host='example.invalid', port=22, user='user'), '/tmp/upload-target', payload)
+    assert captured[0]['timeout_ms'] is None

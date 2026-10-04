@@ -1,6 +1,7 @@
 """Durable remote-dev ownership for coordinator preparation commands."""
 from __future__ import annotations
 
+import copy
 import json
 import time
 import uuid
@@ -18,6 +19,21 @@ class PreparationCancelled(RuntimeError):
 
 class PreparationUncertain(RuntimeError):
     """Retained process facts require observation or stop, never command replay."""
+
+
+class PreparationPostprocessError(RuntimeError):
+    """Known remote facts retained when local recording or output fails."""
+    def __init__(self, stage, record, original):
+        self.stage = stage
+        self.preparation_record = copy.deepcopy(record)
+        self.original_error = original
+        self.automatic_retry = False
+        result = record.get("result") or {}
+        self.completed = (RemoteCompleted(int(result["exit_code"]), "", "",
+                          timed_out=bool(result.get("timed_out") or record.get("state") == "timeout"))
+                          if record.get("quiet") and result.get("exit_code") is not None else None)
+        super().__init__(f"preparation {stage} failed after remote observation; "
+                         f"job {record['job_id']} retained, no automatic retry ({type(original).__name__})")
 
 
 def _remember(record, observation, save):
@@ -39,10 +55,16 @@ def _remember(record, observation, save):
                 for name in ("connection_wait_ms", "rpc_ms", "pool_wait_ms"):
                     if isinstance(observation[key].get(name), (int, float)):
                         totals[name] = totals.get(name, 0) + observation[key][name]
-            get_recorder("mindie-coordinator").event("DEBUG", "preparation.observation", job_id=record["job_id"],
-                phase=record.get("step"), **observation[key])
+            try:
+                get_recorder("mindie-coordinator").event("DEBUG", "preparation.observation", job_id=record["job_id"],
+                    phase=record.get("step"), **observation[key])
+            except Exception as exc:
+                raise PreparationPostprocessError("diagnostics", record, exc) from exc
     record["observed_at"] = time.time()
-    save(record)
+    try:
+        save(record)
+    except Exception as exc:
+        raise PreparationPostprocessError("persistence", record, exc) from exc
 
 
 def stop_preparation_process(record, save, *, force=False, drain_seconds=10):
@@ -56,13 +78,24 @@ def stop_preparation_process(record, save, *, force=False, drain_seconds=10):
             observation = control(record["endpoint"], record["job_id"], "status")
             _remember(record, observation, save)
         return bool(observation.get("quiet"))
+    except PreparationPostprocessError:
+        raise
     except Exception as exc:
-        _remember(record, {"state": "uncertain", "quiet": False, "error": str(exc)[:500]}, save)
+        observation = {"error": str(exc)[:500], "observation_error": type(exc).__name__}
+        if not record.get("quiet"):
+            observation.update(state="uncertain", quiet=False)
+        try:
+            _remember(record, observation, save)
+        except PreparationPostprocessError as persistence:
+            exc.add_note("Retained stop outcome persistence failed: " + type(persistence.original_error).__name__)
+            exc.preparation_record = persistence.preparation_record
+            raise exc
         return False
 
 
+
 class PreparationProcess:
-    def __init__(self, endpoint, step, save, cancel_requested, *, timeout_seconds=7200,
+    def __init__(self, endpoint, step, save, cancel_requested, *, timeout_seconds=None,
                  setup=(), bootstrap_root=None):
         self.endpoint = dict(endpoint)
         self.step = step
@@ -111,7 +144,10 @@ class PreparationProcess:
                                     record.setdefault('stage_timings', {})[event['phase']] = event['elapsed_seconds']
                             except (ValueError, TypeError):
                                 pass
-                        on_output(channel, line)
+                        try:
+                            on_output(channel, line)
+                        except Exception as exc:
+                            raise PreparationPostprocessError("output", record, exc) from exc
                     else:
                         pending[channel] = line
 
@@ -121,8 +157,8 @@ class PreparationProcess:
             observation = control(endpoint, record["job_id"], "exchange",
                                   stdout_offset=record["stdout_offset"], stderr_offset=record["stderr_offset"],
                                   max_bytes=32768, yield_time_ms=wait, wait_for_exit=True)
-            emit(observation)
             _remember(record, observation, save_record)
+            emit(observation)
             return observation
 
         try:
@@ -132,8 +168,8 @@ class PreparationProcess:
             }, authorization={}, stdout_offset=record["stdout_offset"],
                 stderr_offset=record["stderr_offset"], max_bytes=32768, yield_time_ms=1000,
                 wait_for_exit=True)
-            emit(observation)
             _remember(record, observation, save_record)
+            emit(observation)
             while True:
                 if self.cancel_requested():
                     if not stop_preparation_process(record, save_record):
@@ -152,10 +188,18 @@ class PreparationProcess:
                     code = result.get("exit_code")
                     if code is None:
                         raise PreparationUncertain("quiet preparation process has no command exit receipt")
-                    return RemoteCompleted(int(code), "", "", timed_out=False)
+                    return RemoteCompleted(int(code), "", "", timed_out=bool(result.get("timed_out") or observation.get("state") == "timeout"))
                 observation = exchange()
-        except (PreparationCancelled, PreparationUncertain):
+        except (PreparationCancelled, PreparationUncertain, PreparationPostprocessError):
             raise
         except Exception as exc:
-            _remember(record, {"state": "uncertain", "quiet": False, "error": str(exc)[:500]}, save_record)
-            raise PreparationUncertain("preparation transport failed; retained owned job was not replayed") from exc
+            failure = PreparationUncertain("preparation transport failed; retained owned job was not replayed")
+            observation = {"error": str(exc)[:500], "observation_error": type(exc).__name__}
+            if not record.get("quiet"):
+                observation.update(state="uncertain", quiet=False)
+            try:
+                _remember(record, observation, save_record)
+            except PreparationPostprocessError as persistence:
+                failure.add_note("Outcome persistence also failed: " + type(persistence.original_error).__name__)
+            failure.preparation_record = copy.deepcopy(record)
+            raise failure from exc

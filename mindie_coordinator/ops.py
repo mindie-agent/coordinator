@@ -69,7 +69,7 @@ TOOL_SCHEMAS = {
             "host": {"type": "string", "minLength": 1, "description": "Host constraint for one default role; use roles[].host for a role group."},
             "roles": {"type": "array", "minItems": 1, "items": ROLE_SCHEMA},
             "distinct_hosts": {"type": "boolean"}}, "not": {"required": ["host", "roles"]}},
-        "timeout_seconds": {"type": ["integer", "null"], "default": 1800},
+        "timeout_seconds": {"type": ["integer", "null"], "default": None, "minimum": 1},
         "service": {"type": ["string", "null"], "description": "Ensure a task-scoped service with identical fixed sources and configuration. Changed inputs require restart. To connect without capture, use mindie_execution(service=...)."},
         "restart": {"type": "boolean", "description": "Replace a live named service, including one with the same spec"},
     }),

@@ -23,16 +23,23 @@ def shared_workspace_root(repo_root: Path | None = None) -> Path:
     task registry. An unrelated clone resolves to itself.
     """
     repo_root = Path(client_path(repo_root or Path.cwd())).expanduser().resolve()
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, encoding="utf-8", timeout=5, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    # A non-repository directory is ordinary first use. Once Git metadata
+    # exists, inability to resolve it must not choose a new state authority.
+    for parent in (repo_root, *repo_root.parents):
+        try:
+            (parent / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        break
+    else:
         return repo_root
-    if result.returncode != 0 or not result.stdout.strip():
-        return repo_root
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", timeout=None, check=True,
+    )
+    if not result.stdout.strip():
+        raise ValueError("Git returned no shared workspace authority")
     common_dir = Path(result.stdout.strip()).expanduser()
     if not common_dir.is_absolute():
         common_dir = repo_root / common_dir

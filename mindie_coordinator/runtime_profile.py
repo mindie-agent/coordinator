@@ -378,7 +378,7 @@ print(json.dumps({'python': sys.executable, 'imports': {k: str(v) for k,v in pat
 '''
     result = subprocess.run([sys.executable, '-c', command, str(root)],
                             env={**os.environ, **profile['launch_env']},
-                            capture_output=True, text=True, encoding='utf-8', timeout=30)
+                            capture_output=True, text=True, encoding='utf-8', timeout=None)
     return {'passed': result.returncode == 0, 'python_import_executed': True,
             'profile_key': profile_key(profile), 'build_inputs': inputs,
             'stdout': result.stdout[-4000:], 'stderr': result.stderr[-8000:],
