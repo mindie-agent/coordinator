@@ -2,11 +2,11 @@
 
 [中文](./README.md) · **English** · [Back to Project Homepage](../README.en.md)
 
-This directory contains the persistent user-container task lifecycle contract and the technical reference for tools, runtime preparation, host NPU queueing, and diagnostics in `mindie-coordinator`.
+Welcome to the `mindie-coordinator` documentation hub. Here you will find clear explanations of how persistent user containers (`mindie-<user>`) work, how NPU leases are granted and released, and how to use every tool and configuration option.
 
-## Documents
+## Guides & References
 
-| Document | 中文 | English | Summary |
+| Topic | 中文 | English | What You'll Learn |
 | --- | --- | --- | --- |
-| Persistent User Container & Task Lifecycle | [session-lifecycle.zh.md](./session-lifecycle.zh.md) | [session-lifecycle.md](./session-lifecycle.md) | Ownership boundaries and lifecycle transitions across local tasks, persistent `mindie-<user>` containers, prepared runtimes, and managed executions |
-| Tools, Runtime Preparation & Observability | [configuration-and-tools.md](./configuration-and-tools.md) | [configuration-and-tools.en.md](./configuration-and-tools.en.md) | `TaskClient` / MCP / CLI semantics, explicit single-NPU sharing, native build reuse, peer messaging, daemon identity checks, and structured diagnostics |
+| Persistent User Container & Task Lifecycle | [session-lifecycle.zh.md](./session-lifecycle.zh.md) | [session-lifecycle.md](./session-lifecycle.md) | How local tasks, `mindie-<user>` containers, prepared runtimes, and NPU leases are managed from submission to cleanup |
+| Tools, Single-NPU Sharing, Build Reuse & Diagnostics | [configuration-and-tools.md](./configuration-and-tools.md) | [configuration-and-tools.en.md](./configuration-and-tools.en.md) | Parameters for `mindie_run` / `TaskClient`, single-NPU sharing, native build cache reuse, peer messaging, and diagnostics |

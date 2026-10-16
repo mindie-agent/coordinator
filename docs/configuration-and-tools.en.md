@@ -1,59 +1,69 @@
-# Tools, Runtime Preparation & Observability Reference
+# Tools, Single-NPU Sharing, Build Reuse & Diagnostics Reference
 
 [中文](./configuration-and-tools.md) · **English** · [Back to Documentation Index](./README.en.md)
 
-This reference documents submission and observation parameters, explicit single-NPU sharing, native build attestation and reuse, peer coordination messaging, the host NPU queue Python API, daemon version identity checks, and structured diagnostics in `mindie-coordinator`.
+This guide covers six practical topics for daily work with `mindie-coordinator`: **submitting commands and waiting on results, sharing a single NPU card with external processes, reusing compiled native operators, messaging peers in the host queue, managing the local daemon, and inspecting structured diagnostics.**
 
 ---
 
-## 1. Submission, Bounded Waits & Evidence Inspection
+## 1. Submitting Work, Waiting & Inspecting Evidence
 
-- **Command vs. Script File**: `mindie_run` / `TaskClient.run` accept either `command` or a local UTF-8 `script_file` (up to 1 MiB; BOM is stripped, CRLF is normalized to LF, and both original and normalized digests are recorded).
+- **Command String vs. Local Script File**:
+  `mindie_run` and `TaskClient.run` accept either a `command` string or a local UTF-8 `script_file` path (up to 1 MiB; UTF-8 BOM is stripped and Windows CRLF line endings are automatically converted to LF so Linux shells never fail on ``).
 - **Bounded Waits (`wait_until`)**:
-  - Pass `wait_until="running"` or `"released"` with `wait_timeout_seconds` (`0–600` seconds).
-  - `released` confirms process termination and resource release; business success additionally requires `state == "succeeded"`.
-  - A wait timeout (`wait_timed_out=True`) never stops or resubmits the execution; callers can wait on or inspect the same `execution_id` again.
-- **Non-Blocking Cache vs. Fresh Observations**:
-  - Task MCP and CLI status calls return the latest persisted snapshot immediately (with `observation_freshness` reporting snapshot age, source, and whether a busy execution deferred refresh) and schedule background progression when older than 2 seconds.
-  - Pass `--refresh` (`refresh: true`) for a live remote observation. `TaskClient.observe()` defaults to `refresh=True`; pass `refresh=False` to read the non-blocking cache.
-- **Recorded Execution Evidence (`action="evidence"`)**:
-  - Inspect `section="sources"`, `"preparation"`, `"build"`, or `"diagnostics"` to read retained source snapshots, `preparation_timings`, native profile receipts, and redacted `support_bundle` data.
-- **Preflight Commands (`preflight`)**: Validate the prepared environment with the selected interpreter and placeholder port `0` before any NPU lease is allocated; failures retain stderr references and abort launch before allocating devices.
+  - Pass `wait_until="running"` (return as soon as the workload launches) or `wait_until="released"` (wait until the process finishes and NPU leases are released), along with `wait_timeout_seconds` (`0–600` seconds).
+  - **`released` vs. `succeeded`**: `released` means the process has exited and hardware resources have been returned; check `state == "succeeded"` to confirm the command itself exited with code 0.
+  - **Wait Timeouts Never Kill Your Job**: If `wait_timeout_seconds` expires before completion (`wait_timed_out=True`), the execution keeps running normally on the remote server. You can call `mindie execution` or `TaskClient.observe()` on the same `execution_id` to keep watching or waiting.
+- **Instant Cached Status vs. Live Refresh**:
+  - By default, MCP `mindie_execution` and CLI `mindie execution` return the latest locally persisted snapshot immediately (with `observation_freshness` showing its age in seconds) and trigger a background refresh if the snapshot is older than 2 seconds.
+  - Pass `--refresh` (`refresh: true`) when you want an immediate live poll from the remote host. Python `TaskClient.observe()` defaults to `refresh=True` (pass `refresh=False` to read the non-blocking cache).
+- **Inspecting Recorded Evidence (`action="evidence"`)**:
+  Query `section="sources"`, `"preparation"`, `"build"`, or `"diagnostics"` to inspect the exact Git commit snapshot, preparation stage timings, native build receipts, or redacted `support_bundle`.
+- **Pre-Lease Preflight Checks (`preflight`)**:
+  Run a lightweight validation command with the selected Python interpreter and placeholder port `0` **before** acquiring any NPU lease. If preflight fails, launch aborts immediately and returns `stderr` without wasting queue time or NPU leases.
 
 ---
 
-## 2. Physical NPU Allocation & Explicit Single-Device Sharing
+## 2. Allocating NPUs & Sharing a Single Card (`allow_external_busy`)
 
-- **Zero-NPU Default**: `resources` defaults to `npu_count=0` so CPU or compiler tasks reserve no NPUs. Specify `npu_count` or explicit `devices` (with `topology={"host": "..."}`) for NPU workloads.
-- **Explicit Single-NPU External Sharing (`allow_external_busy=True`)**:
+- **Zero-NPU Default for CPU/Build Tasks**:
+  `resources` defaults to `npu_count=0`, so compilation or CPU-only tests never tie up NPU cards. Request NPUs by setting `npu_count` or passing explicit physical `devices` (with `topology={"host": "..."}`).
+- **Explicit Single-NPU Sharing (`allow_external_busy=True`)**:
   ```python
   resources={"devices": [0], "allow_external_busy": True}
   ```
-  Requires exactly one explicit physical device and permits pre-existing external process/HBM occupancy while still conflicting with other managed coordinator leases. Stop/finish terminates only this execution's managed process family and releases its lease once its descendants and ports have drained, leaving external workloads untouched.
-- **Service Port Selection**: `service_port=0` selects a free port from the declared service port list or the host default range (`30000–45999`), checking both active sockets and existing leases.
+  When you target **one specific physical device** (e.g., `devices: [0]`) and set `allow_external_busy=True`, the coordinator allows your job to run even if that card already has unmanaged external processes or HBM usage (while still queuing fairly against other coordinator-managed leases). When your job finishes or stops, **only your own managed process tree and lease are cleaned up — external processes on that card are never touched.**
+- **Automatic Free Port Selection**:
+  Pass `service_port=0` to let the host coordinator pick an unused port from `30000–45999` (or your declared port list) that is neither bound by an active socket nor held by another lease.
 
 ---
 
-## 3. Incremental Git Materialization & Native Build Reuse
+## 3. Fast Incremental Git Sync & Native Build Reuse
 
-- **Incremental Git Snapshot Materialization**: Reuses immutable objects already present in the remote mirror and transfers small working-tree edits as a bounded Git pack over the existing RPC connection, verifying parent commits and resulting tree hashes before atomic publication.
-- **Native Attestation Reuse**: The initial native environment runs a full framework import smoke test and records artifact hashes. Subsequent Python-only edits reuse that import proof (`python_import_executed=false` in the receipt) whenever dependency/native inputs, loader environment, and artifact hashes match.
-- **Donor Runtime Registration**: Register an existing native artifact donor via `mindie-coordinator runtime-register --reuse-only --source vllm=PATH --source vllm-ascend=PATH` (or `CoordinatorClient.runtime_register`).
-
----
-
-## 4. Peer Coordination Messaging (`mindie_message`)
-
-While waiting on queued resources, tasks can send coordination messages to `coordination_peers[].reference` or reply via `notifications[].reply_reference` using `mindie_message`:
-
-- Messages are stored alongside the host queue database and polled asynchronously by the local coordinator at a minimum 5-second interval during normal `run` / `status` calls.
-- Messages are strictly informational—they never execute commands, release leases, or stop another user's task.
+- **Incremental Git Snapshot Sync**:
+  Reuses immutable Git objects already present on the remote host and sends small working-tree edits as a compact Git pack over the existing SSH RPC connection, verifying parent commits and tree hashes before publishing.
+- **Skip Redundant Operator Rebuilds & Import Checks**:
+  When a native environment is built for the first time, `mindie-coordinator` runs a full framework import smoke test and records artifact hashes. On subsequent runs where you only edited Python files and the underlying dependencies, loader environment, and compiled operator hashes are unchanged, it reuses that verified proof (`python_import_executed=false` in the receipt) and launches your script immediately.
+- **Register Existing Prebuilt Directories**:
+  You can register an existing compiled `vllm` / `vllm-ascend` tree inside the container as a read-only reuse source:
+  ```bash
+  mindie-coordinator runtime-register --reuse-only --source vllm=PATH --source vllm-ascend=PATH
+  ```
 
 ---
 
-## 5. Host NPU Queue Python API & Daemon Lifecycle
+## 4. Messaging Teammates in the Queue (`mindie_message`)
 
-### Public Host Queue Imports
+When your task is queued waiting for NPUs and reports `coordination_peers[].reference`, you can send a coordination message to that peer (or reply via `notifications[].reply_reference`) using `mindie_message`:
+
+- Messages live alongside the host queue database and are polled asynchronously by the local daemon (at most once every 5 seconds during normal `run` / `status` calls).
+- **Strictly Informational**: Messages never execute commands, release leases, or stop another user's workload.
+
+---
+
+## 5. Host Queue Python API & Local Daemon Management
+
+### Public Host Queue Python Imports
 
 ```python
 from mindie_coordinator.host_queue import (
@@ -67,24 +77,27 @@ from mindie_coordinator.host_queue import (
 )
 ```
 
-Host state defaults to `/tmp/mindie-npu-coordinator/v1/` (overridable via `MINDIE_NPU_COORDINATOR_STATE_DIR`).
+Host queue state defaults to `/tmp/mindie-npu-coordinator/v1/` (configurable via `MINDIE_NPU_COORDINATOR_STATE_DIR`).
 
-### Local Daemon Status & Graceful Restart
+### Inspecting or Gracefully Restarting the Local Daemon
 
 ```bash
-# Inspect loaded vs. installed package and commit identities without starting a daemon
+# Compare the running daemon's package/commit version against the installed version
 mindie-coordinator daemon --action status
 
-# Restart the daemon to the installed version only when no executions or leases are active
+# Restart the daemon to the newly installed version only when no jobs or leases are active
 mindie-coordinator daemon --action restart-if-idle
 ```
 
-Managed admission requires the daemon's `coordinator` and `remote-dev` commit and Python interpreter identities to match the caller's. An idle mismatched daemon restarts automatically; a busy daemon keeps active executions running and returns `needs_runtime_update`.
+When you upgrade `coordinator` or `remote-dev`, an idle daemon automatically restarts on the next submission to match your environment; if the daemon is currently managing active runs, it keeps them running safely and returns `needs_runtime_update`.
 
 ---
 
-## 6. Structured Diagnostics
+## 6. Structured Diagnostics & Privacy
 
-- Tool responses include `diagnostics` (`operation_id`, `trace_id`, UTC start/end, monotonic duration, bounded phase summaries, and local `record_ref`) and `error_details` (preserving category, retryability, and submission certainty: `not_sent` / `not_executed`, `uncertain`, or `acknowledged`).
-- `MINDIE_LOG_LEVEL=INFO` is the default and `MINDIE_DIAGNOSTICS_ROOT` configures the local log root. Raw commands, file contents, environment values, and credentials are never passed as diagnostic logging arguments.
-- Run `python -m mindie_coordinator.mindie execution --execution-id ID --action evidence --section diagnostics` to retrieve the execution's stage timings and redacted `support_bundle`.
+- Every response includes `diagnostics` (`operation_id`, `trace_id`, start/end timestamps, monotonic duration, stage timings, and local `record_ref`) plus `error_details` reporting submission certainty (`not_sent` / `not_executed`, `uncertain`, or `acknowledged`).
+- Logs default to `MINDIE_LOG_LEVEL=INFO` under `MINDIE_DIAGNOSTICS_ROOT`. Raw commands, source file contents, environment variable values, and credentials are never written to diagnostic log fields.
+- Retrieve a redacted diagnostic support bundle for any owned execution with:
+  ```bash
+  python -m mindie_coordinator.mindie execution --execution-id <ID> --action evidence --section diagnostics
+  ```
