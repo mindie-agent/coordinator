@@ -2,11 +2,11 @@
 
 **中文** · [English](./README.en.md) · [返回项目主页](../README.md)
 
-本目录收录 `mindie-coordinator` 的持久化容器任务生命周期契约，以及工具接口、运行时准备、宿主机队列与诊断参考文档。
+这里汇总了 `mindie-coordinator` 的工作原理、远端个人专属容器（`mindie-<用户名>`）的生命周期说明，以及日常调工具、传参数、共享单卡和查诊断证据的实用指南。
 
-## 文档列表
+## 文档导航
 
-| 文档 | 中文 | English | 内容概述 |
+| 文档主题 | 中文 | English | 你能在这里查到什么 |
 | --- | --- | --- | --- |
-| 持久化用户容器与任务生命周期契约 | [session-lifecycle.zh.md](./session-lifecycle.zh.md) | [session-lifecycle.md](./session-lifecycle.md) | 本地任务、持久化用户容器（`mindie-<user>`）、已准备运行时与受管执行的所有权边界及生命周期转换 |
-| 工具接口、运行时准备与可观测性参考 | [configuration-and-tools.md](./configuration-and-tools.md) | [configuration-and-tools.en.md](./configuration-and-tools.en.md) | `TaskClient` / MCP / CLI 参数细节、单卡共享、原生构建复用、跨任务消息、守护进程版本一致性与结构化诊断 |
+| 专属容器与任务全生命周期说明 | [session-lifecycle.zh.md](./session-lifecycle.zh.md) | [session-lifecycle.md](./session-lifecycle.md) | 你的专属容器 `mindie-<user>` 是怎么管理的？一次任务从提交代码、准备环境、占卡运行到自动释放经历了哪几步？ |
+| 工具参数、单卡共享、算子复用与诊断参考 | [configuration-and-tools.md](./configuration-and-tools.md) | [configuration-and-tools.en.md](./configuration-and-tools.en.md) | `mindie_run` / `TaskClient` 怎么传参、怎么跟别人的任务共用单张 NPU 卡、怎么跳过重复编译、怎么给排队的同事发消息 |
