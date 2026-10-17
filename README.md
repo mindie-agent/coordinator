@@ -182,6 +182,17 @@ run = client.run(
 
 ## MCP 工具与 CLI 一览
 
+### 1. 远端 SSH 环境、容器与 NPU 算力管理（无需前置会话即可直接调用）
+
+| MCP 工具名 | 对应的 CLI 入口 | 它能帮你做什么 |
+| --- | --- | --- |
+| `mindie_hosts` | `mindie hosts` / `mindie-coordinator hosts` | 统一管理 SSH 主机台账（`machines.json`）、非交互式免密公钥安装（`bootstrap_key`）、多机容器 SSH Mesh 互通（`mesh`），并自动同步 `remote-dev` 的 `endpoints.json` |
+| `mindie_probe` | `mindie probe` / `mindie-coordinator probe` | 免 Agent 单趟 SSH 探测昇腾 NPU 显存/算力/进程归属（兼容 910B/A2、双 Die 910C/A3、950/A5）、智能推荐连续空闲卡（`capacity`）、查看宿主机负载与共享权重挂载盘（`mounts`） |
+| `mindie_container` | `mindie container` / `mindie-coordinator container` | 绑定已有容器（支持 `docker exec` 直连与独立 `ssh_port` 两种模式）、一键开通用户专属昇腾容器（`mindie-<user>`）、枚举或解绑容器，并实时同步 `remote-dev` 端点别名 |
+| `mindie_lease` | `mindie lease` / `mindie-coordinator lease` | 轻量级宿主机 NPU 卡与服务端口租约申请（`acquire`）、续期（`heartbeat`）、查询（`status`）与释放（`release`），直接返回 `ASCEND_RT_VISIBLE_DEVICES` 供 `remote-dev` 使用 |
+
+### 2. 受管源码快照与任务执行生命周期
+
 | MCP 工具名 | 对应的 CLI / Python 方法 | 它能帮你做什么 |
 | --- | --- | --- |
 | `mindie_session` | `TaskClient.session()` | 查看当前本地任务绑定了哪些默认源码目录（支持自动识别 Git Worktree 与 Submodule），或更新默认源码路径 |
@@ -206,9 +217,12 @@ run = client.run(
 
 | 路径 | 作用说明 |
 | --- | --- |
-| `mindie_coordinator/cli.py` | `mindie-coordinator` 命令行总入口（含守护进程管理与运行时注册） |
-| `mindie_coordinator/mindie.py` | 面向日常任务提交与查询的轻量 `mindie` CLI |
-| `mindie_coordinator/task_server.py` | 给 AI 编程助手提供的 stdio MCP Server（暴露 5 个核心工具） |
+| `mindie_coordinator/cli.py` | `mindie-coordinator` 命令行总入口（含 `hosts`/`probe`/`container`/`lease` 环境管理、守护进程与容器开通） |
+| `mindie_coordinator/mindie.py` | 面向日常环境管理与任务提交的轻量 `mindie` CLI |
+| `mindie_coordinator/task_server.py` | 给 AI 编程助手提供的 stdio MCP Server（暴露 9 个环境管理与任务调度工具） |
+| `mindie_coordinator/env_manager.py` | SSH 主机管理、容器绑定/开通、硬件探测与轻量 NPU 租约的核心编排实现 |
+| `mindie_coordinator/endpoint_bridge.py` | `MachineDirectory` (`machines.json`) 到 `remote-dev` `endpoints.json` 及动态 Resolver 的自动桥接层 |
+| `mindie_coordinator/fleet_probe.py` | 面向 Agent 的单趟无代理 SSH 昇腾 NPU、容器与共享权重盘探测及容量排序引擎 |
 | `mindie_coordinator/task_client.py` | Python `TaskClient` SDK |
 | `mindie_coordinator/host_queue.py` | 宿主机 NPU 排队分配器的公共 Python API |
 | `mindie_coordinator/host/` | 零第三方依赖的宿主机 NPU 与端口仲裁模块（通过 SSH 下发到物理机执行） |

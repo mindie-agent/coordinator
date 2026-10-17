@@ -47,6 +47,8 @@ def compact_data(value: dict, *, target=False) -> dict:
                   "attachments_count": len(value.get("attachments") or [])}
         if "source_defaults" in value:
             result["source_defaults"] = value["source_defaults"]
+    elif "action" in value and "execution_id" not in value and "id" not in value:
+        result = dict(value)
     else:
         result = execution_summary(value, target=target)
     if "executions" in value:

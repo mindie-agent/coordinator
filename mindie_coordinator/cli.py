@@ -50,6 +50,20 @@ def main(argv: list[str] | None = None) -> int:
     register.add_argument("--state-dir", default="", help="Coordinator state directory")
     register.add_argument("--reuse-only", action="store_true", help="Verify a native artifact donor without making its work root available for execution")
     register.add_argument("--source", action="append", default=[], metavar="NAME=PATH", help="Local source worktree matching a native artifact donor; repeat for each repository")
+    for env_cmd, env_help in (
+        ("hosts", "Manage SSH hosts, keys, mesh, and remote-dev endpoint aliases"),
+        ("probe", "Probe Ascend NPU occupancy, capacity, server metrics, containers, and mounts"),
+        ("container", "Bind, provision, inspect, or remove remote Ascend containers"),
+        ("lease", "Acquire, heartbeat, inspect, or release host NPU and service-port leases"),
+    ):
+        ep = sub.add_parser(env_cmd, help=env_help)
+        ep.add_argument("--action")
+        ep.add_argument("--alias")
+        ep.add_argument("--host")
+        ep.add_argument("--port", type=int)
+        ep.add_argument("--user")
+        ep.add_argument("--full", action="store_true", default=None)
+        ep.add_argument("--json", default="{}", help="Structured JSON arguments for the operation")
     args = parser.parse_args(argv)
     if args.command == "daemon":
         from mindie_coordinator.service import main as daemon_main
@@ -57,6 +71,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "task-server":
         from mindie_coordinator.task_server import main as task_main
         return task_main(["--describe"] if args.describe else [])
+    if args.command in {"hosts", "probe", "container", "lease"}:
+        from mindie_coordinator.ops import mindie_call
+
+        extra = json.loads(args.json or "{}")
+        merged = {
+            **extra,
+            **{
+                k: getattr(args, k)
+                for k in ("action", "alias", "host", "port", "user", "full")
+                if getattr(args, k, None) is not None
+            },
+        }
+        payload = mindie_call("mindie." + args.command, merged, allow_native_context=False)
+        print(json.dumps(payload["result"], ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if payload["result"].get("outcome") == "success" else 1
     if args.command == "provision":
         from mindie_coordinator.provision import provision_user_container
         row = provision_user_container(

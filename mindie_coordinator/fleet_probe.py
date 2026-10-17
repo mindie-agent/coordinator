@@ -1,0 +1,875 @@
+"""Agent-facing NPU, server, container, and mount probe for mindie-coordinator.
+
+Unifies the agentless single-pass SSH hardware/system probe (migrated from
+`npu-top` into `coordinator`) with `remote-dev` transport and a bounded local
+snapshot cache (`<coordinator_state_dir>/probe_cache.json`).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from mindie_coordinator.machine_directory import MachineDirectory, MachineDirectoryUnavailable
+from mindie_coordinator.state_paths import coordinator_state_dir
+
+PROBE_CACHE_FILENAME = "probe_cache.json"
+DEFAULT_CACHE_TTL_SECONDS = 30.0
+BUSY_HBM_THRESHOLD_MB = 8192
+BUSY_AICORE_THRESHOLD_PCT = 5.0
+
+_RE_NPU_VERSION = re.compile(r"npu-smi\s+([\d.]+).*?Version:\s*([\d.]+)")
+_RE_USAGE_CAPACITY = re.compile(r"HBM Capacity\(MB\)\s*:\s*(\d+)", re.IGNORECASE)
+_RE_USAGE_RATE = re.compile(r"HBM Usage Rate\(%\)\s*:\s*(\d+)", re.IGNORECASE)
+_RE_USAGE_AICORE = re.compile(r"Aicore Usage Rate\(%\)\s*:\s*(\d+)", re.IGNORECASE)
+_RE_DOCKER_PORT = re.compile(r":(\d+)->22/tcp")
+_RE_CONTAINER_ID_64 = re.compile(r"([0-9a-f]{64})")
+
+WEIGHT_MOUNT_KEYWORDS = ("weight", "weights", "model", "models", "hf", "huggingface", "llm", "data", "nfs", "ceph", "obs", "sfs")
+
+REMOTE_FLEET_PROBE_SCRIPT = r"""
+export PATH="/usr/local/Ascend/driver/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:${LD_LIBRARY_PATH:-}"
+
+echo "===SECTION:NPU_SMI==="
+if command -v npu-smi >/dev/null 2>&1; then
+    npu-smi info 2>/dev/null || true
+elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then
+    /usr/local/Ascend/driver/tools/npu-smi info 2>/dev/null || true
+fi
+
+echo "===SECTION:CONTAINERS==="
+if command -v docker >/dev/null 2>&1; then
+    docker ps --no-trunc --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}' 2>/dev/null || true
+fi
+
+echo "===SECTION:PID_MAP==="
+for p in $(ps -eo pid= 2>/dev/null); do
+    p=$(echo "$p" | tr -d ' ')
+    [ -d "/proc/$p" ] || continue
+    owner=$(stat -c '%U' "/proc/$p" 2>/dev/null || echo "")
+    cg=$(cat "/proc/$p/cgroup" 2>/dev/null | tr '\n' ' ' || echo "")
+    if echo "$cg" | grep -qE 'docker|containerd|kubepods'; then
+        echo "$p|$owner|$cg"
+    fi
+done
+
+echo "===SECTION:SYSTEM==="
+echo "HOSTNAME:$(hostname 2>/dev/null || echo unknown)"
+echo "UPTIME:$(uptime -p 2>/dev/null || uptime 2>/dev/null || echo unknown)"
+echo "LOADAVG:$(cat /proc/loadavg 2>/dev/null || echo '0 0 0')"
+echo "CORES:$(nproc 2>/dev/null || echo 0)"
+echo "CPU_MODEL:$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^[ \t]*//' || lscpu 2>/dev/null | grep -i 'Model name:' | head -n1 | cut -d: -f2 | sed 's/^[ \t]*//' || uname -m)"
+free -m 2>/dev/null | awk '/^Mem:/ {print "MEM:" $2 ":" $3 ":" $7}'
+
+echo "===SECTION:MOUNTS==="
+df -B1 -T -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs 2>/dev/null | tail -n +2 || true
+
+echo "===SECTION:TOP_PROCS==="
+ps -eo pid,user,%cpu,%mem,rss,comm --sort=-%cpu 2>/dev/null | head -n 11 | tail -n +2 || true
+"""
+
+
+def _split_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|") and stripped.endswith("|"):
+        stripped = stripped[1:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _parse_int(val: str, default: int = 0) -> int:
+    try:
+        return int(val.strip())
+    except (ValueError, AttributeError):
+        return default
+
+
+def _parse_float(val: str | None) -> float | None:
+    if not val:
+        return None
+    cleaned = val.strip()
+    if cleaned in ("-", "N/A", "NA", ""):
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_slash_pair(val: str) -> tuple[int, int]:
+    parts = val.split("/")
+    if len(parts) != 2:
+        return 0, 0
+    return _parse_int(parts[0]), _parse_int(parts[1])
+
+
+def is_npu_busy(
+    *,
+    hbm_used_mb: int,
+    aicore_pct: float = 0.0,
+    processes: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Apply MindIE's standard occupancy threshold (>= 8192 MB HBM or active compute)."""
+    if hbm_used_mb >= BUSY_HBM_THRESHOLD_MB:
+        return True
+    if aicore_pct >= BUSY_AICORE_THRESHOLD_PCT:
+        return True
+    for proc in processes or []:
+        if int(proc.get("memory_mb") or 0) >= BUSY_HBM_THRESHOLD_MB:
+            return True
+    return False
+
+
+def parse_npu_smi_usages(raw: str, current: dict[str, Any]) -> dict[str, Any]:
+    """Enrich an NPU card dict with `npu-smi info -t usages -i <id>` output."""
+    updated = dict(current)
+    cap_match = _RE_USAGE_CAPACITY.search(raw)
+    rate_match = _RE_USAGE_RATE.search(raw)
+    aic_match = _RE_USAGE_AICORE.search(raw)
+
+    if cap_match and rate_match:
+        cap = int(cap_match.group(1))
+        rate = int(rate_match.group(1))
+        if cap > 0 and int(updated.get("hbm_total_mb") or 0) == 0:
+            used = round(cap * rate / 100)
+            updated["hbm_total_mb"] = cap
+            updated["hbm_used_mb"] = used
+    if aic_match and float(updated.get("aicore_pct") or 0.0) == 0.0:
+        updated["aicore_pct"] = float(aic_match.group(1))
+    updated["busy"] = is_npu_busy(
+        hbm_used_mb=int(updated.get("hbm_used_mb") or 0),
+        aicore_pct=float(updated.get("aicore_pct") or 0.0),
+        processes=updated.get("processes") or [],
+    )
+    return updated
+
+
+def parse_npu_smi_info(
+    raw: str,
+    *,
+    pid_owners: Mapping[int, str] | None = None,
+    pid_containers: Mapping[int, str] | None = None,
+) -> dict[str, Any]:
+    """Parse `npu-smi info` output for 910B (A2), dual-die 910C (A3), 950 (A5), and 310P."""
+    npu_smi_version = ""
+    driver_version = ""
+    ver_match = _RE_NPU_VERSION.search(raw)
+    if ver_match:
+        npu_smi_version = ver_match.group(1)
+        driver_version = ver_match.group(2)
+
+    lines = raw.splitlines()
+    device_rows: list[tuple[list[str], list[str]]] = []
+    process_rows: list[list[str]] = []
+
+    in_process_section = False
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if " running processes " in line.lower() or "process id" in line.lower():
+            in_process_section = True
+            i += 1
+            continue
+        if not line.startswith("|") or line.startswith("+"):
+            i += 1
+            continue
+        cells = _split_row(line)
+        if not in_process_section:
+            if len(cells) >= 3 and any(
+                kw in cells[0].lower() for kw in ("npu", "chip", "===")
+            ):
+                i += 1
+                continue
+            if len(cells) >= 3:
+                first_tokens = cells[0].split()
+                if first_tokens and first_tokens[0].isdigit():
+                    die_metrics_list: list[list[str]] = []
+                    while i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        if not next_line.startswith("|") or next_line.startswith("+"):
+                            break
+                        next_cells = _split_row(next_line)
+                        first_next = next_cells[0].split() if next_cells else []
+                        second_next = (next_cells[1].strip().upper() if len(next_cells) > 1 else "")
+                        if len(first_next) <= 1 and second_next not in {"OK", "WARNING", "ERROR", "ALARM", "UNKNOWN"}:
+                            die_metrics_list.append(next_cells)
+                            i += 1
+                        else:
+                            break
+                    if die_metrics_list:
+                        for mc in die_metrics_list:
+                            device_rows.append((cells, mc))
+                    else:
+                        device_rows.append((cells, []))
+        else:
+            if len(cells) >= 4:
+                first_tokens = cells[0].split()
+                if first_tokens and first_tokens[0].isdigit():
+                    process_rows.append(cells)
+        i += 1
+
+    procs_by_npu: dict[int, list[dict[str, Any]]] = {}
+    owners_map = pid_owners or {}
+    containers_map = pid_containers or {}
+    for cells in process_rows:
+        npu_tokens = cells[0].split()
+        if not npu_tokens or not npu_tokens[0].isdigit():
+            continue
+        npu_id = int(npu_tokens[0])
+        pid = _parse_int(cells[1])
+        proc_name = cells[2] if len(cells) > 2 else ""
+        mem_mb = _parse_int(cells[3]) if len(cells) > 3 else 0
+        if pid <= 0:
+            continue
+        procs_by_npu.setdefault(npu_id, []).append(
+            {
+                "pid": pid,
+                "process_name": proc_name,
+                "memory_mb": mem_mb,
+                "owner": owners_map.get(pid, ""),
+                "container_name": containers_map.get(pid, ""),
+            }
+        )
+
+    die_records: dict[int, list[dict[str, Any]]] = {}
+    for id_cells, metric_cells in device_rows:
+        tokens0 = id_cells[0].split()
+        npu_id = int(tokens0[0])
+        chip_name = " ".join(tokens0[1:]) if len(tokens0) > 1 else "Ascend"
+        health = id_cells[1].strip() if len(id_cells) > 1 else "Unknown"
+
+        power_temp_str = id_cells[2].strip() if len(id_cells) > 2 else ""
+        pt_tokens = power_temp_str.split()
+        power_w: float | None = None
+        temp_c: float | None = None
+        if len(pt_tokens) >= 2:
+            power_w = _parse_float(pt_tokens[0])
+            temp_c = _parse_float(pt_tokens[1])
+        elif len(pt_tokens) == 1:
+            val = _parse_float(pt_tokens[0])
+            if val is not None:
+                if val < 100 and "." not in pt_tokens[0]:
+                    temp_c = val
+                else:
+                    power_w = val
+
+        bus_id = ""
+        aicore_pct = 0.0
+        mem_used_mb = 0
+        mem_total_mb = 0
+        hbm_used_mb = 0
+        hbm_total_mb = 0
+
+        if len(metric_cells) >= 3:
+            bus_id = metric_cells[1].strip()
+            detail_str = metric_cells[2].strip()
+            slash_matches = list(re.finditer(r"(\d+)\s*/\s*(\d+)", detail_str))
+            if len(slash_matches) >= 2:
+                mem_used_mb = int(slash_matches[0].group(1))
+                mem_total_mb = int(slash_matches[0].group(2))
+                hbm_used_mb = int(slash_matches[1].group(1))
+                hbm_total_mb = int(slash_matches[1].group(2))
+                prefix = detail_str[: slash_matches[0].start()].strip().split()
+                if prefix:
+                    aicore_pct = _parse_float(prefix[0]) or 0.0
+            elif len(slash_matches) == 1:
+                hbm_used_mb = int(slash_matches[0].group(1))
+                hbm_total_mb = int(slash_matches[0].group(2))
+                prefix = detail_str[: slash_matches[0].start()].strip().split()
+                if prefix:
+                    aicore_pct = _parse_float(prefix[0]) or 0.0
+        elif len(id_cells) >= 4:
+            slash_matches = list(re.finditer(r"(\d+)\s*/\s*(\d+)", " ".join(id_cells[2:])))
+            if slash_matches:
+                last = slash_matches[-1]
+                hbm_used_mb = int(last.group(1))
+                hbm_total_mb = int(last.group(2))
+
+        if hbm_total_mb == 0 and mem_total_mb > 0:
+            hbm_used_mb = mem_used_mb
+            hbm_total_mb = mem_total_mb
+
+        die_records.setdefault(npu_id, []).append(
+            {
+                "chip_name": chip_name,
+                "health": health,
+                "power_w": power_w,
+                "temp_c": temp_c,
+                "bus_id": bus_id,
+                "aicore_pct": aicore_pct,
+                "memory_used_mb": mem_used_mb,
+                "memory_total_mb": mem_total_mb,
+                "hbm_used_mb": hbm_used_mb,
+                "hbm_total_mb": hbm_total_mb,
+            }
+        )
+
+    npus: list[dict[str, Any]] = []
+    for npu_id in sorted(die_records):
+        dies = die_records[npu_id]
+        die_count = len(dies)
+        first = dies[0]
+        chip_name = first["chip_name"]
+        if die_count >= 2 and "910" in chip_name and "910c" not in chip_name.lower():
+            chip_name = f"{chip_name} (910C dual-die)"
+        health = "OK" if all(d["health"].upper() == "OK" for d in dies) else first["health"]
+        powers = [d["power_w"] for d in dies if d["power_w"] is not None]
+        temps = [d["temp_c"] for d in dies if d["temp_c"] is not None]
+        power_w = round(sum(powers), 1) if powers else None
+        temp_c = round(max(temps), 1) if temps else None
+        aicore_pct = round(sum(d["aicore_pct"] for d in dies) / die_count, 1)
+        mem_used_mb = sum(d["memory_used_mb"] for d in dies)
+        mem_total_mb = sum(d["memory_total_mb"] for d in dies)
+        hbm_used_mb = sum(d["hbm_used_mb"] for d in dies)
+        hbm_total_mb = sum(d["hbm_total_mb"] for d in dies)
+        procs = procs_by_npu.get(npu_id, [])
+        hbm_pct = round((hbm_used_mb / hbm_total_mb) * 100.0, 1) if hbm_total_mb > 0 else 0.0
+        busy = is_npu_busy(hbm_used_mb=hbm_used_mb, aicore_pct=aicore_pct, processes=procs)
+        npus.append(
+            {
+                "npu_id": npu_id,
+                "chip_name": chip_name,
+                "health": health,
+                "power_w": power_w,
+                "temp_c": temp_c,
+                "bus_id": first["bus_id"],
+                "aicore_pct": aicore_pct,
+                "memory_used_mb": mem_used_mb,
+                "memory_total_mb": mem_total_mb,
+                "hbm_used_mb": hbm_used_mb,
+                "hbm_total_mb": hbm_total_mb,
+                "hbm_pct": hbm_pct,
+                "die_count": die_count,
+                "busy": busy,
+                "processes": procs,
+            }
+        )
+
+    return {
+        "driver_version": driver_version,
+        "npu_smi_version": npu_smi_version,
+        "npus": npus,
+    }
+
+
+def parse_fleet_probe_output(
+    raw: str,
+    *,
+    alias: str,
+    host: str,
+    port: int = 22,
+    user: str = "root",
+    container_binding: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Parse the combined multi-section stdout from `REMOTE_FLEET_PROBE_SCRIPT`."""
+    sections: dict[str, list[str]] = {}
+    current = "PREAMBLE"
+    for line in raw.splitlines():
+        if line.startswith("===SECTION:") and line.endswith("==="):
+            current = line[len("===SECTION:") : -3].strip()
+            sections.setdefault(current, [])
+        else:
+            sections.setdefault(current, []).append(line)
+
+    containers: list[dict[str, Any]] = []
+    id_to_name: dict[str, str] = {}
+    for line in sections.get("CONTAINERS", []):
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|", 4)
+        if len(parts) < 4:
+            continue
+        cid, cname, cimage, cstatus = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+        cports = parts[4].strip() if len(parts) > 4 else ""
+        port_match = _RE_DOCKER_PORT.search(cports)
+        ssh_port = int(port_match.group(1)) if port_match else None
+        containers.append(
+            {
+                "id": cid[:12],
+                "full_id": cid,
+                "name": cname,
+                "image": cimage,
+                "status": cstatus,
+                "ports": cports,
+                "ssh_port": ssh_port,
+            }
+        )
+        if cid:
+            id_to_name[cid.lower()] = cname
+            id_to_name[cid[:12].lower()] = cname
+
+    pid_owners: dict[int, str] = {}
+    pid_containers: dict[int, str] = {}
+    for line in sections.get("PID_MAP", []):
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|", 2)
+        if len(parts) < 3:
+            continue
+        pid = _parse_int(parts[0])
+        if pid <= 0:
+            continue
+        pid_owners[pid] = parts[1].strip()
+        cgroup = parts[2].strip()
+        match_64 = _RE_CONTAINER_ID_64.search(cgroup)
+        if match_64:
+            cid = match_64.group(1).lower()
+            cname = id_to_name.get(cid) or id_to_name.get(cid[:12]) or cid[:12]
+            pid_containers[pid] = cname
+
+    npu_raw = "\n".join(sections.get("NPU_SMI", []))
+    npu_parsed = parse_npu_smi_info(
+        npu_raw,
+        pid_owners=pid_owners,
+        pid_containers=pid_containers,
+    )
+    npus = npu_parsed["npus"]
+    total_npus = len(npus)
+    busy_ids = [card["npu_id"] for card in npus if card.get("busy")]
+    free_ids = [card["npu_id"] for card in npus if not card.get("busy")]
+
+    hostname = ""
+    uptime_str = ""
+    cpu_model = ""
+    cpu_cores = 0
+    load_1m, load_5m, load_15m = 0.0, 0.0, 0.0
+    mem_total_mb, mem_used_mb, mem_avail_mb = 0, 0, 0
+    for line in sections.get("SYSTEM", []):
+        if line.startswith("HOSTNAME:"):
+            hostname = line.partition(":")[2].strip()
+        elif line.startswith("UPTIME:"):
+            uptime_str = line.partition(":")[2].strip()
+        elif line.startswith("CPU_MODEL:"):
+            cpu_model = line.partition(":")[2].strip()
+        elif line.startswith("CORES:"):
+            cpu_cores = _parse_int(line.partition(":")[2])
+        elif line.startswith("LOADAVG:"):
+            tokens = line.partition(":")[2].strip().split()
+            if len(tokens) >= 3:
+                load_1m = _parse_float(tokens[0]) or 0.0
+                load_5m = _parse_float(tokens[1]) or 0.0
+                load_15m = _parse_float(tokens[2]) or 0.0
+        elif line.startswith("MEM:"):
+            m_parts = line.partition(":")[2].strip().split(":")
+            if len(m_parts) >= 3:
+                mem_total_mb = _parse_int(m_parts[0])
+                mem_used_mb = _parse_int(m_parts[1])
+                mem_avail_mb = _parse_int(m_parts[2])
+
+    mounts: list[dict[str, Any]] = []
+    for line in sections.get("MOUNTS", []):
+        tokens = line.split()
+        if len(tokens) < 7:
+            continue
+        source, fstype = tokens[0], tokens[1]
+        total_b = _parse_int(tokens[2])
+        used_b = _parse_int(tokens[3])
+        avail_b = _parse_int(tokens[4])
+        pct_str = tokens[5].rstrip("%")
+        target_dir = " ".join(tokens[6:])
+        lower_target = target_dir.lower()
+        lower_source = source.lower()
+        likely_weights = (
+            total_b >= 100 * (1024**3)
+            and (
+                any(kw in lower_target or kw in lower_source for kw in WEIGHT_MOUNT_KEYWORDS)
+                or fstype.lower() in {"nfs", "nfs4", "ceph", "lustre", "glusterfs", "obsfs", "sfs"}
+            )
+        )
+        mounts.append(
+            {
+                "source": source,
+                "fstype": fstype,
+                "total_gb": round(total_b / (1024**3), 1),
+                "used_gb": round(used_b / (1024**3), 1),
+                "avail_gb": round(avail_b / (1024**3), 1),
+                "used_pct": _parse_float(pct_str) or 0.0,
+                "mountpoint": target_dir,
+                "likely_weights_dir": likely_weights,
+            }
+        )
+
+    top_processes: list[dict[str, Any]] = []
+    for line in sections.get("TOP_PROCS", []):
+        tokens = line.split(None, 5)
+        if len(tokens) < 6:
+            continue
+        top_processes.append(
+            {
+                "pid": _parse_int(tokens[0]),
+                "user": tokens[1],
+                "cpu_pct": _parse_float(tokens[2]) or 0.0,
+                "mem_pct": _parse_float(tokens[3]) or 0.0,
+                "rss_mb": round(_parse_int(tokens[4]) / 1024.0, 1),
+                "command": tokens[5],
+            }
+        )
+
+    chip_names = sorted({card["chip_name"] for card in npus if card.get("chip_name")})
+    return {
+        "alias": alias,
+        "host": host,
+        "port": port,
+        "user": user,
+        "online": True,
+        "error": None,
+        "probed_at": time.time(),
+        "hostname": hostname,
+        "uptime": uptime_str,
+        "driver_version": npu_parsed["driver_version"],
+        "npu_smi_version": npu_parsed["npu_smi_version"],
+        "chip_summary": ", ".join(chip_names) if chip_names else "Unknown",
+        "total_npus": total_npus,
+        "free_npus": len(free_ids),
+        "busy_npus": len(busy_ids),
+        "free_npu_ids": free_ids,
+        "busy_npu_ids": busy_ids,
+        "npus": npus,
+        "server": {
+            "hostname": hostname,
+            "uptime": uptime_str,
+            "cpu_model": cpu_model,
+            "cpu_cores": cpu_cores,
+            "load_1m": load_1m,
+            "load_5m": load_5m,
+            "load_15m": load_15m,
+            "mem_total_mb": mem_total_mb,
+            "mem_used_mb": mem_used_mb,
+            "mem_available_mb": mem_avail_mb,
+            "mem_pct": round((mem_used_mb / mem_total_mb) * 100.0, 1) if mem_total_mb > 0 else 0.0,
+            "top_processes": top_processes,
+        },
+        "containers": containers,
+        "bound_container": dict(container_binding) if container_binding else None,
+        "mounts": mounts,
+    }
+
+
+def _default_ssh_runner(host_spec: Mapping[str, Any], script: str, timeout_ms: int = 20000) -> str:
+    from remote_dev.core.endpoint import resolve_endpoint
+    from remote_dev.core.shell_ops import remote_bash
+
+    endpoint = resolve_endpoint(
+        {
+            "host": host_spec["host"],
+            "port": int(host_spec.get("port") or 22),
+            "user": str(host_spec.get("user") or "root"),
+            "root": "/",
+            "cwd": "/",
+            **(
+                {"identity_file": str(host_spec["identity_file"])}
+                if host_spec.get("identity_file")
+                else {}
+            ),
+        }
+    )
+    response = remote_bash(
+        endpoint,
+        command=script,
+        timeout_ms=timeout_ms,
+        wait=True,
+        runtime_env=False,
+    )
+    result = response.get("result") or {}
+    if result.get("outcome") != "success":
+        stderr = (result.get("preview") or {}).get("stderr") or result.get("summary") or "SSH probe failed"
+        raise RuntimeError(str(stderr).strip())
+    stdout_ref = (result.get("refs") or {}).get("stdout")
+    if stdout_ref and Path(stdout_ref).is_file():
+        return Path(stdout_ref).read_text(encoding="utf-8", errors="replace")
+    return str((result.get("preview") or {}).get("stdout") or "")
+
+
+def probe_cache_path(state_dir: Path | str | None = None) -> Path:
+    base = Path(state_dir).expanduser().resolve() if state_dir is not None else coordinator_state_dir()
+    return base / PROBE_CACHE_FILENAME
+
+
+def load_probe_cache(state_dir: Path | str | None = None) -> dict[str, dict[str, Any]]:
+    path = probe_cache_path(state_dir)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    snapshots = payload.get("snapshots") if isinstance(payload, dict) else None
+    return dict(snapshots) if isinstance(snapshots, dict) else {}
+
+
+def save_probe_cache(
+    snapshots: Mapping[str, Mapping[str, Any]],
+    *,
+    state_dir: Path | str | None = None,
+) -> Path:
+    path = probe_cache_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "updated_at": time.time(),
+        "snapshots": {k: dict(v) for k, v in snapshots.items()},
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def probe_machine_record(
+    record: Mapping[str, Any],
+    *,
+    mode: str = "auto",
+    cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
+    state_dir: Path | str | None = None,
+    runner: Callable[[Mapping[str, Any], str], str] | None = None,
+) -> dict[str, Any]:
+    """Probe one machine record using cache (`cache`/`auto`) or live SSH (`live`/`auto`)."""
+    host_info = record.get("host") or {}
+    host_ip = str(host_info.get("ip") or host_info.get("host") or "").strip()
+    alias = str(record.get("alias") or host_ip).strip()
+    port = int(host_info.get("port") or 22)
+    user = str(host_info.get("user") or "root").strip() or "root"
+    container_binding = record.get("container") if isinstance(record.get("container"), Mapping) else None
+
+    cache = load_probe_cache(state_dir)
+    cached = cache.get(alias) or cache.get(host_ip)
+    now = time.time()
+
+    if mode == "cache":
+        if cached is not None:
+            return {**cached, "cache_hit": True, "cache_age_seconds": round(max(0.0, now - float(cached.get("probed_at") or now)), 1)}
+        return {
+            "alias": alias,
+            "host": host_ip,
+            "port": port,
+            "user": user,
+            "online": False,
+            "error": f"no cached probe snapshot for {alias!r}; use mode='live' or mode='auto'",
+            "cache_hit": False,
+            "total_npus": 0,
+            "free_npus": 0,
+            "busy_npus": 0,
+            "free_npu_ids": [],
+            "busy_npu_ids": [],
+            "npus": [],
+            "containers": [],
+            "mounts": [],
+        }
+
+    if mode == "auto" and cached is not None and cached.get("online"):
+        age = now - float(cached.get("probed_at") or 0.0)
+        if 0 <= age <= cache_ttl_seconds:
+            return {**cached, "cache_hit": True, "cache_age_seconds": round(age, 1)}
+
+    exec_runner = runner or _default_ssh_runner
+    host_spec = {
+        "host": host_ip,
+        "port": port,
+        "user": user,
+        **({"identity_file": host_info["identity_file"]} if host_info.get("identity_file") else {}),
+    }
+    try:
+        raw_output = exec_runner(host_spec, REMOTE_FLEET_PROBE_SCRIPT)
+        snapshot = parse_fleet_probe_output(
+            raw_output,
+            alias=alias,
+            host=host_ip,
+            port=port,
+            user=user,
+            container_binding=container_binding,
+        )
+        # Fallback for cards where `npu-smi info` reported 0/0 HBM
+        zero_hbm_ids = [c["npu_id"] for c in snapshot["npus"] if int(c.get("hbm_total_mb") or 0) == 0]
+        if zero_hbm_ids and runner is None:
+            usages_cmd = " ; ".join(
+                f"echo '===NPU_USAGE:{nid}==='; npu-smi info -t usages -i {nid} 2>/dev/null || true"
+                for nid in zero_hbm_ids[:16]
+            )
+            try:
+                usages_raw = exec_runner(host_spec, usages_cmd)
+                by_id: dict[int, list[str]] = {}
+                cur_id: int | None = None
+                for uline in usages_raw.splitlines():
+                    if uline.startswith("===NPU_USAGE:") and uline.endswith("==="):
+                        cur_id = _parse_int(uline.split(":", 1)[1][:-3], -1)
+                    elif cur_id is not None and cur_id >= 0:
+                        by_id.setdefault(cur_id, []).append(uline)
+                updated_npus = []
+                for card in snapshot["npus"]:
+                    nid = card["npu_id"]
+                    if nid in by_id:
+                        card = parse_npu_smi_usages("\n".join(by_id[nid]), card)
+                    updated_npus.append(card)
+                snapshot["npus"] = updated_npus
+                snapshot["free_npu_ids"] = [c["npu_id"] for c in updated_npus if not c.get("busy")]
+                snapshot["busy_npu_ids"] = [c["npu_id"] for c in updated_npus if c.get("busy")]
+                snapshot["free_npus"] = len(snapshot["free_npu_ids"])
+                snapshot["busy_npus"] = len(snapshot["busy_npu_ids"])
+            except Exception:
+                pass
+        cache[alias] = snapshot
+        save_probe_cache(cache, state_dir=state_dir)
+        return {**snapshot, "cache_hit": False, "cache_age_seconds": 0.0}
+    except Exception as exc:
+        failed_snapshot = {
+            "alias": alias,
+            "host": host_ip,
+            "port": port,
+            "user": user,
+            "online": False,
+            "error": str(exc),
+            "probed_at": now,
+            "cache_hit": False,
+            "total_npus": 0,
+            "free_npus": 0,
+            "busy_npus": 0,
+            "free_npu_ids": [],
+            "busy_npu_ids": [],
+            "npus": [],
+            "containers": [],
+            "bound_container": dict(container_binding) if container_binding else None,
+            "mounts": [],
+        }
+        return failed_snapshot
+
+
+def _max_contiguous_run(ids: list[int]) -> list[int]:
+    if not ids:
+        return []
+    sorted_ids = sorted(set(ids))
+    best: list[int] = [sorted_ids[0]]
+    current: list[int] = [sorted_ids[0]]
+    for nid in sorted_ids[1:]:
+        if nid == current[-1] + 1:
+            current.append(nid)
+        else:
+            if len(current) > len(best):
+                best = current
+            current = [nid]
+    if len(current) > len(best):
+        best = current
+    return best
+
+
+def _recommend_devices(free_ids: list[int], count: int) -> tuple[list[int], bool]:
+    """Select `count` free NPU IDs, preferring power-of-two aligned or contiguous ranges."""
+    sorted_ids = sorted(set(free_ids))
+    if count <= 0 or len(sorted_ids) < count:
+        return sorted_ids, False
+    free_set = set(sorted_ids)
+    # First try aligned contiguous blocks (e.g., 0..3, 4..7)
+    for start in sorted_ids:
+        if count > 1 and start % count != 0:
+            continue
+        candidate = list(range(start, start + count))
+        if all(x in free_set for x in candidate):
+            return candidate, True
+    # Next try any contiguous block
+    for start in sorted_ids:
+        candidate = list(range(start, start + count))
+        if all(x in free_set for x in candidate):
+            return candidate, True
+    return sorted_ids[:count], False
+
+
+def find_fleet_capacity(
+    *,
+    count: int = 1,
+    chip_query: str | None = None,
+    host: str | None = None,
+    mode: str = "auto",
+    directory: MachineDirectory | None = None,
+    state_dir: Path | str | None = None,
+    runner: Callable[[Mapping[str, Any], str], str] | None = None,
+) -> dict[str, Any]:
+    """Find and rank machines with at least `count` free NPUs across the fleet."""
+    store = directory if directory is not None else MachineDirectory()
+    try:
+        records = [store.record(host)] if host else store.machines()
+    except MachineDirectoryUnavailable as exc:
+        raise ValueError(str(exc)) from exc
+
+    chip_filter = (chip_query or "").strip().lower()
+    candidates: list[dict[str, Any]] = []
+    unsatisfied: list[dict[str, Any]] = []
+
+    for rec in records:
+        snap = probe_machine_record(rec, mode=mode, state_dir=state_dir, runner=runner)
+        if not snap.get("online"):
+            unsatisfied.append(
+                {
+                    "alias": snap["alias"],
+                    "host": snap["host"],
+                    "online": False,
+                    "error": snap.get("error"),
+                    "free_npus": 0,
+                    "total_npus": 0,
+                }
+            )
+            continue
+        if chip_filter and chip_filter not in str(snap.get("chip_summary") or "").lower():
+            unsatisfied.append(
+                {
+                    "alias": snap["alias"],
+                    "host": snap["host"],
+                    "online": True,
+                    "reason": f"chip_summary {snap.get('chip_summary')!r} does not match {chip_query!r}",
+                    "free_npus": snap["free_npus"],
+                    "total_npus": snap["total_npus"],
+                }
+            )
+            continue
+        free_ids = list(snap.get("free_npu_ids") or [])
+        if len(free_ids) < count:
+            unsatisfied.append(
+                {
+                    "alias": snap["alias"],
+                    "host": snap["host"],
+                    "online": True,
+                    "reason": f"only {len(free_ids)}/{snap['total_npus']} NPUs free (requested {count})",
+                    "free_npus": len(free_ids),
+                    "free_npu_ids": free_ids,
+                    "total_npus": snap["total_npus"],
+                }
+            )
+            continue
+        recommended, contiguous = _recommend_devices(free_ids, count)
+        contig_run = _max_contiguous_run(free_ids)
+        candidates.append(
+            {
+                "alias": snap["alias"],
+                "host": snap["host"],
+                "chip_summary": snap.get("chip_summary"),
+                "total_npus": snap["total_npus"],
+                "free_npus": len(free_ids),
+                "free_npu_ids": free_ids,
+                "recommended_devices": recommended,
+                "ascend_rt_visible_devices": ",".join(str(x) for x in recommended),
+                "contiguous": contiguous,
+                "max_contiguous_free": len(contig_run),
+                "bound_container": snap.get("bound_container"),
+                "remote_dev_alias": snap["alias"],
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            1 if item["contiguous"] else 0,
+            item["max_contiguous_free"],
+            item["free_npus"],
+        ),
+        reverse=True,
+    )
+    return {
+        "requested_npus": count,
+        "chip_query": chip_query,
+        "mode": mode,
+        "matched_count": len(candidates),
+        "recommended": candidates[0] if candidates else None,
+        "candidates": candidates,
+        "unsatisfied": unsatisfied,
+    }
