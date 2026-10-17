@@ -85,12 +85,33 @@ class CapabilityTests(unittest.TestCase):
 
     def test_tools_list_advertises_portable_names_with_their_own_schemas(self):
         tools = list_tools()
-        self.assertEqual([tool["name"] for tool in tools], ["mindie_session", "mindie_run", "mindie_execution", "mindie_finish", "mindie_message"])
+        self.assertEqual(
+            [tool["name"] for tool in tools],
+            [
+                "mindie_session",
+                "mindie_run",
+                "mindie_execution",
+                "mindie_finish",
+                "mindie_message",
+                "mindie_hosts",
+                "mindie_probe",
+                "mindie_container",
+                "mindie_lease",
+            ],
+        )
         from jsonschema import Draft202012Validator, ValidationError
 
-        examples = {"mindie_session": {"sources": {}}, "mindie_run": {"command": "echo ready"},
-                    "mindie_execution": {"execution_id": "a" * 64}, "mindie_finish": {},
-                    "mindie_message": {"recipient": {"host": "host-ref", "user": "bob", "session_id": "task-bob"}, "text": "hello"}}
+        examples = {
+            "mindie_session": {"sources": {}},
+            "mindie_run": {"command": "echo ready"},
+            "mindie_execution": {"execution_id": "a" * 64},
+            "mindie_finish": {},
+            "mindie_message": {"recipient": {"host": "host-ref", "user": "bob", "session_id": "task-bob"}, "text": "hello"},
+            "mindie_hosts": {"action": "list"},
+            "mindie_probe": {"action": "capacity", "npu_count": 2},
+            "mindie_container": {"action": "bind", "alias": "atlas-a3", "container_name": "mindie-alice"},
+            "mindie_lease": {"action": "acquire", "alias": "atlas-a3", "npu_count": 2},
+        }
         for tool in tools:
             with self.subTest(tool=tool["name"]):
                 self.assertTrue(tool["description"])
@@ -351,7 +372,20 @@ class LiveStdioTests(unittest.TestCase):
         self.assertEqual(init["result"]["serverInfo"]["version"], package_version())
         client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         names = [tool["name"] for tool in client.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(names, ["mindie_session", "mindie_run", "mindie_execution", "mindie_finish", "mindie_message"])
+        self.assertEqual(
+            names,
+            [
+                "mindie_session",
+                "mindie_run",
+                "mindie_execution",
+                "mindie_finish",
+                "mindie_message",
+                "mindie_hosts",
+                "mindie_probe",
+                "mindie_container",
+                "mindie_lease",
+            ],
+        )
         first = client.rpc("tools/call", {"name": "mindie_session", "arguments": {"context_file": self.registry.context_file}})
         second = client.rpc("tools/call", {"name": "mindie_session", "arguments": {"context_file": self.registry.context_file}})
         for reply in (first, second):

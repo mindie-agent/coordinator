@@ -180,6 +180,17 @@ run = client.run(
 
 ## MCP Tools & CLI Overview
 
+### 1. Remote SSH Environment, Container & NPU Capacity Management (No Pre-Attached Session Required)
+
+| MCP Tool | CLI Entry | What It Does |
+| --- | --- | --- |
+| `mindie_hosts` | `mindie hosts` / `mindie-coordinator hosts` | Manage the shared SSH host inventory (`machines.json`), non-interactive SSH key bootstrap (`bootstrap_key`), multi-node container SSH mesh (`mesh`), and automatic `remote-dev` `endpoints.json` synchronization |
+| `mindie_probe` | `mindie probe` / `mindie-coordinator probe` | Agentless single-pass SSH probe for Ascend NPU HBM/AICore/processes (910B/A2, dual-die 910C/A3, 950/A5), contiguous free NPU capacity recommendation (`capacity`), server load, and shared weight mounts (`mounts`) |
+| `mindie_container` | `mindie container` / `mindie-coordinator container` | Bind existing Docker containers (`docker exec` or direct `ssh_port`), provision per-user Ascend containers (`mindie-<user>`), inspect or remove containers, and update `remote-dev` endpoint aliases |
+| `mindie_lease` | `mindie lease` / `mindie-coordinator lease` | Acquire, heartbeat, inspect, or release lightweight host NPU & service-port leases via `HostQueue`, returning `ASCEND_RT_VISIBLE_DEVICES` and `env` ready for `remote-dev` |
+
+### 2. Managed Git-Snapshot Task Execution Lifecycle
+
 | MCP Tool | CLI / Python Entry | What It Does |
 | --- | --- | --- |
 | `mindie_session` | `TaskClient.session()` | View or update default local source repositories for the current task (automatically detects Git worktrees and submodules) |
@@ -204,9 +215,12 @@ run = client.run(
 
 | Path | Role |
 | --- | --- |
-| `mindie_coordinator/cli.py` | Main `mindie-coordinator` CLI entry (daemon management, runtime registration) |
-| `mindie_coordinator/mindie.py` | Lightweight task-facing `mindie` CLI |
-| `mindie_coordinator/task_server.py` | Stdio MCP server exposing the 5 task and coordination tools |
+| `mindie_coordinator/cli.py` | Main `mindie-coordinator` CLI entry (`hosts`/`probe`/`container`/`lease` management, daemon, provisioning) |
+| `mindie_coordinator/mindie.py` | Lightweight environment & task-facing `mindie` CLI |
+| `mindie_coordinator/task_server.py` | Stdio MCP server exposing all 9 environment and task coordination tools |
+| `mindie_coordinator/env_manager.py` | Core implementation of `mindie.hosts`, `mindie.probe`, `mindie.container`, and `mindie.lease` |
+| `mindie_coordinator/endpoint_bridge.py` | Automatic bridge from `MachineDirectory` (`machines.json`) to `remote-dev`'s `endpoints.json` and dynamic Resolver |
+| `mindie_coordinator/fleet_probe.py` | Agentless single-pass SSH probe for Ascend NPUs, Docker containers, server load, and weight mounts |
 | `mindie_coordinator/task_client.py` | Python `TaskClient` SDK |
 | `mindie_coordinator/host_queue.py` | Public Python API for the host NPU allocation queue |
 | `mindie_coordinator/host/` | Zero-dependency host NPU & port arbitration module shipped over SSH |

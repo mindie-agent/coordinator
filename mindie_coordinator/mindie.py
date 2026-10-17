@@ -49,7 +49,7 @@ def main():
     attach.add_argument("--parent-context", default="")
     attach.add_argument("--association", default="")
     attach.add_argument("--agent-id", default="")
-    for name in ("session", "run", "execution", "finish"):
+    for name in ("session", "run", "execution", "finish", "hosts", "probe", "container", "lease"):
         child = sub.add_parser(name)
         child.add_argument("--context-file")
         child.add_argument("--full", action="store_true", default=None)
@@ -80,6 +80,12 @@ def main():
             child.add_argument("--role", default=None)
             child.add_argument("--refresh", action="store_true", default=None,
                                help="Refresh remote status; otherwise reuse a snapshot for up to two seconds")
+        if name in {"hosts", "probe", "container", "lease"}:
+            child.add_argument("--action")
+            child.add_argument("--alias")
+            child.add_argument("--host")
+            child.add_argument("--port", type=int)
+            child.add_argument("--user")
     args = vars(parser.parse_args())
     operation = args.pop("operation")
     if operation == "attach":

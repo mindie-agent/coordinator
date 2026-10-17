@@ -25,7 +25,13 @@ TOOL_DESCRIPTIONS = {
     "mindie.execution": "Observe one owned execution_id or task-scoped service: action=status, wait, tail, evidence, stop or target. wait uses until=running or released, timeout_seconds=0-600; timeout returns the same reference and does not stop or resubmit. Terminal wait includes logs. evidence reads retained source/preparation/build facts and refs, optionally filtered by section and artifact path substring; it does not revalidate remote files. Stop retains the container and source roots.",
     "mindie.finish": "Finish this MindIE task by closing admission and stopping owned executions; the coordinator completes cleanup and returns leases. Preserve the container, worktrees and evidence.",
     "mindie.message": "Send coordination text to a reference returned by run/status (coordination_peers[].reference), or reply using notifications[].reply_reference. Sender, host and thread are filled internally. Messages never execute commands or transfer resource ownership; normal run/status calls receive replies automatically.",
+    "mindie.hosts": "Manage SSH hosts, key bootstrap, multi-node SSH mesh, and remote-dev endpoint aliases in coordinator's shared MachineDirectory (machines.json -> endpoints.json). Actions: list, upsert, remove, set_default, bootstrap_key, mesh.",
+    "mindie.probe": "Probe Ascend NPU occupancy/HBM/AICore/processes, find fleet NPU capacity, or inspect host CPU/RAM/Docker containers and shared weight mounts over agentless SSH. Actions: hosts, capacity, npu, server, mounts.",
+    "mindie.container": "Bind an existing Docker container or SSH port to a host alias, provision a per-user Ascend container (mindie-<user>), inspect running containers, or remove/unbind a container while syncing remote-dev endpoints.json. Actions: bind, provision, inspect, remove.",
+    "mindie.lease": "Acquire, heartbeat, inspect, or release a lightweight bare-metal NPU and service-port lease on a host via HostQueue, returning ASCEND_RT_VISIBLE_DEVICES and env ready for remote-dev execution. Actions: status, acquire, heartbeat, release.",
 }
+
+ENV_TOOLS = frozenset({"mindie.hosts", "mindie.probe", "mindie.container", "mindie.lease"})
 
 
 def task_schema(properties: dict, required: tuple[str, ...] = ()) -> dict:
@@ -82,6 +88,75 @@ TOOL_SCHEMAS = {
     "mindie.finish": task_schema({"force": {"type": "boolean"}}),
     "mindie.message": task_schema({"recipient": {"type": "object", "description": "Use an existing coordination reference or reply_reference unchanged."},
                                    "text": {"type": "string", "minLength": 1, "maxLength": 4000}}, ("recipient", "text")),
+    "mindie.hosts": task_schema({
+        "action": {"type": "string", "enum": ["list", "upsert", "add", "remove", "set_default", "bootstrap_key", "mesh"], "default": "list"},
+        "alias": {"type": "string", "minLength": 1, "description": "Short machine alias exposed to remote-dev (defaults to host IP)."},
+        "host": {"type": "string", "minLength": 1, "description": "Host IP address, DNS hostname, or registered alias."},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535, "default": 22},
+        "user": {"type": "string", "minLength": 1, "default": "root"},
+        "identity_file": {"type": "string", "description": "Optional SSH private key path for this host."},
+        "workdir": {"type": "string", "description": "Default bare-metal working directory on the host."},
+        "machine_type": {"type": "string", "enum": ["A2", "A3", "A5", "310P"]},
+        "container_name": {"type": "string", "description": "Optional bound container name on this host."},
+        "container_ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "container_user": {"type": "string", "default": "root"},
+        "container_workdir": {"type": "string", "default": "/vllm-workspace"},
+        "container_mode": {"type": "string", "enum": ["ssh", "docker_exec"]},
+        "set_default": {"type": "boolean", "default": False, "description": "Mark this machine as the default remote-dev endpoint."},
+        "bootstrap_key": {"type": "boolean", "default": False, "description": "Install local SSH public key using password_env before saving."},
+        "password_env": {"type": "string", "description": "Environment variable holding the SSH password for non-interactive key bootstrap."},
+        "public_key_file": {"type": "string", "description": "Optional local SSH .pub key path for key bootstrap."},
+        "probe_hardware": {"type": "boolean", "default": False, "description": "Run a live hardware/NPU probe and store hardware summary in machines.json."},
+        "peer_alias": {"type": "string", "description": "Second machine alias for action=mesh."},
+        "peer_host": {"type": "string", "description": "Second machine host for action=mesh."},
+        "peer_port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Second machine container SSH port for action=mesh."},
+    }),
+    "mindie.probe": task_schema({
+        "action": {"type": "string", "enum": ["hosts", "capacity", "npu", "server", "mounts"], "default": "hosts"},
+        "alias": {"type": "string", "description": "Optional machine alias to probe (omit to probe all registered hosts)."},
+        "host": {"type": "string", "description": "Optional machine alias or host IP to probe."},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "user": {"type": "string"},
+        "identity_file": {"type": "string"},
+        "mode": {"type": "string", "enum": ["auto", "cache", "live"], "default": "auto", "description": "auto reuses local probe cache up to 30s; live forces SSH probe; cache reads local snapshot only."},
+        "npu_count": {"type": "integer", "minimum": 1, "default": 1, "description": "Required free NPU count when action=capacity."},
+        "chip_query": {"type": "string", "description": "Optional chip substring filter (e.g. '910B', '910C', '950') when action=capacity."},
+    }),
+    "mindie.container": task_schema({
+        "action": {"type": "string", "enum": ["bind", "provision", "inspect", "remove"], "default": "inspect"},
+        "alias": {"type": "string", "description": "Target machine alias."},
+        "host": {"type": "string", "description": "Target machine alias or host IP."},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Host SSH port (default 22)."},
+        "user": {"type": "string", "description": "Host SSH user (default root)."},
+        "container_name": {"type": "string", "description": "Docker container name to bind or remove."},
+        "container_id": {"type": "string", "description": "Optional Docker container ID."},
+        "ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Direct container SSH port (when using container sshd)."},
+        "container_user": {"type": "string", "default": "root"},
+        "workdir": {"type": "string", "default": "/vllm-workspace"},
+        "python": {"type": "string", "description": "Optional Python interpreter path inside the container."},
+        "mode": {"type": "string", "enum": ["ssh", "docker_exec", "auto", "cache", "live"]},
+        "image": {"type": "string", "description": "Image selector for action=provision ('local-latest', 'rc', 'main', 'stable', or full image ref)."},
+        "machine_type": {"type": "string", "enum": ["A2", "A3", "A5", "310P"]},
+        "user_namespace": {"type": "string", "description": "User namespace for mindie-<user> container provisioning."},
+        "password_env": {"type": "string", "description": "Environment variable holding SSH password for initial host bootstrap."},
+        "set_default": {"type": "boolean", "default": False},
+        "unbind_only": {"type": "boolean", "default": False, "description": "When action=remove, only unbind container from machines.json without stopping the Docker container."},
+    }),
+    "mindie.lease": task_schema({
+        "action": {"type": "string", "enum": ["status", "acquire", "heartbeat", "release"], "default": "status"},
+        "alias": {"type": "string", "description": "Target machine alias."},
+        "host": {"type": "string", "description": "Target machine alias or host IP."},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "user": {"type": "string"},
+        "lease_id": {"type": "string", "description": "Lease/task identifier (auto-generated on acquire if omitted; required on heartbeat/release)."},
+        "owner": {"type": "string", "description": "Lease owner username."},
+        "npu_count": {"type": "integer", "minimum": 0, "description": "Number of NPUs to reserve on the host."},
+        "devices": {"type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True, "description": "Explicit physical NPU device IDs to reserve."},
+        "allow_external_busy": {"type": "boolean", "default": False},
+        "service_port": {"type": "integer", "minimum": 0, "maximum": 65535, "description": "0 reserves a free host port in 18000..18999; positive int reserves that specific port."},
+        "purpose": {"type": "string", "description": "Human/agent-readable description of what this lease is running."},
+        "ttl_seconds": {"type": "integer", "minimum": 30, "maximum": 86400, "default": 900},
+    }),
 }
 TOOL_SCHEMAS["mindie.run"]["oneOf"] = [
     {"required": ["command"], "not": {"required": ["script_file"]}},
@@ -96,8 +171,9 @@ TOOL_SCHEMAS["mindie.execution"]["oneOf"] = [
 @observed_tool(lambda name, args, **kwargs: name, component="mindie-coordinator")
 def mindie_call(name, args, *, allow_native_context=True):
     started = time.monotonic()
-    target = {"kind": "mindie-task"}
+    target = {"kind": "mindie-env" if name in ENV_TOOLS else "mindie-task"}
     client = None
+    state_dir = None
     try:
         if name not in TOOL_SCHEMAS:
             raise caller_error("unknown MindIE operation")
@@ -105,41 +181,65 @@ def mindie_call(name, args, *, allow_native_context=True):
         if unknown:
             raise caller_error("unsupported fields for " + name + ": " + ", ".join(sorted(unknown)))
         from mindie_coordinator.task_client import TaskClient
-        client = TaskClient(args.get("context_file", ""), allow_native_context=allow_native_context)
-        target["session_id"] = client.context["session"]["id"]
-        if name == "mindie.session":
-            if "sources" in args:
-                client.sources(args["sources"])
-            value = client.status()
-            status = value["session"]["state"]
-        elif name == "mindie.run":
-            keys = ("command", "sources", "env", "environment", "resources", "topology",
-                    "timeout_seconds", "service", "restart", "preflight", "script_file", "wait_until", "wait_timeout_seconds")
-            value = client.run(**{key: args[key] for key in keys if key in args})
-            status = value["state"]
-        elif name == "mindie.execution":
-            value = client.observe(args.get("execution_id"), args.get("action", "status"),
-                                   args.get("force", False), role=args.get("role"), refresh=bool(args.get("refresh")),
-                                   **{key: args[key] for key in ("until", "timeout_seconds", "section", "path") if key in args},
-                                   **({"service": args["service"]} if "service" in args else {}))
-            status = value["state"]
-        elif name == "mindie.finish":
-            value = client.finish(args.get("force", False))
-            status = value["state"]
-        elif name == "mindie.message":
-            value = client.message(args.get("recipient"), args.get("text"))
-            status = value["state"]
+        if name in ENV_TOOLS:
+            if args.get("context_file"):
+                client = TaskClient(args["context_file"], allow_native_context=allow_native_context)
+                target["session_id"] = client.context["session"]["id"]
+                state_dir = coordinator_state_dir(client.store.state_dir)
+            else:
+                state_dir = coordinator_state_dir()
+            from mindie_coordinator.env_manager import (
+                handle_container,
+                handle_hosts,
+                handle_lease,
+                handle_probe,
+            )
+            if name == "mindie.hosts":
+                value = handle_hosts(args, state_dir=state_dir)
+            elif name == "mindie.probe":
+                value = handle_probe(args, state_dir=state_dir)
+            elif name == "mindie.container":
+                value = handle_container(args, state_dir=state_dir)
+            elif name == "mindie.lease":
+                value = handle_lease(args, state_dir=state_dir)
+            status = str(value.get("state") or "ready")
         else:
-            raise ValueError("unknown MindIE operation")
+            client = TaskClient(args.get("context_file", ""), allow_native_context=allow_native_context)
+            target["session_id"] = client.context["session"]["id"]
+            state_dir = coordinator_state_dir(client.store.state_dir)
+            if name == "mindie.session":
+                if "sources" in args:
+                    client.sources(args["sources"])
+                value = client.status()
+                status = value["session"]["state"]
+            elif name == "mindie.run":
+                keys = ("command", "sources", "env", "environment", "resources", "topology",
+                        "timeout_seconds", "service", "restart", "preflight", "script_file", "wait_until", "wait_timeout_seconds")
+                value = client.run(**{key: args[key] for key in keys if key in args})
+                status = value["state"]
+            elif name == "mindie.execution":
+                value = client.observe(args.get("execution_id"), args.get("action", "status"),
+                                       args.get("force", False), role=args.get("role"), refresh=bool(args.get("refresh")),
+                                       **{key: args[key] for key in ("until", "timeout_seconds", "section", "path") if key in args},
+                                       **({"service": args["service"]} if "service" in args else {}))
+                status = value["state"]
+            elif name == "mindie.finish":
+                value = client.finish(args.get("force", False))
+                status = value["state"]
+            elif name == "mindie.message":
+                value = client.message(args.get("recipient"), args.get("text"))
+                status = value["state"]
+            else:
+                raise ValueError("unknown MindIE operation")
         if status in {"failed", "inconclusive"}:
             outcome = "failed"
         elif status == "timeout":
             outcome = "timeout"
         elif status == "cancelled":
             outcome = "cancelled"
-        elif status in {"uncertain", "waiting_for_runtime", "needs_runtime_update"}:
+        elif status in {"uncertain", "waiting_for_runtime", "needs_runtime_update", "insufficient_capacity"}:
             outcome = "blocked"
-        elif status in {"queued", "preparing", "waiting"} and not value.get("execution_id"):
+        elif status in {"queued", "preparing", "waiting"} and name not in ENV_TOOLS and not value.get("execution_id"):
             outcome = "blocked"
         else:
             # Admission and successful observation are completed tool calls.
@@ -161,6 +261,7 @@ def mindie_call(name, args, *, allow_native_context=True):
         service = client._service
         if service is not None and getattr(service, "runtime", None):
             result["runtime"]["daemon"] = service.runtime
-        result = present(result, coordinator_state_dir(client.store.state_dir),
+    if state_dir is not None:
+        result = present(result, state_dir,
                          full=bool(args.get("full")), target=args.get("action") == "target")
     return {"text": result["summary"], "result": result}
