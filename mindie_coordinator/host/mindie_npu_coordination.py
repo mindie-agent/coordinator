@@ -395,12 +395,14 @@ def probe_named_container(name: str) -> dict[str, Any]:
 
 def _parse_npu_smi_device_table(
     output: str,
-) -> tuple[set[int], dict[int, dict[str, int]], dict[tuple[int, int], int]]:
-    """Visible Phy-IDs, HBM used/total, and (NPU, Chip) -> Phy-ID mapping."""
+) -> tuple[set[int], dict[int, dict[str, int]], dict[tuple[int, int], int], str | None]:
+    """Visible devices, HBM, explicit chip mapping and any ambiguous layout."""
     dev_ids: set[int] = set()
     header_ids: set[int] = set()
     hbm: dict[int, dict[str, int]] = {}
     chip_devices: dict[tuple[int, int], int] = {}
+    implicit_chips: dict[int, list[int]] = {}
+    layout_error = None
     current_npu: int | None = None
     for line in output.splitlines():
         if "0000:" in line:
@@ -410,7 +412,12 @@ def _parse_npu_smi_device_table(
                 if current_npu is not None:
                     chip_devices[(current_npu, int(chip.group(1)))] = dev_id
             elif current_npu is not None:
+                chip = re.match(r"\|\s*(\d+)\s*\|.*0000:", line)
+                if not chip:
+                    layout_error = "npu-smi device row has no recognized chip identity"
+                    continue
                 dev_id = current_npu
+                implicit_chips.setdefault(current_npu, []).append(int(chip.group(1)))
             else:
                 continue
             dev_ids.add(dev_id)
@@ -427,7 +434,15 @@ def _parse_npu_smi_device_table(
             header_ids.add(current_npu)
     if not dev_ids:
         dev_ids.update(header_ids)
-    return dev_ids, hbm, chip_devices
+    explicit_mapping_present = bool(chip_devices)
+    for npu, chips in implicit_chips.items():
+        # A2 omits Phy-ID: one explicit chip row belongs to its NPU header.
+        # Multiple chips or mixed layouts cannot establish that identity.
+        if len(chips) != 1 or explicit_mapping_present:
+            layout_error = "npu-smi device table has an ambiguous single-chip mapping"
+        else:
+            chip_devices[(npu, chips[0])] = npu
+    return dev_ids, hbm, chip_devices, layout_error
 
 
 def parse_npu_smi_hbm(output: str) -> dict[int, dict[str, int]]:
@@ -435,13 +450,16 @@ def parse_npu_smi_hbm(output: str) -> dict[int, dict[str, int]]:
 
     Does not require a process table; occupancy failure still returns HBM.
     """
-    _dev_ids, hbm, _chip_devices = _parse_npu_smi_device_table(output)
+    _dev_ids, hbm, _chip_devices, _layout_error = _parse_npu_smi_device_table(output)
     return dict(sorted(hbm.items()))
 
 
 def parse_npu_smi_info(output: str) -> dict[str, Any]:
     """Parse visible devices plus process/HBM occupancy from common layouts."""
-    dev_ids, hbm, chip_devices = _parse_npu_smi_device_table(output)
+    dev_ids, hbm, chip_devices, layout_error = _parse_npu_smi_device_table(output)
+    if layout_error:
+        return {"status": "failed", "error": layout_error,
+                "devices": sorted(dev_ids), "busy": {}, "free": []}
     lines = output.splitlines()
 
     process_busy: dict[int, list[dict[str, Any]]] = {}
@@ -455,17 +473,16 @@ def parse_npu_smi_info(output: str) -> dict[str, Any]:
             continue
         if in_process_table and line.startswith("|"):
             columns = [column.strip() for column in line.split("|")[1:-1]]
-            # A3: | NPU Chip | PID | Process name | Memory |. Phy-ID from
-            # the device table is the allocation identity, not the NPU index.
+            # A2/A3: | NPU Chip | PID | Process name | Memory |. Resolve
+            # allocation identity through the actual device-table layout.
             if len(columns) >= 3 and re.fullmatch(r"\d+(?:\s+\d+)?", columns[0]):
                 identity = [int(value) for value in columns[0].split()]
                 if len(identity) == 2:
                     device = chip_devices.get(tuple(identity))
                 elif chip_devices:
-                    # A parsed (NPU, Chip) -> Phy-ID table means a multi-chip
-                    # layout. A lone column is then an NPU index, not a phy-id;
-                    # guessing would attach the process to the wrong device and
-                    # report the real one as free. Fail closed instead.
+                    # A chip table requires both identity columns. In a
+                    # multi-chip layout the lone NPU index is not a Phy-ID;
+                    # guessing could report the occupied physical device free.
                     device = None
                 else:
                     device = identity[0]
