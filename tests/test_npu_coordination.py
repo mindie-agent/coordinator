@@ -21,6 +21,7 @@ from mindie_coordinator.host.mindie_npu_coordination import (
     JOB_TOKEN_ENV,
     NpuCoordinator,
     _confirmed_free_probe,
+    parse_npu_smi_hbm,
     parse_npu_smi_info,
     parse_port_range,
     process_guard_busy,
@@ -520,6 +521,78 @@ class CoordinationTests(unittest.TestCase):
                 unknown = parse_npu_smi_info(bad)
                 self.assertEqual(unknown['status'], 'failed')
                 self.assertEqual(unknown['free'], [])
+
+    def test_a2_single_chip_process_maps_to_npu_without_phy_id_column(self):
+        output = """
+| 4     910B4      | OK | 41.8 | 0 | 0 / 0 |
+| 0               | 0000:01:00.0 | 0 | 0 / 0 | 2860 / 32768 |
+| 5     910B4      | OK | 41.8 | 0 | 0 / 0 |
+| 0               | 0000:02:00.0 | 0 | 0 / 0 | 2860 / 32768 |
+| NPU Chip | Process id | Process name | Process memory(MB) |
+| 4 0 | 2435325 | python3 | 112 |
+"""
+        parsed = parse_npu_smi_info(output)
+        self.assertEqual(parsed["status"], "ok")
+        self.assertEqual(parsed["devices"], [4, 5])
+        self.assertEqual(parsed["free"], [5])
+        self.assertEqual(parsed["busy"]["4"], [
+            {"kind": "process", "pid": 2435325, "name": "python3"}
+        ])
+        self.assertEqual(parse_npu_smi_hbm(output), {
+            4: {"used_mb": 2860, "total_mb": 32768},
+            5: {"used_mb": 2860, "total_mb": 32768},
+        })
+        self.submit("task-a2-worker", devices=[4])
+        self.assertEqual(self.coordinator.acquire("task-a2-worker", parsed)["status"], "waiting")
+
+    def test_a2_unknown_chip_is_not_guessed_from_the_npu_index(self):
+        devices = """
+| 4     910B4      | OK | 41.8 | 0 | 0 / 0 |
+| 0               | 0000:01:00.0 | 0 | 0 / 0 | 2860 / 32768 |
+| NPU Chip | Process id | Process name | Process memory(MB) |
+"""
+        for identity in ["4 1", "4 9", "5 0"]:
+            with self.subTest(identity=identity):
+                parsed = parse_npu_smi_info(
+                    devices + f"| {identity} | 2435325 | python3 | 112 |\n"
+                )
+                self.assertEqual(parsed["status"], "failed")
+                self.assertEqual(parsed["free"], [])
+
+    def test_implicit_multichip_or_mixed_physical_layout_is_not_single_chip(self):
+        devices = """
+| 4     Ascend910  | OK | 41.8 | 0 | 0 / 0 |
+| 0               | 0000:01:00.0 | 0 | 0 / 0 | 2860 / 32768 |
+"""
+        for extra in [
+            "| 1 | 0000:02:00.0 | 0 | 0 / 0 | 2860 / 32768 |\n",
+            "| 1 9 | 0000:02:00.0 | 0 | 0 / 0 | 2860 / 32768 |\n",
+        ]:
+            for process in [
+                "| 4 0 | 2435325 | python3 | 112 |\n",
+                "| No running processes found |\n",
+            ]:
+                with self.subTest(extra=extra, process=process):
+                    parsed = parse_npu_smi_info(
+                        devices + extra
+                        + "| NPU Chip | Process id | Process name | Process memory(MB) |\n"
+                        + process
+                    )
+                    self.assertEqual(parsed["status"], "failed")
+                    self.assertEqual(parsed["free"], [])
+
+    def test_cross_npu_explicit_and_implicit_identity_collision_is_not_free(self):
+        output = """
+| 0     Ascend910  | OK | 41.8 | 0 | 0 / 0 |
+| 0     4         | 0000:01:00.0 | 0 | 0 / 0 | 2860 / 65536 |
+| 4     910B4      | OK | 41.8 | 0 | 0 / 0 |
+| 0               | 0000:02:00.0 | 0 | 0 / 0 | 2860 / 32768 |
+| NPU Chip | Process id | Process name | Process memory(MB) |
+| No running processes found |
+"""
+        parsed = parse_npu_smi_info(output)
+        self.assertEqual(parsed["status"], "failed")
+        self.assertEqual(parsed["free"], [])
 
     def test_process_identity_columns_follow_the_device_table_layout(self):
         devices = """
