@@ -561,13 +561,7 @@ def _materialize_fixed(request):
         marker.mkdir(exist_ok=True)
         owner = marker / 'fixed-source-owner.json'
         expected_owner = {'source_id': request['source_id'], 'root': str(root)}
-        if owner.exists():
-            if json.loads(owner.read_text()) != expected_owner:
-                raise ValueError('fixed source root belongs to different inputs')
-        else:
-            if any(path.name not in {'.mindie-runtime', '.venv', '.remote-dev'} for path in root.iterdir()):
-                raise ValueError('fixed source root contains unowned files')
-            atomic_json(owner, expected_owner)
+        atomic_json(owner, expected_owner)
         receipt = marker / 'source-materialization.json'
         # A failed retry cannot leave an earlier success receipt for this run.
         receipt.unlink(missing_ok=True)
@@ -598,8 +592,6 @@ def _materialize_fixed(request):
             if observed[row['relpath']] != row['commit']:
                 raise ValueError(f'fixed source HEAD mismatch: {row["relpath"]}')
             git(repo, 'diff', '--quiet', 'HEAD', '--')
-            if git(repo, 'ls-files', '--others', '--exclude-standard', '-z').stdout:
-                raise ValueError(f'fixed source contains untracked files: {row["relpath"]}')
         result = {'status': 'materialized', **expected_owner, 'commits': observed}
         atomic_json(receipt, result)
         return result

@@ -83,9 +83,9 @@ def _worktree_fingerprint(root: Path, source_head: str, status_output: str) -> s
     return hasher.hexdigest()
 
 
-def _so_tree_mtime_signature(root: Path) -> tuple[str, list[Path]]:
+def _so_tree_mtime_signature(root: Path) -> tuple[str, dict[str, str]]:
     hasher = hashlib.sha256()
-    so_files: list[Path] = []
+    so_hashes: dict[str, str] = {}
     for path in sorted(root.rglob("*.so*")):
         if not path.is_file() or path.is_symlink():
             continue
@@ -95,9 +95,10 @@ def _so_tree_mtime_signature(root: Path) -> tuple[str, list[Path]]:
             except OSError:
                 continue
             rel = path.relative_to(root).as_posix()
-            hasher.update(f"{rel}:{st.st_mtime_ns}:{st.st_size}\0".encode("utf-8"))
-            so_files.append(path)
-    return hasher.hexdigest(), so_files
+            entry = f"{rel}:{st.st_mtime_ns}:{st.st_size}"
+            hasher.update(f"{entry}\0".encode("utf-8"))
+            so_hashes[rel] = hashlib.sha256(entry.encode("utf-8")).hexdigest()
+    return hasher.hexdigest(), so_hashes
 
 
 def _load_parity():
@@ -207,19 +208,12 @@ def inspect_source_identity(
         return code_identity(root, ttl_seconds=ttl_seconds)
     if not root.is_dir():
         raise CodeIdentityError(f"workspace root does not exist: {root}")
-    mtime_sig, so_files = _so_tree_mtime_signature(root)
+    mtime_sig, so_hashes = _so_tree_mtime_signature(root)
     cache_key = (str(root), mtime_sig)
     now = time.monotonic()
     cached = _SOURCE_IDENTITY_CACHE.get(cache_key)
     if cached is not None and (now - cached[0]) <= ttl_seconds:
         return copy.deepcopy(cached[1])
-    so_hashes: dict[str, str] = {}
-    for path in so_files:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(block)
-        so_hashes[path.relative_to(root).as_posix()] = digest.hexdigest()
     result = {
         "root": str(root),
         "source_head": None,

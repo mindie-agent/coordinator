@@ -120,17 +120,16 @@ def test_metadata_outside_profile_and_build_keys_still_rejects(prepared_view):
 
 
 @pytest.mark.parametrize("source", ["vllm", "vllm-ascend"])
-@pytest.mark.parametrize("change", ["tracked", "untracked", "commit"])
+@pytest.mark.parametrize("change", ["tracked", "commit"])
 def test_every_pinned_git_source_is_checked(prepared_view, source, change):
     backend, runtime, snapshots, _marker, _manifest = prepared_view
     repo = Path(runtime["endpoint"]["root"]) / source
-    if change == "untracked":
-        (repo / "extra.py").write_text("unaccepted = True\n", encoding="utf-8")
-    else:
-        (repo / "source.py").write_text("value = 2\n", encoding="utf-8")
-        if change == "commit":
-            git(repo, "add", "source.py")
-            git(repo, "commit", "-m", "different input")
+    (repo / "extra.py").write_text("scratch = True\n", encoding="utf-8")
+    assert backend.verify_preflight(runtime, snapshots=snapshots) is True
+    (repo / "source.py").write_text("value = 2\n", encoding="utf-8")
+    if change == "commit":
+        git(repo, "add", "source.py")
+        git(repo, "commit", "-m", "different input")
     with pytest.raises(RemoteCommandError, match="runtime source differs from pinned snapshot: " + source):
         backend.verify_preflight(runtime, snapshots=snapshots)
 

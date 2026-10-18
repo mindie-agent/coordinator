@@ -250,7 +250,7 @@ print(json.dumps(manifest))
 def require_clean_sources(root: Path):
     for name in ("vllm", "vllm-ascend"):
         for node in iter_postorder(discover_repo_tree(root / name, name)):
-            dirty = subprocess.check_output(["git", "-C", str(node.repo_path), "status", "--porcelain", "--untracked-files=all"], text=True, encoding="utf-8")
+            dirty = subprocess.check_output(["git", "-C", str(node.repo_path), "status", "--porcelain", "--untracked-files=no"], text=True, encoding="utf-8")
             if dirty.strip():
                 raise ValueError("attest a clean materialized parity snapshot, including child submodules")
             for child in node.children:

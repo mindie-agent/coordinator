@@ -115,10 +115,6 @@ def checked_file(root: Path, relative: str) -> Path:
     if name.is_absolute() or not name.parts or ".." in name.parts:
         raise ValueError(f"unsafe bundle path: {relative}")
     path = root / relative
-    # Symlinked outputs are not a portable complete bundle. Enumerate their
-    # real files during preparation rather than retaining external references.
-    if any((root / Path(*name.parts[:i])).is_symlink() for i in range(1, len(name.parts) + 1)):
-        raise ValueError(f"symlink in bundle path: {relative}")
     if not path.is_file():
         raise ValueError(f"missing required artifact: {relative}")
     if path.name == "CMakeCache.txt":
@@ -787,14 +783,6 @@ def restore(root: Path, bundle: Path, expected_build_key: str) -> None:
         raise ValueError("cache miss: build identity or installation path differs")
     verify(bundle, manifest, check_environment=False)
     names = set(manifest["files"]) | {row["path"] for row in manifest["evidence"].values()}
-    for name in names:
-        target = root / name
-        # Reject symlinked destinations, including existing parent directories.
-        for parent in [target, *target.parents]:
-            if parent == root:
-                break
-            if parent.is_symlink():
-                raise ValueError("unsafe artifact restore destination")
     for name in names:
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)

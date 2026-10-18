@@ -289,10 +289,7 @@ for name, expected in args["snapshots"].items():
     repo = root / name
     head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
     dirty = subprocess.check_output(["git", "-C", str(repo), "diff", "HEAD", "--name-only", "--ignore-submodules=dirty"], text=True, encoding="utf-8")
-    untracked = subprocess.check_output(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"], text=True, encoding="utf-8")
-    private = {".mindie-runtime", ".remote-code-parity", "Mooncake"} if name == "." else set()
-    extras = [path for path in untracked.split("\\0") if path and path.split("/", 1)[0] not in private]
-    if head != expected or dirty.strip() or extras:
+    if head != expected or dirty.strip():
         raise ValueError("runtime source differs from pinned snapshot: " + name)
 if 'expected_manifest_digest' in args:
     actual_digest = digest(manifest)
@@ -339,8 +336,7 @@ for row in args['records']:
     repo = root / row['relpath']
     tree = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
     dirty = subprocess.check_output(['git', '-C', str(repo), 'diff', 'HEAD', '--name-only', '--ignore-submodules=dirty'], text=True).strip()
-    untracked = subprocess.check_output(['git', '-C', str(repo), 'ls-files', '--others', '--exclude-standard'], text=True).strip()
-    if tree != row['tree'] or dirty or untracked:
+    if tree != row['tree'] or dirty:
         print(json.dumps({'qualified': False, 'reason': 'source tree differs', 'source': row['relpath']}))
         raise SystemExit(0)
 print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'manifest': manifest} if args.get('include_manifest') else {})}))

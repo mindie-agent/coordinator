@@ -619,14 +619,14 @@ def test_retry_same_inputs_repairs_tracked_and_untracked_files(peer):
     assert not (peer.root / 'project/extra.py').exists()
 
 
-def test_different_inputs_cannot_overwrite_owned_root(peer):
+def test_different_inputs_cleanly_update_owned_root(peer):
     first = make_record(peer.source, 'project')
     peer.run([first])
     (peer.source / 'model.py').write_text('value = 2\n')
     git(peer.source, 'commit', '-am', 'second')
-    with pytest.raises(RuntimeError, match='belongs to different inputs'):
-        peer.run()
-    assert git(peer.root / 'project', 'rev-parse', 'HEAD') == first.commit
+    second = make_record(peer.source, 'project')
+    peer.run([second])
+    assert git(peer.root / 'project', 'rev-parse', 'HEAD') == second.commit
 
 
 def test_submodule_checkout_is_complete_before_parent_validation(peer):

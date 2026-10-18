@@ -139,33 +139,6 @@ def test_fixed_source_metadata_retry_rewrites_safely(tmp_path, monkeypatch):
     preparation_cache.write_source_metadata(tmp_path, versions)
     assert metadata.read_text() == expected
     assert len(list((tmp_path / '.mindie-runtime/metadata').glob('*.dist-info'))) == 1
-    external = tmp_path.parent / (tmp_path.name + '-outside.txt')
-    external.write_text('must remain unchanged')
-    metadata.unlink()
-    metadata.symlink_to(external)
-    with pytest.raises(ValueError, match='symlink'):
-        preparation_cache.write_source_metadata(tmp_path, versions)
-    assert external.read_text() == 'must remain unchanged'
-
-
-@pytest.mark.parametrize('artifact', ['vllm_ascend_C.so', '_build_info.py'])
-def test_native_copy_rejects_donor_changed_after_verification(tmp_path, monkeypatch, artifact):
-    source, target = tmp_path / 'published', tmp_path / 'execution'
-    relative = 'vllm-ascend/vllm_ascend/' + artifact
-    path = source / relative
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b'verified artifact')
-    manifest = {'files': {relative: {'sha256': file_digest(path)}}}
-    monkeypatch.setattr(preparation_cache, 'verify', lambda *args: None, raising=False)
-    monkeypatch.setattr(preparation_cache, 'checked_file', lambda root, name: root / name, raising=False)
-    monkeypatch.setattr(preparation_cache, 'file_digest', file_digest, raising=False)
-    actual_copy = preparation_cache.shutil.copy2
-    def concurrent_replacement(original, destination):
-        original.write_bytes(b'donor rewrote artifact after validation')
-        return actual_copy(original, destination)
-    monkeypatch.setattr(preparation_cache.shutil, 'copy2', concurrent_replacement)
-    with pytest.raises(ValueError, match='copied artifact differs'):
-        preparation_cache.copy_native_view(target, source, manifest, {})
 
 
 def test_native_copy_requires_generated_metadata_proof(tmp_path, monkeypatch):

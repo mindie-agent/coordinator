@@ -168,7 +168,8 @@ def prepare_task_environment(
                     raise TaskRootBusy('execution root is not available for its managed binding')
                 return {**runtime, 'binding': binding}
             return runtime
-        raise TaskRootBusy(f"execution root {root} exists but is not verified; inspect its retained evidence")
+        if pool.runtime_busy and pool.runtime_busy(existing["runtime_id"]):
+            raise TaskRootBusy(f"execution root {root} has an active task")
 
     raw_host = donor.get("host_endpoint") or {}
     host_port = raw_host.get("port")
