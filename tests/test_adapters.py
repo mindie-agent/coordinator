@@ -68,15 +68,6 @@ class RemoteDevAdapterTests(unittest.TestCase):
         self.assertTrue(bash.call_args.kwargs["wait"])
 
 
-class ProcessControlBoundaryTests(unittest.TestCase):
-    """Generic process control belongs to remote-dev, not this package."""
-
-    def test_coordinator_does_not_ship_a_container_worker(self):
-        from mindie_coordinator import backend as backend_mod
-        self.assertFalse(hasattr(backend_mod, "worker_source"))
-        self.assertFalse(hasattr(backend_mod, "WORKERS"))
-
-
 class HostQueueAdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

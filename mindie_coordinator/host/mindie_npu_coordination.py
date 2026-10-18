@@ -54,8 +54,8 @@ def resolve_host_state_dir(explicit: str | Path | None = None) -> str:
         return str(explicit)
     return os.environ.get(HOST_STATE_DIR_ENV) or DEFAULT_STATE_DIR
 DEFAULT_QUEUE_TTL_SECONDS = 3600
-DEFAULT_GRANT_TTL_SECONDS = 60
-DEFAULT_START_TTL_SECONDS = 60
+DEFAULT_GRANT_TTL_SECONDS = 180
+DEFAULT_START_TTL_SECONDS = 180
 DEFAULT_HEARTBEAT_TTL_SECONDS = 120
 DEFAULT_ESTIMATED_DURATION_SECONDS = 3600
 HBM_BUSY_THRESHOLD_MB = 4096
@@ -86,6 +86,38 @@ class CoordinationError(RuntimeError):
         self.port = port
 
 
+def _container_alive(container_name: str, *, timeout: float = 5) -> dict[str, Any] | None:
+    """Inspect a container with a bounded timeout so a wedged Docker daemon cannot lock the host."""
+    try:
+        raw = subprocess.check_output(
+            ["docker", "inspect", "--format", "{{json .}}", container_name],
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
+        info = json.loads(raw)
+        return info if isinstance(info, dict) else None
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _container_has_process(container_id: str, *, timeout: float = 5) -> list[str]:
+    """List container PIDs via `docker top` with a bounded timeout."""
+    try:
+        out = subprocess.check_output(
+            ["docker", "top", container_id, "-eo", "pid"],
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
+        return out.splitlines()[1:]
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+        return []
+
+
+_container_has_Process = _container_has_process
+
+
 def prepared_supervisor_host_pid(prepared: dict, process_guard: dict | None) -> int:
     """Resolve a container receipt immediately before fenced activation."""
     receipt = prepared["receipt"]
@@ -97,15 +129,27 @@ def prepared_supervisor_host_pid(prepared: dict, process_guard: dict | None) -> 
     container_id = prepared["container_id"]
     if not isinstance(container_name, str) or not container_name or not isinstance(container_id, str) or not container_id:
         raise CoordinationError("prepared activation requires the expected container identity")
-    info = json.loads(subprocess.check_output(
-        ["docker", "inspect", "--format", "{{json .}}", container_name], text=True, encoding="utf-8"))
+    try:
+        info = json.loads(subprocess.check_output(
+            ["docker", "inspect", "--format", "{{json .}}", container_name],
+            text=True, encoding="utf-8", timeout=5))
+    except subprocess.TimeoutExpired as exc:
+        raise CoordinationError(f"docker inspect timed out after {exc.timeout}s for {container_name}") from exc
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        raise CoordinationError(f"docker inspect failed for {container_name}: {exc}") from exc
     if info["Id"] != container_id:
         raise CoordinationError("container identity changed before activation")
     if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != receipt["boot_id"]:
         raise CoordinationError("host boot identity changed")
     # Use the inspected immutable ID if the name is reassigned during lookup.
-    rows = subprocess.check_output(["docker", "top", container_id, "-eo", "pid"],
-                                   text=True, encoding="utf-8").splitlines()[1:]
+    try:
+        rows = subprocess.check_output(
+            ["docker", "top", container_id, "-eo", "pid"],
+            text=True, encoding="utf-8", timeout=5).splitlines()[1:]
+    except subprocess.TimeoutExpired as exc:
+        raise CoordinationError(f"docker top timed out after {exc.timeout}s for {container_id}") from exc
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise CoordinationError(f"docker top failed for {container_id}: {exc}") from exc
     marker = (JOB_TOKEN_ENV + "=" + process_guard["marker"]).encode()
     matches = []
     for row in rows:
@@ -1837,19 +1881,30 @@ class NpuCoordinator:
         with self._transaction() as connection:
             row = self._task_row(connection, task_id)
             self._check_token(row, token)
-            if row["state"] not in {"active", "orphaned_busy"}:
+            if row["state"] not in {"active", "orphaned_busy", "granted", "starting"}:
                 raise CoordinationError(f"task {task_id} is {row['state']}, expected active or orphaned_busy")
-            connection.execute(
-                """
-                UPDATE tasks
-                SET state='active', heartbeat_at=?, heartbeat_deadline=?,
-                    updated_at=?, message=?
-                WHERE task_id=?
-                """,
-                (now, now + heartbeat_ttl_seconds, now, "heartbeat received", task_id),
-            )
+            if row["state"] in {"granted", "starting"}:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET activation_deadline=?, heartbeat_at=?, heartbeat_deadline=?,
+                        updated_at=?, message=?
+                    WHERE task_id=?
+                    """,
+                    (now + heartbeat_ttl_seconds, now, now + heartbeat_ttl_seconds, now, "heartbeat received", task_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET state='active', heartbeat_at=?, heartbeat_deadline=?,
+                        updated_at=?, message=?
+                    WHERE task_id=?
+                    """,
+                    (now, now + heartbeat_ttl_seconds, now, "heartbeat received", task_id),
+                )
             row = self._task_row(connection, task_id)
-        return {"status": "active", "task": self._serialize_task(row)}
+        return {"status": row["state"], "task": self._serialize_task(row)}
 
     def release(self, task_id: str, token: int, observed: dict[str, Any] | None, *,
                 completion_confirmed: bool = False, listening: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1997,9 +2052,14 @@ class NpuCoordinator:
         with self._transaction() as connection:
             epoch = connection.execute("SELECT value FROM meta WHERE key='coordination_epoch'").fetchone()[0]
             task = connection.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-        info = json.loads(subprocess.check_output(
-            ["docker", "inspect", "--format", '{"Id":{{json .Id}},"State":{{json .State}}}', container_name],
-            text=True, encoding="utf-8"))
+        try:
+            info = json.loads(subprocess.check_output(
+                ["docker", "inspect", "--format", '{"Id":{{json .Id}},"State":{{json .State}}}', container_name],
+                text=True, encoding="utf-8", timeout=5))
+        except subprocess.TimeoutExpired as exc:
+            raise CoordinationError(f"docker inspect timed out after {exc.timeout}s for {container_name}") from exc
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            raise CoordinationError(f"docker inspect failed for {container_name}: {exc}") from exc
         return {"status": "ok", "coordination_epoch": epoch,
                 "tasks": [self._serialize_task(task)] if task is not None else [], "container": info}
 

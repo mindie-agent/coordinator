@@ -11,15 +11,21 @@ module; this never locates a consumer skill script by filesystem path.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
 GIT_SHA_RE = r"^[0-9a-f]{40}$"
 IDENTITY_WORKSPACE_ID = "identity"
 IDENTITY_SNAPSHOT_ID = "current"
+DEFAULT_IDENTITY_CACHE_TTL_SECONDS = 30.0
+
+_SOURCE_IDENTITY_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 
 
 class CodeIdentityError(RuntimeError):
@@ -47,11 +53,51 @@ def _git_head(repo: Path) -> str:
     return head
 
 
-def _repo_dirty(repo: Path) -> bool:
-    status = _git(
+def _repo_status_porcelain(repo: Path) -> str:
+    return _git(
         repo, "status", "--porcelain=v1", "--untracked-files=normal"
     ).stdout
-    return bool(status.strip())
+
+
+def _repo_dirty(repo: Path) -> bool:
+    return bool(_repo_status_porcelain(repo).strip())
+
+
+def _worktree_fingerprint(root: Path, source_head: str, status_output: str) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(source_head.encode("utf-8"))
+    hasher.update(b"\0")
+    hasher.update(status_output.encode("utf-8"))
+    for raw_line in status_output.splitlines():
+        if len(raw_line) < 4:
+            continue
+        rel = raw_line[3:].strip()
+        if " -> " in rel:
+            rel = rel.split(" -> ", 1)[1].strip()
+        candidate = root / rel
+        try:
+            st = candidate.lstat()
+            hasher.update(f"\0{rel}:{st.st_mtime_ns}:{st.st_size}".encode("utf-8"))
+        except OSError:
+            hasher.update(f"\0{rel}:missing".encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _so_tree_mtime_signature(root: Path) -> tuple[str, list[Path]]:
+    hasher = hashlib.sha256()
+    so_files: list[Path] = []
+    for path in sorted(root.rglob("*.so*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix == ".so" or ".so." in path.name:
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            hasher.update(f"{rel}:{st.st_mtime_ns}:{st.st_size}\0".encode("utf-8"))
+            so_files.append(path)
+    return hasher.hexdigest(), so_files
 
 
 def _load_parity():
@@ -99,7 +145,11 @@ def _clean_repos(source_head: str) -> dict[str, dict[str, Any]]:
     }
 
 
-def code_identity(workspace_root: Path | str) -> dict[str, Any]:
+def code_identity(
+    workspace_root: Path | str,
+    *,
+    ttl_seconds: float = DEFAULT_IDENTITY_CACHE_TTL_SECONDS,
+) -> dict[str, Any]:
     """Return git-object identity for ``workspace_root``.
 
     When the worktree is clean, ``snapshot_commit`` equals ``source_head``.
@@ -111,7 +161,8 @@ def code_identity(workspace_root: Path | str) -> dict[str, Any]:
     if not (root / ".git").exists():
         raise CodeIdentityError(f"not a git worktree: {root}")
     source_head = _git_head(root)
-    dirty = _repo_dirty(root)
+    status_output = _repo_status_porcelain(root)
+    dirty = bool(status_output.strip())
 
     if not dirty:
         repos = _clean_repos(source_head)
@@ -122,13 +173,62 @@ def code_identity(workspace_root: Path | str) -> dict[str, Any]:
             "repos": repos,
         }
 
+    state_key = _worktree_fingerprint(root, source_head, status_output)
+    cache_key = (str(root), state_key)
+    now = time.monotonic()
+    cached = _SOURCE_IDENTITY_CACHE.get(cache_key)
+    if cached is not None and (now - cached[0]) <= ttl_seconds:
+        return copy.deepcopy(cached[1])
+
     snapshot, repos = _create_identity_snapshot(root)
-    return {
+    result = {
         "source_head": source_head,
         "snapshot_commit": snapshot,
         "dirty": True,
         "repos": repos,
     }
+    _SOURCE_IDENTITY_CACHE[cache_key] = (now, copy.deepcopy(result))
+    return result
+
+
+def inspect_source_identity(
+    workspace_root: Path | str,
+    *,
+    ttl_seconds: float = DEFAULT_IDENTITY_CACHE_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Fast in-process cached source & native `.so` identity check.
+
+    Keys by `(root_path, git_head_or_mtime)` so repeated invocations across
+    `prepare_runtime`, `backend.preflight`, and `task_environment` within a
+    single task flow do not re-hash the entire `.so` / worktree tree 3-4 times.
+    """
+    root = Path(workspace_root).resolve()
+    if (root / ".git").exists():
+        return code_identity(root, ttl_seconds=ttl_seconds)
+    if not root.is_dir():
+        raise CodeIdentityError(f"workspace root does not exist: {root}")
+    mtime_sig, so_files = _so_tree_mtime_signature(root)
+    cache_key = (str(root), mtime_sig)
+    now = time.monotonic()
+    cached = _SOURCE_IDENTITY_CACHE.get(cache_key)
+    if cached is not None and (now - cached[0]) <= ttl_seconds:
+        return copy.deepcopy(cached[1])
+    so_hashes: dict[str, str] = {}
+    for path in so_files:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        so_hashes[path.relative_to(root).as_posix()] = digest.hexdigest()
+    result = {
+        "root": str(root),
+        "source_head": None,
+        "snapshot_commit": mtime_sig,
+        "dirty": False,
+        "so_hashes": so_hashes,
+    }
+    _SOURCE_IDENTITY_CACHE[cache_key] = (now, copy.deepcopy(result))
+    return result
 
 
 def manifest_code(workspace_root: Path | str) -> dict[str, Any]:

@@ -14,3 +14,4 @@ venv/
 # Untracked local coordinator and task-registry state.
 .mindie-local/
 .mindie-runtime/
+state/

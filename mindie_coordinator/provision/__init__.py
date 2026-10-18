@@ -44,6 +44,7 @@ def provision_user_container(
     machines: MachineDirectory | None = None,
     reserve_port=None,
     on_progress=None,
+    alias: str | None = None,
 ) -> dict[str, Any]:
     """Create or reuse `mindie-<user>` on `host` from a named image/recipe."""
     timings, observation = {}, {}
@@ -112,7 +113,7 @@ def provision_user_container(
                 if int(reserved.get('port') or chosen_port) != chosen_port:
                     raise host_ops.MachineManagementError('reserved SSH port differs from the verified existing listener')
             return {**_record_ready_container(host, image, user, host_user, host_port,
-                                             chosen_port, machine_type, machines),
+                                             chosen_port, machine_type, machines, alias=alias),
                     'image_verification': existing}
     probe_payload = remote('host-probe',
         host_target,
@@ -165,13 +166,13 @@ def provision_user_container(
         require_payload=True,
     )
     return _record_ready_container(host, image, user, host_user, host_port,
-                                   chosen_port, machine_type, machines)
+                                   chosen_port, machine_type, machines, alias=alias)
 
 
-def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines):
+def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines, alias=None):
     container = user_container_name(user)
     record = {
-        "alias": host,
+        "alias": alias or host,
         "host": {"ip": host, "port": host_port, "user": host_user, "machine_type": machine_type},
         "container": {"name": container, "ssh_port": chosen_port, "user": "root", "workdir": DEFAULT_WORKDIR},
         "image": {"requested": image},

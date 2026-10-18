@@ -386,6 +386,8 @@ def handle_probe(
                 "busy_npus": snap["busy_npus"],
                 "free_npu_ids": snap["free_npu_ids"],
                 "busy_npu_ids": snap["busy_npu_ids"],
+                "free_phy_ids": snap.get("free_phy_ids", []),
+                "busy_phy_ids": snap.get("busy_phy_ids", []),
                 "bound_container": snap.get("bound_container"),
                 "containers_count": len(snap.get("containers") or []),
                 "cache_hit": snap.get("cache_hit", False),
@@ -418,6 +420,8 @@ def handle_probe(
                     "free_npus": snap["free_npus"],
                     "free_npu_ids": snap["free_npu_ids"],
                     "busy_npu_ids": snap["busy_npu_ids"],
+                    "free_phy_ids": snap.get("free_phy_ids", []),
+                    "busy_phy_ids": snap.get("busy_phy_ids", []),
                     "npus": snap.get("npus", []),
                 }
                 for snap in snapshots
@@ -472,6 +476,7 @@ def handle_container(
     directory: MachineDirectory | None = None,
     state_dir: Path | str | None = None,
     runner: Callable[[Mapping[str, Any], str], str] | None = None,
+    queue: HostQueue | None = None,
 ) -> dict[str, Any]:
     """Execute `mindie.container` (`bind`, `provision`, `inspect`, `remove`)."""
     action = str(args.get("action") or "inspect").strip()
@@ -534,22 +539,34 @@ def handle_container(
                 "mindie_container(action='provision') requires `image` ('local-latest', 'rc', 'main', 'stable', or an explicit image reference)"
             )
         machine_type = args.get("machine_type") or ((rec or {}).get("host") or {}).get("machine_type")
+        host_queue = queue if queue is not None else HostQueue()
+
+        def _reserve_port(*, user: str, container_name: str, port: int) -> dict[str, Any]:
+            return host_queue.request(
+                host_spec,
+                {
+                    "action": "container-ssh-reserve",
+                    "user": user,
+                    "container_name": container_name,
+                    "port": port,
+                },
+            )
+
         provisioned = provision_user_container(
             host=host_spec["host"],
             image=image,
-            user=args.get("container_user") or args.get("user_namespace"),
+            user=args.get("container_user") or args.get("user_namespace") or args.get("user_tag") or args.get("user"),
             host_user=host_spec["user"],
             host_port=host_spec["port"],
             ssh_port=int(args["ssh_port"]) if args.get("ssh_port") else None,
             machine_type=machine_type,
             password_env=args.get("password_env"),
             machines=store,
+            reserve_port=_reserve_port,
+            alias=alias,
         )
-        # If caller supplied a custom alias distinct from host IP, ensure alias is preserved
-        if alias != host_spec["host"]:
-            host_rec = store.record(host_spec["host"])
-            store.remove_machine(host_spec["host"])
-            store.upsert_machine({**host_rec, "alias": alias}, set_default=bool(args.get("set_default")))
+        if args.get("set_default"):
+            store.set_default(alias)
         endpoints_doc = store.endpoints_document()
         return {
             "state": "ready",
@@ -614,6 +631,33 @@ def handle_container(
     raise caller_error(f"unsupported mindie.container action: {action!r}")
 
 
+def _leases_file(base_dir: Path) -> Path:
+    return base_dir / "leases.json"
+
+
+def _load_leases(base_dir: Path) -> dict[str, dict[str, Any]]:
+    import json
+
+    path = _leases_file(base_dir)
+    if not path.is_file():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return dict(doc.get("leases") or {}) if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_leases(base_dir: Path, leases: Mapping[str, Mapping[str, Any]]) -> None:
+    import json
+
+    path = _leases_file(base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"leases": {k: dict(v) for k, v in leases.items()}}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 def handle_lease(
     args: Mapping[str, Any],
     *,
@@ -623,65 +667,125 @@ def handle_lease(
 ) -> dict[str, Any]:
     """Execute `mindie.lease` (`acquire`, `heartbeat`, `status`, `release`) via HostQueue."""
     action = str(args.get("action") or "status").strip()
-    store, _ = _resolve_store(directory, state_dir)
+    store, base_dir = _resolve_store(directory, state_dir)
     alias, host_spec, _ = _resolve_host_target(args, store)
     host_queue = queue if queue is not None else HostQueue()
     owner_user = safe_id(str(args.get("owner") or getpass.getuser()))
+    remote_sd = {"state_dir": str(args["remote_state_dir"])} if args.get("remote_state_dir") else {}
 
     if action == "status":
-        response = host_queue.request(host_spec, {"action": "status"})
+        status_req: dict[str, Any] = {"action": "status", **remote_sd}
+        if args.get("lease_id"):
+            status_req["task_id"] = str(args["lease_id"]).strip()
+        response = host_queue.request(host_spec, status_req)
+        tasks_list = [
+            {**t, "lease_id": t.get("lease_id") or t.get("task_id")}
+            if isinstance(t, Mapping)
+            else t
+            for t in (response.get("tasks") or [])
+        ]
         return {
             "state": "ready",
             "action": "status",
             "alias": alias,
             "host": host_spec["host"],
+            "coordination_epoch": response.get("coordination_epoch"),
             "occupancy": response.get("occupancy"),
-            "tasks": response.get("tasks", []),
+            "tasks": tasks_list,
+            "leases": tasks_list,
+            "count": len(tasks_list),
             "coordination_messages": response.get("coordination_messages", []),
         }
 
     if action == "acquire":
-        lease_id = str(args.get("lease_id") or f"lease-{owner_user}-{uuid.uuid4().hex[:10]}").strip()
+        lease_id = safe_id(str(args.get("lease_id") or f"lease-{owner_user}-{uuid.uuid4().hex[:10]}").strip())
         devices = args.get("devices")
-        npu_count = int(args["npu_count"]) if args.get("npu_count") is not None else (len(devices) if isinstance(devices, list) else 1)
-        if isinstance(devices, list) and len(devices) != npu_count:
+        npu_count_arg = args.get("npu_count")
+        if isinstance(devices, list) and npu_count_arg is not None and len(devices) != int(npu_count_arg):
             raise caller_error("when both `devices` and `npu_count` are supplied, `npu_count` must equal `len(devices)`")
         ttl_seconds = int(args.get("ttl_seconds") or 900)
+        epoch = args.get("coordination_epoch")
+        if not epoch:
+            status_resp = host_queue.request(host_spec, {"action": "status", "no_probe": True, **remote_sd})
+            epoch = status_resp.get("coordination_epoch")
+
         req: dict[str, Any] = {
-            "action": "acquire",
+            "action": "submit-acquire" if epoch else "submit",
             "task_id": lease_id,
-            "user": owner_user,
-            "npu_count": npu_count,
-            "purpose": str(args.get("purpose") or "remote-dev workload"),
-            "ttl_seconds": ttl_seconds,
+            "agent_id": owner_user,
+            "message": str(args.get("purpose") or "remote-dev workload"),
+            "estimated_duration_seconds": ttl_seconds,
+            "grant_ttl_seconds": ttl_seconds,
             "allow_external_busy": bool(args.get("allow_external_busy")),
+            **remote_sd,
         }
+        if epoch:
+            req["coordination_epoch"] = str(epoch)
         if isinstance(devices, list):
             req["devices"] = [int(d) for d in devices]
+        else:
+            req["npu_count"] = int(npu_count_arg) if npu_count_arg is not None else 1
         if "service_port" in args and args["service_port"] is not None:
-            req["service_port"] = int(args["service_port"])
+            sp = int(args["service_port"])
+            req["service_port"] = sp
+            if sp > 0:
+                req["service_ports"] = [sp]
 
         response = host_queue.request(host_spec, req)
+        if req["action"] == "submit" and (response.get("task") or {}).get("state") == "queued":
+            response = host_queue.request(
+                host_spec,
+                {"action": "acquire", "task_id": lease_id, "grant_ttl_seconds": ttl_seconds, **remote_sd},
+            )
         task = response.get("task") or {}
-        lease_state = str(task.get("state") or response.get("status") or "unknown")
-        allocated_devices = task.get("allocated_npus") or []
+        raw_state = str(task.get("state") or response.get("status") or "unknown")
+        allocated_devices = (
+            task.get("granted_devices")
+            if task.get("granted_devices") is not None
+            else (task.get("allocated_npus") or [])
+        )
         visible_str = ",".join(str(d) for d in allocated_devices)
-        service_port = task.get("service_port")
+        service_port = (
+            task.get("granted_service_port")
+            if task.get("granted_service_port") is not None
+            else task.get("service_port")
+        )
+        fence_token = task.get("fence_token")
         env_vars: dict[str, str] = {}
         if visible_str:
             env_vars["ASCEND_RT_VISIBLE_DEVICES"] = visible_str
+        if fence_token is not None:
+            env_vars["MINDIE_FENCE_TOKEN"] = str(fence_token)
         if task.get("job_token"):
             env_vars["MINDIE_JOB_TOKEN"] = str(task["job_token"])
-        if service_port:
+        if service_port is not None:
             env_vars["MINDIE_SERVICE_PORT"] = str(service_port)
 
+        leases = _load_leases(base_dir)
+        lease_record = {
+            "lease_id": lease_id,
+            "alias": alias,
+            "host": host_spec["host"],
+            "owner": owner_user,
+            "fence_token": fence_token,
+            "coordination_epoch": epoch,
+            "devices": allocated_devices,
+            "service_port": service_port,
+            "state": raw_state,
+        }
+        leases[f"{alias}:{lease_id}"] = lease_record
+        leases[lease_id] = lease_record
+        _save_leases(base_dir, leases)
+
         return {
-            "state": "active" if lease_state == "active" else lease_state,
+            "state": "active" if raw_state in {"granted", "active", "starting"} else raw_state,
+            "lease_state": raw_state,
             "action": "acquire",
             "alias": alias,
             "host": host_spec["host"],
             "lease_id": lease_id,
             "owner": owner_user,
+            "fence_token": fence_token,
             "devices": allocated_devices,
             "ascend_rt_visible_devices": visible_str,
             "service_port": service_port,
@@ -691,51 +795,102 @@ def handle_lease(
         }
 
     if action == "heartbeat":
-        lease_id = str(args.get("lease_id") or "").strip()
+        lease_id = safe_id(str(args.get("lease_id") or "").strip())
         if not lease_id:
             raise caller_error("mindie_lease(action='heartbeat') requires `lease_id`")
         ttl_seconds = int(args.get("ttl_seconds") or 900)
+        leases = _load_leases(base_dir)
+        stored = leases.get(f"{alias}:{lease_id}") or leases.get(lease_id) or {}
+        fence_token = args.get("fence_token") if args.get("fence_token") is not None else stored.get("fence_token")
+        if fence_token is None:
+            snap = host_queue.request(host_spec, {"action": "status", "task_id": lease_id, "no_probe": True, **remote_sd})
+            tasks = snap.get("tasks") or []
+            if tasks:
+                fence_token = tasks[0].get("fence_token")
+        if fence_token is None:
+            raise caller_error(f"no fence_token found for lease {lease_id!r}; pass `fence_token` or acquire the lease first")
         response = host_queue.request(
             host_spec,
             {
                 "action": "heartbeat",
                 "task_id": lease_id,
-                "ttl_seconds": ttl_seconds,
+                "fence_token": int(fence_token),
+                "heartbeat_ttl_seconds": ttl_seconds,
+                **remote_sd,
             },
         )
         task = response.get("task") or {}
-        lease_state = str(task.get("state") or response.get("status") or "active")
-        allocated_devices = task.get("allocated_npus") or []
+        raw_state = str(task.get("state") or response.get("status") or "active")
+        allocated_devices = (
+            task.get("granted_devices")
+            if task.get("granted_devices") is not None
+            else (task.get("allocated_npus") or [])
+        )
+        service_port = (
+            task.get("granted_service_port")
+            if task.get("granted_service_port") is not None
+            else task.get("service_port")
+        )
         return {
-            "state": lease_state,
+            "state": "active" if raw_state in {"granted", "active", "starting"} else raw_state,
+            "lease_state": raw_state,
             "action": "heartbeat",
             "alias": alias,
             "host": host_spec["host"],
             "lease_id": lease_id,
+            "fence_token": int(fence_token),
             "devices": allocated_devices,
             "ascend_rt_visible_devices": ",".join(str(d) for d in allocated_devices),
-            "service_port": task.get("service_port"),
+            "service_port": service_port,
             "lease": task,
         }
 
     if action == "release":
-        lease_id = str(args.get("lease_id") or "").strip()
+        lease_id = safe_id(str(args.get("lease_id") or "").strip())
         if not lease_id:
             raise caller_error("mindie_lease(action='release') requires `lease_id`")
-        response = host_queue.request(
-            host_spec,
-            {
-                "action": "release",
-                "task_id": lease_id,
-            },
-        )
+        leases = _load_leases(base_dir)
+        stored = leases.get(f"{alias}:{lease_id}") or leases.get(lease_id) or {}
+        fence_token = args.get("fence_token") if args.get("fence_token") is not None else stored.get("fence_token")
+        if fence_token is None:
+            snap = host_queue.request(host_spec, {"action": "status", "task_id": lease_id, "no_probe": True, **remote_sd})
+            tasks = snap.get("tasks") or []
+            if tasks:
+                fence_token = tasks[0].get("fence_token")
+        if fence_token is not None:
+            response = host_queue.request(
+                host_spec,
+                {
+                    "action": "release",
+                    "task_id": lease_id,
+                    "fence_token": int(fence_token),
+                    "free_samples": int(args.get("free_samples") or 1),
+                    "interval_seconds": float(args.get("interval_seconds") or 0.0),
+                    **remote_sd,
+                },
+            )
+        else:
+            response = host_queue.request(
+                host_spec,
+                {
+                    "action": "cancel",
+                    "task_id": lease_id,
+                    **remote_sd,
+                },
+            )
+        leases.pop(f"{alias}:{lease_id}", None)
+        leases.pop(lease_id, None)
+        _save_leases(base_dir, leases)
         task = response.get("task") or {}
+        raw_state = str(task.get("state") or response.get("status") or "released")
         return {
-            "state": "released",
+            "state": "released" if raw_state in {"released", "cancelled"} else raw_state,
+            "lease_state": raw_state,
             "action": "release",
             "alias": alias,
             "host": host_spec["host"],
             "lease_id": lease_id,
+            "fence_token": int(fence_token) if fence_token is not None else None,
             "lease": task,
         }
 

@@ -117,7 +117,7 @@ class MachineDirectory:
         raise ValueError(f"unknown machine {target!r}; register it with mindie_hosts(action='upsert', ...)")
 
     def upsert_machine(self, record: Mapping[str, Any], *, set_default: bool = False) -> Path:
-        """Insert or replace one host record. Never wipe the rest of the directory."""
+        """Insert or replace one host record. Never wipe distinct aliases sharing the same IP."""
         host_ip = (record.get("host") or {}).get("ip")
         alias = record.get("alias") or host_ip
         normalized = {**dict(record), "alias": alias}
@@ -126,7 +126,12 @@ class MachineDirectory:
             machines = [
                 row
                 for row in inventory["machines"]
-                if (row.get("host") or {}).get("ip") != host_ip and row.get("alias") != alias
+                if row.get("alias") != alias
+                and not (
+                    alias == host_ip
+                    and (row.get("alias") in {None, host_ip})
+                    and (row.get("host") or {}).get("ip") == host_ip
+                )
             ]
             machines.append(normalized)
             document = {**inventory, "machines": machines}

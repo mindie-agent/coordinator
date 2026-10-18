@@ -1601,12 +1601,18 @@ class TaskClientTests(unittest.TestCase):
         first = {}
 
         def run_first():
-            first["reply"] = self.client.run("true")
+            try:
+                first["reply"] = self.client.run("true")
+            except BaseException as exc:
+                first["error"] = exc
+                started.set()
 
         worker = threading.Thread(target=run_first)
         worker.start()
         try:
             self.assertTrue(started.wait(30))
+            if "error" in first:
+                raise first["error"]
             second = self.client.run("sleep 1")
             self.assertEqual(second["state"], "running")
             self.assertEqual(len(syncs), 2)
@@ -1614,6 +1620,8 @@ class TaskClientTests(unittest.TestCase):
             release.set()
             worker.join(60)
         self.assertFalse(worker.is_alive(), "materialization worker must finish before fixture cleanup")
+        if "error" in first:
+            raise first["error"]
         self.assertEqual(first["reply"]["state"], "running")
 
     def test_restart_does_not_overlap_while_stop_is_stopping(self):

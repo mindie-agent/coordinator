@@ -156,6 +156,9 @@ TOOL_SCHEMAS = {
         "service_port": {"type": "integer", "minimum": 0, "maximum": 65535, "description": "0 reserves a free host port in 18000..18999; positive int reserves that specific port."},
         "purpose": {"type": "string", "description": "Human/agent-readable description of what this lease is running."},
         "ttl_seconds": {"type": "integer", "minimum": 30, "maximum": 86400, "default": 900},
+        "fence_token": {"type": "integer", "minimum": 1, "description": "Fence token issued by acquire for heartbeat/release."},
+        "coordination_epoch": {"type": "string", "description": "Optional observed host coordination epoch."},
+        "remote_state_dir": {"type": "string", "description": "Optional remote host coordinator state directory override."},
     }),
 }
 TOOL_SCHEMAS["mindie.run"]["oneOf"] = [

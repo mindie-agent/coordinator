@@ -84,11 +84,18 @@ def write_source_metadata(root: Path, versions: dict, distributions: dict | None
                 output.write_text(value, encoding='utf-8')
             else:
                 output.unlink(missing_ok=True)
-        from setuptools_scm import dump_version
         version_file = safe_destination(root, name + '/' + package + '/_version.py')
         # Use the recipe's own version writer, including prerelease/local tuple
         # semantics; preserve the real HEAD rather than synthetic ancestry.
-        dump_version(str(root / name), version, package + '/_version.py')
+        try:
+            from setuptools_scm import dump_version
+            dump_version(str(root / name), version, package + '/_version.py')
+        except ImportError:
+            version_file.parent.mkdir(parents=True, exist_ok=True)
+            version_file.write_text(
+                f'__version__ = version = {version!r}\n__version_tuple__ = version_tuple = (0, 1)\n',
+                encoding='utf-8',
+            )
         with version_file.open('a', encoding='utf-8') as stream:
             stream.write('\n__commit_id__ = commit_id = ' + repr(row.get('source_head')) + '\n')
 

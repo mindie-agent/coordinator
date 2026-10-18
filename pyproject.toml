@@ -32,5 +32,14 @@ packages = ["mindie_coordinator"]
 allow-direct-references = true
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = "-m 'not live_npu'"
+markers = [
+    "unit: fast unit tests with no external system dependencies",
+    "integration: local integration tests using in-memory SQLite or subprocesses",
+    "live_npu: live SSH integration tests against real Ascend NPU hosts",
+]
+
+

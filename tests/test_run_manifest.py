@@ -215,6 +215,38 @@ class CodeIdentityTests(unittest.TestCase):
             self.assertRegex(identity["snapshot_commit"], GIT_SHA_RE.pattern)
             self.assertNotEqual(identity["snapshot_commit"], source_head)
 
+    def test_inspect_source_identity_caches_repeated_dirty_and_so_tree_calls(self) -> None:
+        from mindie_coordinator import code_identity as ci_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "git_worktree"
+            _init_repo(repo)
+            (repo / "custom_op.so").write_bytes(b"\x7fELF-dirty-binary-v1")
+            with mock.patch.object(
+                ci_mod, "_create_identity_snapshot", wraps=ci_mod._create_identity_snapshot
+            ) as build_snap:
+                first = ci_mod.inspect_source_identity(repo)
+                second = ci_mod.inspect_source_identity(repo)
+                third = ci_mod.code_identity(repo)
+                self.assertEqual(build_snap.call_count, 1)
+                self.assertEqual(first["snapshot_commit"], second["snapshot_commit"])
+                self.assertEqual(first["snapshot_commit"], third["snapshot_commit"])
+
+                # Modifying the .so binary invalidates the (root, git_head_or_mtime) cache entry
+                (repo / "custom_op.so").write_bytes(b"\x7fELF-dirty-binary-v2-modified")
+                fourth = ci_mod.inspect_source_identity(repo)
+                self.assertEqual(build_snap.call_count, 2)
+                self.assertNotEqual(first["snapshot_commit"], fourth["snapshot_commit"])
+
+            so_dir = Path(tmp) / "runtime_so_only"
+            so_dir.mkdir(parents=True, exist_ok=True)
+            so_file = so_dir / "vllm_ascend_C.abi3.so"
+            so_file.write_bytes(b"\x7fELF-so-payload")
+            so_first = ci_mod.inspect_source_identity(so_dir)
+            so_second = ci_mod.inspect_source_identity(so_dir)
+            self.assertEqual(so_first, so_second)
+            self.assertIn("vllm_ascend_C.abi3.so", so_first["so_hashes"])
+
 
 class ParityCommandTests(unittest.TestCase):
     def test_materialize_command_uses_the_in_package_module(self) -> None:

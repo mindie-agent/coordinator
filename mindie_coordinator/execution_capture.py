@@ -107,8 +107,12 @@ def observe(node):
     scm = None
     if node.relpath in {"vllm", "vllm-ascend"}:
         tags = git(node.repo_path, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/tags"], env=env).stdout
+        try:
+            scm_ver = version("setuptools-scm")
+        except Exception:
+            scm_ver = "builtin"
         scm = digest([head, dirty, tags, config, file_bytes(common / "shallow").hex(),
-                      datetime.now(timezone.utc).date().isoformat(), version("setuptools-scm"),
+                      datetime.now(timezone.utc).date().isoformat(), scm_ver,
                       {key: value for key, value in os.environ.items()
                        if key.startswith("SETUPTOOLS_SCM_") or key == "SOURCE_DATE_EPOCH"}])
     return {"content": hasher.hexdigest(), "scm": scm, "head": head, "paths": paths, "untracked": untracked,
