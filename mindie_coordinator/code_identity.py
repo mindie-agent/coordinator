@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """Workspace code identity from git objects.
 
-Code identity is a git commit: HEAD when the worktree is clean, otherwise a
-deterministic parentless snapshot of the current tree. The snapshot ref keeps
-that orphan commit reachable for experiment records.
+[Role]
+Computes deterministic Git commit / worktree / native `.so` tree identities for
+Run Manifests and in-process source identity caching (`_SOURCE_IDENTITY_CACHE`).
 
-Owned by mindie-coordinator. Snapshot construction uses the in-package parity
-module; this never locates a consumer skill script by filesystem path.
+[Invariants]
+- When the worktree is clean, `snapshot_commit == source_head`.
+- When dirty, creates a deterministic parentless snapshot commit via `parity`
+  and retains it under `refs/parity/identity/current/`.
+- In-process cache entries expire after `ttl_seconds` (default 30s) and are
+  keyed by `(root_path, worktree_or_so_signature)`.
+
+[Timeouts & Locks]
+- Local git status/rev-parse subprocesses only; no network I/O or file locks.
+
+[Side-Effect Policy]
+- Clean worktrees are strictly read-only; dirty worktrees write only synthetic
+  Git objects and `refs/parity/identity/current/*` refs using a temporary index.
 """
 
 from __future__ import annotations
@@ -87,7 +98,7 @@ def _so_tree_mtime_signature(root: Path) -> tuple[str, dict[str, str]]:
     hasher = hashlib.sha256()
     so_hashes: dict[str, str] = {}
     for path in sorted(root.rglob("*.so*")):
-        if not path.is_file() or path.is_symlink():
+        if not path.is_file():
             continue
         if path.suffix == ".so" or ".so." in path.name:
             try:
@@ -284,80 +295,3 @@ def identity_workspace(sources: Mapping[str, str]) -> Path:
         "business tree picked by name"
     )
 
-
-def collect_referenced_snapshot_commits(workspace_root: Path) -> set[str]:
-    """Collect ``code.snapshot_commit`` values from Run Manifests under ``.mindie-local/``."""
-    referenced: set[str] = set()
-    local = Path(workspace_root) / ".mindie-local"
-    if not local.is_dir():
-        return referenced
-    for path in local.rglob("*.json"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        if not isinstance(payload, Mapping):
-            continue
-        code = payload.get("code")
-        if not isinstance(code, Mapping):
-            continue
-        snapshot = code.get("snapshot_commit")
-        if isinstance(snapshot, str) and len(snapshot) == 40:
-            referenced.add(snapshot)
-    return referenced
-
-
-def gc_parity_refs(
-    workspace_root: Path,
-    *,
-    max_age_days: int = 7,
-    now: float | None = None,
-) -> dict[str, Any]:
-    """Delete ``refs/parity/`` older than ``max_age_days`` and not referenced."""
-    import time
-
-    parity = _load_parity()
-    root = Path(workspace_root).resolve()
-    referenced = collect_referenced_snapshot_commits(root)
-    cutoff = (time.time() if now is None else now) - max_age_days * 86400
-    deleted: list[dict[str, str]] = []
-    kept: list[dict[str, str]] = []
-    tree = parity.discover_repo_tree(root, ".", None, None, unpopulated="gitlink")
-    for node in parity.iter_postorder(tree):
-        if node.gitlink_commit or not parity.is_git_worktree(node.repo_path):
-            continue
-        listed = parity.git(
-            node.repo_path,
-            ["for-each-ref", "--format=%(objectname)\t%(refname)", "refs/parity"],
-            check=False,
-        )
-        git_dir = Path(
-            parity.git(node.repo_path, ["rev-parse", "--git-dir"]).stdout.strip()
-        )
-        if not git_dir.is_absolute():
-            git_dir = node.repo_path / git_dir
-        for line in listed.stdout.splitlines():
-            if "\t" not in line:
-                continue
-            sha, ref = line.split("\t", 1)
-            ref_path = git_dir / ref
-            if ref_path.is_file():
-                mtime = ref_path.stat().st_mtime
-            else:
-                mtime = 0.0
-            row = {
-                "repo": node.relpath,
-                "ref": ref,
-                "commit": sha,
-            }
-            if sha in referenced or mtime >= cutoff:
-                kept.append(row)
-                continue
-            parity.git(node.repo_path, ["update-ref", "-d", ref], check=False)
-            deleted.append(row)
-    return {
-        "status": "ok",
-        "deleted": deleted,
-        "kept": kept,
-        "referenced": sorted(referenced),
-    }

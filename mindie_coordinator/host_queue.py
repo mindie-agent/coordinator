@@ -1,11 +1,21 @@
-"""Public host NPU queue API.
+"""Public host NPU queue client and protocol re-exports.
 
-The scaffold imports this module as ``mindie_coordinator.host_queue``. It
-re-exports the host allocation protocol and the client that ships that
-protocol to a physical host.
+[Role]
+Ships the stdlib-only `mindie_npu_coordination.py` protocol to bare-metal
+Ascend hosts over `remote-dev`'s `run_remote_python` (or an explicit runner)
+and translates host responses into structured coordinator results or
+`RemoteExecutionError`.
 
-The host module itself stays stdlib-only: it is read as source text and
-executed on the host. ``MINDIE_HOST_QUEUE_MODULE`` overrides the bundled file.
+[Invariants]
+- Protocol code is fixed (`mindie_npu_coordination.py` + `RUNNER`); request
+  arguments are passed separately so SSH script caching remains deterministic.
+
+[Timeouts & Locks]
+- Remote host coordination RPC timeout is `45000ms` (45s).
+
+[Side-Effect Policy]
+- Transport or unresolved host errors raise `RuntimeError` / `RemoteExecutionError`
+  without replaying uncertain mutations.
 """
 
 from __future__ import annotations
@@ -30,7 +40,6 @@ from mindie_coordinator.host.mindie_npu_coordination import (  # noqa: F401
     parse_npu_smi_hbm,
     parse_npu_smi_info,
     probe_listening_ports,
-    probe_named_container,
     JOB_TOKEN_ENV,
     process_guard_busy,
     probe_npu_occupancy,

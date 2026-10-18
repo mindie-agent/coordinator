@@ -1,4 +1,21 @@
-"""Shared native-input identity used by parity and prepared-runtime verification."""
+"""Shared native-input identity used by parity and prepared-runtime verification.
+
+[Role]
+Computes deterministic SHA-256 fingerprints (`native`, `imports`, `dependencies`,
+`build_env`) over Git trees and populated submodules for `vllm` and `vllm-ascend`.
+
+[Invariants]
+- Submodule identities hash nested `git ls-tree` content recursively rather than
+  task-specific synthetic commit SHAs (`submodule_content`).
+- `imports` closure includes all tracked non-C/C++/CUDA files so Python-only edits
+  can be distinguished from native compilation changes.
+
+[Timeouts & Locks]
+- Pure local `git rev-parse` / `git ls-tree` subprocess queries; no locks.
+
+[Side-Effect Policy]
+- Strictly read-only.
+"""
 from __future__ import annotations
 
 import fnmatch

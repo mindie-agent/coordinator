@@ -1,9 +1,27 @@
 """Shared ready-runtime registry. Host NpuCoordinator remains card authority.
 
-One manager process owns this database. Transactions persist intent before
-remote calls, whose idempotent task ids survive manager restart. Managed jobs
-may stop only their recorded process families. This never creates containers,
-installs packages or stops an unrelated service.
+[Role]
+Owns the persistent SQLite state (`coordinator.sqlite3`) for sessions, prepared
+runtimes, bindings, NPU lease runs, and coordination events (`RuntimePool`),
+inheriting managed job supervision from `ManagedExecution`.
+
+[Invariants]
+- Transactions persist intent (`pending` run / `starting` job) BEFORE any remote
+  host or container call so idempotent `task_id` / `job_id` receipts survive restarts.
+- Remote host/container calls execute under per-entity locks (`_entity_lock`)
+  outside `self.lock`, so one slow/hung host never blocks unrelated runs or
+  heartbeats.
+- Any failure after `run["epoch"]` is recorded transitions the run to `uncertain`
+  (never silently reset or replaced); recovery observes the existing `task_id`
+  on the same `coordination_epoch`.
+
+[Timeouts & Locks]
+- SQLite uses `WAL` mode, `synchronous=FULL`, `BEGIN IMMEDIATE`, `timeout=60`s.
+- Lock hierarchy: `_entity_lock(kind, id)` -> `self.lock` -> `self.transaction()`.
+
+[Side-Effect Policy]
+- Writes `<state_dir>/coordinator.sqlite3` and `<state_dir>/runs/<run_id>.json`;
+  delegates all remote container/host operations to `self.backend`.
 """
 from __future__ import annotations
 
@@ -902,10 +920,6 @@ class RuntimePool(ManagedExecution):
                         continue
                     return True
             return False
-
-    def donor_runtime(self, user: str) -> dict | None:
-        catalog = [row for row in self.catalog() if row.get("user") == user and row.get("host")]
-        return catalog[0] if catalog else None
 
     def message(self, owner: str, target_run: str, text: str):
         if not text.strip() or len(text) > 4000:

@@ -1,9 +1,25 @@
-"""Local development-task identity, independent of the remote fleet.
+"""Local development-task identity and attachment registry.
 
-Native sessions are attachments, not task ids. A new native root session creates
-a new task; resuming that same native session retains its task. Only an explicit
-association or a child attachment joins another existing task. No operation here
-allocates resources, reads transcripts, resets sources or removes worktrees.
+[Role]
+Maps native Harness sessions (`claude`, `codex`, `cursor`, `grok`, `kimi`) to
+persistent local MindIE task identities, source worktree bindings, and execution
+records in `sessions.sqlite3`.
+
+[Invariants]
+- Native sessions are attachments, not task IDs: a new root native session
+  creates a new task; resuming that native session retains its task; only an
+  explicit association or child attachment joins another existing task.
+- Source worktrees are inspected in place (`git rev-parse`); never materializes
+  duplicate local checkouts or mutates worktrees.
+
+[Timeouts & Locks]
+- SQLite `sessions.sqlite3` uses `WAL`, `synchronous=FULL`, `timeout=10`, and
+  `BEGIN IMMEDIATE` transactions.
+- Local `git rev-parse` calls run with `stdin=DEVNULL` and `timeout=5s`.
+
+[Side-Effect Policy]
+- Writes only to `<agent_sessions_root>/sessions.sqlite3` and immutable
+  `<agent_sessions_root>/contexts/<attachment_id>.json` reference files.
 """
 from __future__ import annotations
 

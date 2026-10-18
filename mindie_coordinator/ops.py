@@ -1,8 +1,9 @@
 """Task-facing operations exposed identically to every MCP host.
 
-Task lifecycle and optional coordination messages are coordinator semantics.
-Clients pass command and experiment needs; this
-package owns placement, environment, and recovery.
+[Role] Validates MCP tool arguments and formats `CoordinatorService` results via `presentation.present`.
+[Invariants] Returns structured `make_result` payloads; caller errors map to `isError=True` with actionable remedies.
+[Timeouts & Locks] Enforces `wait_timeout_seconds` (`0..600s`) before delegating to `TaskClient`/`CoordinatorService`.
+[Side-Effect Policy] Delegates all session and execution mutations to `TaskClient` and `CoordinatorService`.
 """
 
 from __future__ import annotations

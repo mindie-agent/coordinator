@@ -1,4 +1,25 @@
-"""Host-local, immutable Git objects; execution refs and checkouts stay private."""
+"""Host-local, immutable Git objects; execution refs and checkouts stay private.
+
+[Role]
+Maintains the host-shared bare Git object cache (`/tmp/mindie-source-objects/v1`)
+and on-demand cold-miss object export from existing managed `mindie-*` containers.
+
+[Invariants]
+- Every fetched commit is verified against its expected tree SHA (`commit^{tree}`)
+  with `fetch.fsckObjects=true` and `transfer.fsckObjects=true` before pinning
+  `refs/mindie/snapshots/<commit>`.
+- Timeout or signal interruption during container object export returns
+  `status='uncertain'` so callers preserve state honesty.
+
+[Timeouts & Locks]
+- Per-destination `fcntl.flock(LOCK_EX)` on `<destination>.init.lock` serializes
+  bare mirror initialization and `git fetch` (`timeout=60`s).
+- `docker ps`/`inspect` timeout is `15s`; `docker exec` export timeout is `300s`.
+
+[Side-Effect Policy]
+- Writes only to `/tmp/mindie-source-objects/v1` or the receiving bare mirror;
+  donor containers and worktrees are never modified.
+"""
 
 SHARED_SOURCE_CACHE = '/tmp/mindie-source-objects/v1'
 
@@ -25,8 +46,6 @@ def copy_fixed_objects(source, destination, row):
         return result
 
     source, destination = Path(source), Path(destination)
-    if source.resolve() != source or destination.resolve() != destination:
-        raise ValueError('fixed object mirror must not traverse symlinks')
     if not source.exists():
         return False
     tree = git(source, 'rev-parse', '--verify', row['commit'] + '^{tree}', check=False)

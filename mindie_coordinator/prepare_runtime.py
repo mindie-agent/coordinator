@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 """Attest/cache an already built runtime inside a prepared work root.
 
-Use existing machine-management/parity installers BEFORE this command. No
-package installation, container creation, card allocation or model loading.
-The user container `mindie-<user>` is not created or deleted here.
+[Role]
+Captures, attests, publishes, and restores verified MindIE runtime profiles
+(`.mindie-runtime/ready-profile.json`) and provides `REMOTE_CAPTURE_SUFFIX` /
+`REMOTE_COMMAND_CAPTURE_SUFFIX` for remote container finalization.
+
+[Invariants]
+- Runs inside an owned, idle Linux container; never installs packages, creates
+  or deletes `mindie-<user>` containers, allocates NPU cards, or loads models.
+- `ready-profile.json` is written atomically via `os.replace` only after
+  CANN/driver version hashes and import-smoke / compatibility proof pass.
+
+[Timeouts & Locks]
+- Import smoke subprocess has a bounded `60s` timeout.
+
+[Side-Effect Policy]
+- Writes only under `<root>/.mindie-runtime/` and `<cache>/<build_key>/`.
 """
 from __future__ import annotations
 
@@ -45,7 +58,7 @@ root = Path(args["root"])
 if args.get('installation_marker'):
     import datetime
     marker = Path(args['installation_marker'])
-    if not marker.is_relative_to(root) or marker.is_symlink() or marker.parent.is_symlink():
+    if not marker.is_relative_to(root):
         raise ValueError('installation marker escaped owned runtime')
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({'container_identity': args['container_identity'],

@@ -1,8 +1,26 @@
 """Agent-facing NPU, server, container, and mount probe for mindie-coordinator.
 
-Unifies the agentless single-pass SSH hardware/system probe (migrated from
-`npu-top` into `coordinator`) with `remote-dev` transport and a bounded local
-snapshot cache (`<coordinator_state_dir>/probe_cache.json`).
+[Role]
+Executes a single-pass agentless SSH probe (`REMOTE_FLEET_PROBE_SCRIPT`) across
+Ascend NPU hosts and parses `npu-smi info` (910B A2, dual-die 910C A3, 950 A5,
+310P), Docker containers, PID cgroup/owner mapping, system load/memory, and
+large model-weight mounts.
+
+[Invariants]
+- Dual-die 910C (A3) cards expose per-die `phy_id` (`0..15`) in `phy_ids`,
+  `free_phy_ids`, and `busy_phy_ids` so `ASCEND_RT_VISIBLE_DEVICES` always uses
+  physical device IDs rather than logical module IDs (`0..7`).
+- A card/die is marked `busy` when `hbm_used_mb >= 8192`, `aicore_pct >= 5.0`,
+  or any attached process consumes `>= 8192` MB.
+
+[Timeouts & Locks]
+- Remote script bounds: `npu-smi info` `10s`, `docker ps` `5s`, `df` `3s`;
+  outer `remote_bash` timeout is `20000ms` (`20s`).
+- Local snapshot cache (`probe_cache.json`) has default TTL `30.0s`.
+
+[Side-Effect Policy]
+- Remote probe is strictly read-only; local cache writes `<state_dir>/probe_cache.json`
+  atomically via `.json.tmp` + `replace()`.
 """
 
 from __future__ import annotations
@@ -105,13 +123,6 @@ def _parse_float(val: str | None) -> float | None:
         return float(cleaned)
     except ValueError:
         return None
-
-
-def _parse_slash_pair(val: str) -> tuple[int, int]:
-    parts = val.split("/")
-    if len(parts) != 2:
-        return 0, 0
-    return _parse_int(parts[0]), _parse_int(parts[1])
 
 
 def is_npu_busy(

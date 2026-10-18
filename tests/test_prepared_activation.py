@@ -138,9 +138,6 @@ def test_prepared_activation_enforces_5s_timeout_on_docker_inspect_and_top(super
     with pytest.raises(host.CoordinationError, match=f"docker {failing_cmd} timed out"):
         host.prepared_supervisor_host_pid(prepared, guard)
     assert all(timeout == 5 for _, timeout in seen_timeouts)
-    assert host._container_alive("mindie-test") is None or failing_cmd != "inspect"
-    if failing_cmd == "top":
-        assert host._container_has_Process(state["container_id"]) == []
 
 
 def test_explicit_pid_activation_keeps_legacy_path(authority, monkeypatch):

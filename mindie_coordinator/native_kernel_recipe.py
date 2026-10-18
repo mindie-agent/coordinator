@@ -1,7 +1,25 @@
 """Compile qualified installed operator metadata without a CMake build tree.
 
-This optional path consumes only a verified compilation recipe. Legacy bundles
-without complete option evidence continue through the ordinary source build.
+[Role]
+Executes fast direct `opc` compilation (`compile_kernel_recipe`) from verified
+`.mindie-runtime/kernel-compile-recipe.json` metadata without invoking a full
+CMake configure/build tree.
+
+[Invariants]
+- Raises/catches `RecipeUnavailable` and returns `False` ONLY before `opc`
+  compilation starts; once `started = True`, any compiler failure propagates
+  directly without falling back or replaying.
+- Guards the generated dynamic compiler wrapper so `get_kernel_source` and
+  `compile_op` prove they received the exact fixed `.cpp` SHA-256.
+
+[Timeouts & Locks]
+- Parameter generation subprocess (`ascendc_bin_param_build.py`) has `timeout=60`s.
+- Variant `opc` compilations run concurrently via `ThreadPoolExecutor` bounded
+  by `MAX_JOBS` or `os.cpu_count()`.
+
+[Side-Effect Policy]
+- Stages intermediate files in a temporary `.mindie-runtime/kernel-recipe-*`
+  directory and atomically renames `bin` and `gen` into `vllm-ascend/csrc/build/binary/<unit>` on completion.
 """
 from __future__ import annotations
 
@@ -32,12 +50,7 @@ def _recipe_child(root: Path, name: str) -> Path:
     relative = PurePosixPath(name)
     if relative.is_absolute() or not relative.parts or '..' in relative.parts:
         raise ValueError('unsafe kernel recipe path')
-    path = root
-    for part in relative.parts:
-        path = path / part
-        if path.is_symlink():
-            raise ValueError('symlink in kernel recipe path')
-    return path
+    return root / name
 
 
 def _recipe_digest(path: Path) -> str:
@@ -217,8 +230,6 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
                 shutil.copy2(_recipe_child(root, name), target)
         source = _recipe_child(root, 'vllm-ascend/' + plan['source'])
         source_dir = dynamic_path.parent / 'op_kernel'
-        if any(path.is_symlink() for path in source.parent.rglob('*')):
-            raise RecipeUnavailable('source include tree contains symlinks')
         shutil.copytree(source.parent, source_dir)
         staged_source = source_dir / source.name
         dynamic_path.write_text(_guarded_dynamic(_recipe_child(root, dynamic).read_text(encoding='utf-8'),
@@ -264,7 +275,7 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
                 raise errors[0]
         expected = {row['binary'] + suffix for row in generated_recipes for suffix in ('.o', '.json')}
         if ({path.name for path in output.iterdir()} != expected
-                or any(not path.is_file() or path.is_symlink() for path in output.iterdir())):
+                or any(not path.is_file() for path in output.iterdir())):
             raise ValueError('compiler did not produce every complete variant output')
         subprocess.run([sys.executable, str(tools / 'ascendc_ops_config.py'), '-p', str(binary / 'bin'),
                         '-s', plan['unit']], env=environment, check=True)

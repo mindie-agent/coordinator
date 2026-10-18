@@ -1,7 +1,24 @@
-"""Prepare the per-user container and a task work root from a named recipe.
+"""Per-user Ascend container provisioning and task work root entrypoints.
 
-This package owns bootstrap/image/smoke. Consumers pass host/image/user;
-they do not import workspace machine-management scripts.
+[Role]
+Orchestrates `provision_user_container` across host SSH key bootstrap, existing
+container verification (`existing_container.observe_existing`), host prerequisite
+probing, cooperative SSH port reservation, container creation, and metadata
+smoke readiness.
+
+[Invariants]
+- Requires an explicit image selector (`local-latest`, `rc`, `main`, `stable`,
+  or concrete image reference); rejects `auto` or bare `:latest`.
+- Records ready container endpoints in `MachineDirectory` only after metadata
+  smoke verification succeeds.
+
+[Timeouts & Locks]
+- Delegates bounded timeouts to `host_ops` (`60s` probe, `1800s` bootstrap,
+  `240s` smoke).
+
+[Side-Effect Policy]
+- Emits structured phase timings via `on_progress`; raises `MachineManagementError`
+  on any verification or reservation mismatch.
 """
 
 from __future__ import annotations
@@ -24,6 +41,7 @@ from mindie_coordinator.ready_runtime import safe_id, user_container_name
 from mindie_coordinator.user_identity import load_github_identity
 
 DEFAULT_WORKDIR = host_ops.DEFAULT_WORKDIR
+_namespace = host_ops._namespace
 
 
 def task_work_root(session_id: str) -> str:
@@ -189,7 +207,3 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "workdir": DEFAULT_WORKDIR,
         "state": "ready",
     }
-
-
-def _namespace(**values):
-    return type("Args", (), values)()

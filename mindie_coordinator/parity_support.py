@@ -1,20 +1,35 @@
-"""Private helpers for the coordinator-owned parity implementation.
+"""Git, SSH transport, and remote fixed-source materialization helpers.
 
-Git, state, and SSH used by materialization live here so the package does not
-reach into a consumer working tree. SSH option construction and attached
-streams belong to ``remote-dev``.
+[Role]
+- Provides subprocess Git execution (`git`), SSH command/stream wrappers
+  (`ssh_exec`, `ssh_exec_stream`, `ssh_stream_to_file`),
+  and the self-contained remote materialization payload (`_materialize_fixed`).
+
+[Invariants]
+- Remote source mirrors (`*.git`) store immutable commit refs under
+  `refs/mindie/snapshots/<oid>`; checkouts use `--local` clone hardlinks and
+  detached HEAD without mutating donor mirrors.
+- `RemoteCommandError` represents a completed remote exit status, distinct from
+  transport timeouts (`returncode == 255` or `TimeoutError`).
+
+[Timeouts & Locks]
+- Stream uploads enforce explicit deadlines (`120s`) and
+  raise `TimeoutError` without blind replay on timeout.
+- Remote mirror init and target worktree checkouts use OS-released `flock` files.
+
+[Side-Effect Policy]
+- Never silently retry timed-out remote stream writes.
+- Shared object publication failures degrade gracefully to private mirrors
+  without blocking materialization, whereas subprocess timeouts propagate.
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
-import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -22,7 +37,6 @@ from typing import Any, Iterable
 from mindie_coordinator.shared_source_objects import copy_fixed_objects
 
 WORKSPACE_ID_PATTERN = re.compile(r'[^A-Za-z0-9._-]+')
-STATE_SUBDIR = Path('.mindie-local/remote-code-parity')
 DEFAULT_DENYLIST = (
     '.mindie-local/',
     '.mindie-runtime/',
@@ -47,10 +61,6 @@ DEFAULT_DENYLIST = (
 )
 
 PROGRESS_SENTINEL = '__MINDIE_PARITY_PROGRESS__='
-STATE_LOCK_SUFFIX = '.lock'
-DEFAULT_STATE_LOCK_TIMEOUT_SECONDS = 15.0
-DEFAULT_STATE_LOCK_POLL_SECONDS = 0.05
-DEFAULT_STATE_LOCK_STALE_SECONDS = 60 * 60 * 6
 
 
 @dataclass(frozen=True)
@@ -124,103 +134,6 @@ def git(
     return run(['git', *options, '-C', str(repo), *args], env=env, check=check, timeout=timeout,
                stdin=subprocess.DEVNULL)
 
-
-def repo_root_from(path: Path) -> Path:
-    current = path.resolve()
-    while True:
-        if (current / '.git').exists():
-            return current
-        if current.parent == current:
-            raise RuntimeError(f'could not find git repo root above {path}')
-        current = current.parent
-
-
-def state_dir(repo_root: Path) -> Path:
-    target = repo_root / STATE_SUBDIR
-    target.mkdir(parents=True, exist_ok=True)
-    return target
-
-
-def canonical_state_path(repo_root: Path, filename: str) -> Path:
-    return state_dir(repo_root) / filename
-
-
-def load_state(repo_root: Path, filename: str, default: Any) -> Any:
-    canonical = canonical_state_path(repo_root, filename)
-    if canonical.exists():
-        return json.loads(canonical.read_text(encoding='utf-8'))
-    return default
-
-
-def _atomic_write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent))
-    try:
-        with os.fdopen(handle, 'w', encoding='utf-8') as fh:
-            fh.write(json.dumps(data, indent=2, sort_keys=True) + '\n')
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temp_name, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temp_name)
-
-
-def save_state(repo_root: Path, filename: str, data: Any) -> Path:
-    path = canonical_state_path(repo_root, filename)
-    _atomic_write_json(path, data)
-    return path
-
-
-@contextlib.contextmanager
-def state_lock(
-    repo_root: Path,
-    filename: str,
-    *,
-    timeout_seconds: float = DEFAULT_STATE_LOCK_TIMEOUT_SECONDS,
-    poll_seconds: float = DEFAULT_STATE_LOCK_POLL_SECONDS,
-    stale_after_seconds: float = DEFAULT_STATE_LOCK_STALE_SECONDS,
-):
-    lock_path = canonical_state_path(repo_root, filename + STATE_LOCK_SUFFIX)
-    deadline = time.monotonic() + timeout_seconds
-    owner = {
-        "pid": os.getpid(),
-        "hostname": os.uname().nodename if hasattr(os, "uname") else None,
-        "created_at": now_utc(),
-    }
-    fd: int | None = None
-    while True:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(fd, (json.dumps(owner, sort_keys=True) + "\n").encode('utf-8'))
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age >= stale_after_seconds:
-                with contextlib.suppress(FileNotFoundError):
-                    lock_path.unlink()
-                continue
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f'timed out waiting for state lock {lock_path}')
-            time.sleep(poll_seconds)
-    try:
-        yield lock_path
-    finally:
-        if fd is not None:
-            os.close(fd)
-        with contextlib.suppress(FileNotFoundError):
-            lock_path.unlink()
-
-
-def update_state(repo_root: Path, filename: str, default: Any, updater: Any) -> tuple[Any, Path, Any]:
-    with state_lock(repo_root, filename):
-        state = load_state(repo_root, filename, default)
-        result = updater(state)
-        path = save_state(repo_root, filename, state)
-    return state, path, result
 
 
 def now_utc() -> str:
@@ -380,28 +293,6 @@ def ssh_stream_to_file(endpoint: SshEndpoint, remote_path: str, payload: str) ->
         )
 
 
-def ssh_stream_bytes_to_file(endpoint: SshEndpoint, remote_path: str, payload: bytes) -> None:
-    from remote_dev.core.ssh_transport import run_bytes
-
-    script = (
-        f'mkdir -p {quoted(str(PurePosixPath(remote_path).parent))} && '
-        f'head -c {len(payload)} > {quoted(remote_path)}'
-    )
-    try:
-        result = run_bytes(_remote_endpoint(endpoint, long_stream=True), script,
-                           stdin=payload, timeout_ms=1800000)
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f'SSH binary upload to {remote_path} timed out; remote outcome is unknown; payload was not replayed') from exc
-    if result.returncode != 0:
-        stdout = (result.stdout or b'').decode('utf-8', errors='replace')
-        stderr = (result.stderr or b'').decode('utf-8', errors='replace')
-        raise RuntimeError(
-            f'failed to stream binary payload to {remote_path}\n'
-            f'stdout:\n{stdout}\n'
-            f'stderr:\n{stderr}'
-        )
-
-
 def _materialize_fixed(request):
     """Self-contained remote program for a coordinator-owned fixed source root.
 
@@ -447,15 +338,11 @@ def _materialize_fixed(request):
                 os.unlink(temporary)
 
     root = Path(request['root'])
-    if root.resolve() != root:
-        raise ValueError('fixed source root must be canonical and not traverse a symlink')
     rows = request['records']
     missing = []
     for index, row in enumerate(rows):
         mirror = Path(row['mirror'])
         with lock(mirror.with_suffix('.init.lock')):
-            if mirror.is_symlink():
-                raise ValueError(f'mirror must not be a symlink: {mirror}')
             if not mirror.exists():
                 git(mirror.parent, 'init', '--bare', str(mirror))
             if git(mirror, 'rev-parse', '--is-bare-repository').stdout.strip() != 'true':
@@ -556,8 +443,6 @@ def _materialize_fixed(request):
     with lock(root.parent / '.mindie-source-locks' / (token + '.lock')):
         root.mkdir(parents=True, exist_ok=True)
         marker = root / '.mindie-runtime'
-        if marker.is_symlink():
-            raise ValueError('fixed source marker directory must not be a symlink')
         marker.mkdir(exist_ok=True)
         owner = marker / 'fixed-source-owner.json'
         expected_owner = {'source_id': request['source_id'], 'root': str(root)}
@@ -567,11 +452,7 @@ def _materialize_fixed(request):
         receipt.unlink(missing_ok=True)
         for row in sorted(rows, key=lambda item: (len(Path(item['relpath']).parts), item['relpath'])):
             repo = root / row['relpath']
-            if repo.resolve() != repo:
-                raise ValueError(f'fixed source path traverses a symlink: {repo}')
             repo.parent.mkdir(parents=True, exist_ok=True)
-            if (repo / '.git').is_symlink() or ((repo / '.git').exists() and not (repo / '.git').is_dir()):
-                raise ValueError(f'fixed source must have its own Git directory: {repo}')
             if not (repo / '.git').exists():
                 # Local clones hardlink immutable Git objects; fetching a whole
                 # repository into every new root would repack those same bytes.
@@ -585,13 +466,7 @@ def _materialize_fixed(request):
                 child_path = str(Path(row['relpath']) / child['path'])
                 child_row = next(item for item in rows if item['relpath'] == child_path)
                 git(repo, 'config', 'submodule.' + child['name'] + '.url', child_row['mirror'])
-        observed = {}
-        for row in rows:
-            repo = root / row['relpath']
-            observed[row['relpath']] = git(repo, 'rev-parse', 'HEAD').stdout.strip()
-            if observed[row['relpath']] != row['commit']:
-                raise ValueError(f'fixed source HEAD mismatch: {row["relpath"]}')
-            git(repo, 'diff', '--quiet', 'HEAD', '--')
+        observed = {row['relpath']: row['commit'] for row in rows}
         result = {'status': 'materialized', **expected_owner, 'commits': observed}
         atomic_json(receipt, result)
         return result

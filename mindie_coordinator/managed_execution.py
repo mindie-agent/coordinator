@@ -1,7 +1,27 @@
-"""Persisted execution supervision on the existing runtime/host authorities.
+"""Persisted execution supervision across RuntimePool, remote-dev, and host NPU leases.
 
-This is a bounded job state machine, not a workflow engine. Remote-dev owns
-process receipts; RuntimePool owns checkouts; the host owns physical NPU leases.
+[Role]
+Mixin on `RuntimePool` that drives bounded managed jobs (`pending -> queued ->
+waiting/running -> stopping/releasing -> terminal`) across remote subreaper
+process receipts and host NPU leases.
+
+[Invariants]
+- A lease cannot be released (`_finish_managed`) until the remote subreaper
+  confirms `observed["quiet"] is True` (all descendants drained).
+- Stop/cancellation intent (`cancel_requested`, `force`) is monotonic and
+  preserved across concurrent advancements (`_save_managed`).
+
+[Timeouts & Locks]
+- Uses per-job entity locks (`_entity_lock("job", key)`) so remote probes for
+  one job never block another job's lease heartbeat or advancement.
+- `managed_tick` advances up to 4 non-terminal jobs concurrently via
+  `ThreadPoolExecutor`.
+
+[Side-Effect Policy]
+- Deterministic validation failures raise `ExecutionRequestError` and transition
+  immediately to `failed`.
+- Transient/transport errors record `state="uncertain"` without replaying
+  prepared or running commands.
 """
 from __future__ import annotations
 

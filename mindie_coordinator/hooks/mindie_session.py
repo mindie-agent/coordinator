@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Native-client session attachment hook. Local only; never contacts the fleet."""
+"""Native-client session attachment hook. Local only; never contacts the fleet.
+
+[Role] Adapts Claude Code, Codex, Cursor, Kimi, and OpenCode session hooks to local `AgentSessions` records.
+[Invariants] Cross-client payload discriminators prevent foreign IDE hooks from clobbering active sessions.
+[Timeouts & Locks] Local `git rev-parse` bounded to `2s`; `AgentSessions` file lock for session state updates.
+[Side-Effect Policy] Local session state and environment file updates only; zero network I/O.
+"""
 from __future__ import annotations
 
 import argparse

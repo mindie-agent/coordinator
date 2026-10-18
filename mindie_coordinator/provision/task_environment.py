@@ -1,8 +1,23 @@
-"""Isolated task work roots: sources, interpreter, installs, verified profile.
+"""Isolated task work roots, task-owned venv creation, and preparation reuse.
 
-A donor container/SSH endpoint may be reused. Donor site-packages, editable
-references and build artifacts are never mutated. Immutable image packages
-may be visible through ``venv --system-site-packages``.
+[Role]
+Prepares isolated per-task execution roots (`/vllm-workspace/executions/...`),
+creates task-owned virtualenvs (`--system-site-packages` over immutable image
+packages without mutating donor site-packages), qualifies reusable native or
+dependency preparation artifacts, and registers ready runtimes in `RuntimePool`.
+
+[Invariants]
+- Task interpreter (`<root>/.venv/bin/python`) is never the donor interpreter.
+- Registration in `RuntimePool` occurs only after `backend.prepare_task_root`
+  returns a verified profile.
+
+[Timeouts & Locks]
+- Raises `TaskRootBusy` if the deterministic task root is currently bound by an
+  active execution rather than overwriting or bricking the root.
+
+[Side-Effect Policy]
+- Reuses donor container SSH endpoint read-only; all writes occur inside the
+  isolated task execution root or shared `.mindie-runtime` cache.
 """
 
 from __future__ import annotations

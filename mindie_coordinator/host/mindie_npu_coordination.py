@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
-"""Cooperative host-local NPU task coordination.
+"""Cooperative host-local NPU task coordination and lease state machine.
 
-The coordinator is deliberately advisory.  It gives independent MindIE agents a
-shared queue and lease ledger on one host, but it does not prevent an operator
-or a non-participating process from using an NPU. Observed occupancy blocks
-admission unless a request explicitly allows external use of one named device.
-Managed leases, holds, owned processes and service ports remain protected.
+[Role]
+Stdlib-only host script executed on bare-metal Ascend servers via `HostQueue`.
+Maintains a SQLite-backed cooperative FIFO queue, physical NPU lease ledger,
+fencing tokens, TCP port reservations (`container_ssh` and `service`), holds,
+and peer coordination messages under `/tmp/mindie-npu-coordinator/v1`.
 
-The module is stdlib-only because the agent-facing wrapper sends this source to
-the bare-metal host and executes it there.  State defaults to
-``/tmp/mindie-npu-coordinator/v1`` (override with ``MINDIE_NPU_COORDINATOR_STATE_DIR``
-or ``request["state_dir"]``) and is expected to disappear after a host or
-``/tmp`` reset; a missing database simply starts a new coordination epoch.
+[Invariants]
+- Physical NPU allocation identity is resolved from `npu-smi info` device/chip
+  tables (`Phy-ID` on A3/multi-Die, header NPU ID on single-chip A2).
+- Leases transition `queued -> granted -> starting -> active -> released`
+  (or `orphaned_busy` if processes/hardware/ports remain busy at release/expiry).
+- Managed jobs with `process_guard` (`REMOTE_DEV_JOB_TOKEN`) cannot be released
+  until `/proc` confirms no live non-zombie process carries the marker AND
+  `completion_confirmed=True` (when `retain_until_release=True`).
+
+[Timeouts & Locks]
+- SQLite connection uses `WAL`, `synchronous=FULL`, `busy_timeout=30000`, and
+  `BEGIN IMMEDIATE` transactions.
+- Subprocess probes (`docker inspect`, `docker top`, `ss`, `npu-smi`) use
+  bounded timeouts (`5s`–`15s`).
+
+[Side-Effect Policy]
+- Advisory and non-destructive: never kills host processes or mutates containers;
+  observed external occupancy blocks admission unless `allow_external_busy=True`
+  is explicitly requested for a single named physical device.
 """
 
 from __future__ import annotations
@@ -61,17 +75,6 @@ DEFAULT_ESTIMATED_DURATION_SECONDS = 3600
 HBM_BUSY_THRESHOLD_MB = 4096
 JOB_TOKEN_ENV = "REMOTE_DEV_JOB_TOKEN"
 
-TASK_STATES = {
-    "queued",
-    "granted",
-    "starting",
-    "active",
-    "orphaned_busy",
-    "released",
-    "expired",
-    "cancelled",
-}
-RESERVING_TASK_STATES = {"granted", "starting", "active", "orphaned_busy"}
 PORT_KINDS = {"container_ssh", "service"}
 CONTAINER_SSH_TASK_PREFIX = "ssh."
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$")
@@ -84,38 +87,6 @@ class CoordinationError(RuntimeError):
         super().__init__(message)
         self.error_code = error_code
         self.port = port
-
-
-def _container_alive(container_name: str, *, timeout: float = 5) -> dict[str, Any] | None:
-    """Inspect a container with a bounded timeout so a wedged Docker daemon cannot lock the host."""
-    try:
-        raw = subprocess.check_output(
-            ["docker", "inspect", "--format", "{{json .}}", container_name],
-            text=True,
-            encoding="utf-8",
-            timeout=timeout,
-        )
-        info = json.loads(raw)
-        return info if isinstance(info, dict) else None
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, ValueError):
-        return None
-
-
-def _container_has_process(container_id: str, *, timeout: float = 5) -> list[str]:
-    """List container PIDs via `docker top` with a bounded timeout."""
-    try:
-        out = subprocess.check_output(
-            ["docker", "top", container_id, "-eo", "pid"],
-            text=True,
-            encoding="utf-8",
-            timeout=timeout,
-        )
-        return out.splitlines()[1:]
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
-        return []
-
-
-_container_has_Process = _container_has_process
 
 
 def prepared_supervisor_host_pid(prepared: dict, process_guard: dict | None) -> int:
@@ -383,58 +354,6 @@ def probe_listening_ports() -> dict[str, Any]:
             "source": command[0],
         }
     return {"status": "failed", "error": last_error, "ports": []}
-
-
-def probe_named_container(name: str) -> dict[str, Any]:
-    """Report whether a docker container name exists and is running."""
-    if not name:
-        return {"status": "ok", "exists": False, "running": False, "name": name}
-    try:
-        listed = subprocess.run(
-            ["docker", "container", "ls", "-a", "--format", "{{.Names}}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"status": "failed", "error": str(exc), "exists": None, "running": None, "name": name}
-    if listed.returncode != 0:
-        return {
-            "status": "failed",
-            "error": "host Docker state unavailable",
-            "exists": None,
-            "running": None,
-            "name": name,
-            "stderr": (listed.stderr or listed.stdout)[-2000:],
-        }
-    exists = name in listed.stdout.splitlines()
-    running = False
-    if exists:
-        try:
-            inspected = subprocess.run(
-                ["docker", "inspect", "--type", "container", name],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return {"status": "failed", "error": str(exc), "exists": True, "running": None, "name": name}
-        if inspected.returncode != 0:
-            return {
-                "status": "failed",
-                "error": "docker inspect failed",
-                "exists": True,
-                "running": None,
-                "name": name,
-            }
-        try:
-            payload = json.loads(inspected.stdout)
-            running = bool(payload[0]["State"]["Running"])
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            return {"status": "failed", "error": str(exc), "exists": True, "running": None, "name": name}
-    return {"status": "ok", "exists": exists, "running": running, "name": name}
 
 
 def _parse_npu_smi_device_table(

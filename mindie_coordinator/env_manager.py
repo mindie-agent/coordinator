@@ -1,8 +1,22 @@
 """SSH host, container, hardware probe, and NPU lease operations for mindie-coordinator.
 
-Exposes the four environment management tools (`mindie.hosts`, `mindie.probe`,
-`mindie.container`, `mindie.lease`) that turn `coordinator` into an upgraded
-SSH and Ascend remote environment manager integrated with `remote-dev`.
+[Role]
+Implements the four direct environment management handlers (`handle_hosts`,
+`handle_probe`, `handle_container`, `handle_lease`) backing `mindie.hosts`,
+`mindie.probe`, `mindie.container`, and `mindie.lease`.
+
+[Invariants]
+- `handle_hosts` and `handle_container` keep `<state_dir>/machines.json` and
+  `<state_dir>/remote_dev_endpoints.json` synchronized atomically.
+- `handle_lease` delegates card allocation and fencing to `HostQueue` and caches
+  lease metadata (`fence_token`, `coordination_epoch`, `devices`) in `leases.json`.
+
+[Timeouts & Locks]
+- Delegates remote execution to `fleet_probe`, `host_ops`, and `HostQueue`.
+
+[Side-Effect Policy]
+- Persists `machines.json`, `remote_dev_endpoints.json`, and `leases.json` via
+  atomic `.tmp` + `replace()`.
 """
 
 from __future__ import annotations

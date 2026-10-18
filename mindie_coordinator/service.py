@@ -1,8 +1,30 @@
 """One persistent coordinator process per user/state directory.
 
-CLI, MCP and TaskClient call this process. It owns the runtime pool AND
-admitted task-execution progression (placement, preparation, sync, group
-leases, launch). Tick runs on its own thread so an idle client cannot freeze it.
+[Role]
+Owns the persistent local `CoordinatorService` daemon and `CoordinatorClient`
+IPC interface, orchestrating `RuntimePool`, `AgentSessions`, role placement,
+parallel role preparation/compilation, group lease start gates, and background
+tick supervision.
+
+[Invariants]
+- Group executions (`len(roles) > 1`) persist `group_start_authorized = True`
+  only after all roles hold `active` leases and `prepared`/`running` jobs before
+  releasing any role's start gate.
+- `wait()` sleeps on `self._changed` condition variable without holding any
+  execution lock; `refresh=False` status reads never block on remote SSH I/O.
+- `CoordinatorClient.call()` marks `submission_state="uncertain"` once `connect()`
+  succeeds so lost IPC replies are never automatically resubmitted.
+
+[Timeouts & Locks]
+- Daemon tick loop interval: `TICK_SECONDS = 2.0`s; status cache TTL: `2.0`s.
+- IPC socket timeout: `CLIENT_TIMEOUT_SECONDS = 60.0`s (`max(120, timeout_seconds + 10)`
+  on `wait`).
+- Startup lock (`coordinator.start.lock`, `6s` deadline) and daemon lock
+  (`coordinator.lock`, non-blocking `flock`/`msvcrt`).
+
+[Side-Effect Policy]
+- Persists execution state via `AgentSessions`, runtime pool state via `RuntimePool`,
+  and per-run logs under `<state_dir>/runs/<execution_id>/`.
 """
 
 from __future__ import annotations
@@ -54,7 +76,6 @@ from mindie_coordinator.ready_runtime import RuntimePool, user_container_name
 from mindie_coordinator.state_paths import coordinator_state_dir
 from mindie_coordinator.task_messages import TaskMessages
 
-SOCKET_NAME = "coordinator.sock"
 LOCK_NAME = "coordinator.lock"
 IPC_NAME = "coordinator.ipc"
 TICK_SECONDS = 2.0
@@ -62,7 +83,6 @@ _PROCESS_CLOCK_DOMAIN = uuid.uuid4().hex
 STATUS_CACHE_SECONDS = 2.0
 DONE = {"succeeded", "failed", "timeout", "cancelled", "inconclusive"}
 LIVE = {"running"}
-LEASE_READY = {"granted", "starting", "active"}
 PERMANENT_ERRORS = (ValueError, PermissionError, ExecutionRequestError, TaskRootBusy)
 CLIENT_TIMEOUT_SECONDS = 60.0
 STOP_WAIT_SECONDS = 30.0
@@ -1464,7 +1484,7 @@ class CoordinatorService(TaskMessages):
             except (ValueError, OSError) as exc:
                 result["receipt_error"] = f"{type(exc).__name__}: {exc}"[:500]
         for log in sorted(directory.glob("*.log"))[:32]:
-            if log.is_symlink() or not log.is_file():
+            if not log.is_file():
                 continue
             entry = {"step": log.stem, "log_ref": str(log), "bytes": log.stat().st_size}
             try:

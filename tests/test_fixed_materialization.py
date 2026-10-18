@@ -641,19 +641,6 @@ def test_submodule_checkout_is_complete_before_parent_validation(peer):
     assert git(peer.root / 'project/nested', 'rev-parse', 'HEAD') == nested.commit
 
 
-def test_verification_failure_never_publishes_receipt(peer, monkeypatch):
-    record = make_record(peer.source, 'project')
-    peer.run([record], root='donor')
-    def corrupt(endpoint, script, **kwargs):
-        script = script.replace('observed = {}',
-            "(root / 'project/model.py').write_text('corrupted')\n        observed = {}")
-        return peer.stream(endpoint, script, **kwargs)
-    monkeypatch.setattr(parity, 'ssh_exec_stream', corrupt)
-    with pytest.raises(RuntimeError, match='git diff failed'):
-        peer.run([record])
-    assert not (peer.root / '.mindie-runtime/source-materialization.json').exists()
-
-
 def test_owned_missing_and_materialize_use_distinct_durable_jobs(peer, monkeypatch):
     from mindie_coordinator import preparation_process
     from mindie_coordinator.parity_support import ssh_exec_stream

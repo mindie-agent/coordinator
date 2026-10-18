@@ -42,22 +42,20 @@ def test_remote_profile_absolute_paths_do_not_depend_on_client_os():
 
 def test_remote_upload_uses_posix_parent_and_exact_bytes(monkeypatch):
     from types import SimpleNamespace
-    from mindie_coordinator.parity_support import SshEndpoint, ssh_stream_to_file, ssh_stream_bytes_to_file
+    from mindie_coordinator.parity_support import SshEndpoint, ssh_stream_to_file
     calls = []
 
     def capture(endpoint, script, *, stdin, timeout_ms):
         assert endpoint.keepalive is True
         assert endpoint.ssh_mux is False
-        assert timeout_ms in (120000, 1800000)
+        assert timeout_ms == 120000
         calls.append((script, stdin))
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr("remote_dev.core.ssh_transport.run_bytes", capture)
     endpoint = SshEndpoint(host="example.invalid", port=22, user="test")
     ssh_stream_to_file(endpoint, "/tmp/nested path/manifests/test.json", "中文\n")
-    ssh_stream_bytes_to_file(endpoint, "/tmp/nested path/bundles/test.bundle", bytes(range(256)))
     assert calls[0] == ("mkdir -p '/tmp/nested path/manifests' && cat > '/tmp/nested path/manifests/test.json'", "中文\n".encode())
-    assert calls[1] == ("mkdir -p '/tmp/nested path/bundles' && head -c 256 > '/tmp/nested path/bundles/test.bundle'", bytes(range(256)))
 
 
 def test_unicode_worktree_binding_snapshot_and_cli(tmp_path):

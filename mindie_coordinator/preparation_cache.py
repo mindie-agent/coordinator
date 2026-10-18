@@ -1,8 +1,22 @@
 """Same-container preparation reuse, executed inside a fresh execution view.
 
-Published roots are never modified. Venvs stay at their original absolute path;
-native reuse shares that interpreter and overlays fully copied package outputs.
-Native changes copy only dependency packages into a fresh venv before building.
+[Role]
+Manages same-container native/dependency view reuse (`prepare_native_view`,
+`copy_native_view`, `copy_dependencies`) and host-shared `/tmp/mindie-native-cache`
+bundle store/restore/rollback (`store_shared_native`, `restore_shared_native`,
+`discard_shared_native`).
+
+[Invariants]
+- Published donor roots are never mutated; venvs stay at their original absolute
+  path while native reuse overlays copied package outputs and generated `.dist-info`.
+- `discard_shared_native` rolls back only cache-created files listed in
+  `.mindie-runtime/shared-native.json` before execution starts.
+
+[Timeouts & Locks]
+- Shared cache index updates use `tempfile.mkstemp` + atomic `os.replace`.
+
+[Side-Effect Policy]
+- Writes only inside the new execution view root or `/tmp/mindie-native-cache`.
 """
 from __future__ import annotations
 
