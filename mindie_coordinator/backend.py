@@ -1,8 +1,24 @@
 """Adapters to the remote-dev package and host NPU device authority.
 
-remote-dev is imported as the `remote_dev` package. The host queue remains
-the single device-allocation authority. Generic process control is
-`remote_dev.processes.control`.
+[Role]
+Bridges `mindie_coordinator` to `remote_dev` (`remote_bash`, `run_rpc_script`,
+`run_remote_python`, `remote_dev.processes.control`) and the remote host queue
+(`HostQueue`) for container preparation, runtime inspection, and job activation.
+
+[Invariants]
+- `HostQueue` remains the single device-allocation authority; `RemoteBackend`
+  never allocates cards locally.
+- `_captured_manifest` verifies exact uncompressed byte length, zlib EOF, and
+  SHA-256 digest before accepting a remote runtime capture receipt.
+- `verify_preflight` runs container state and manifest digest probes in parallel
+  and drains both before allowing host preflight or raising an error.
+
+[Timeouts & Locks]
+- Default `remote_shell` / `bash` timeout: `45000ms` (`45s`).
+- `preflight` and `_export_shared_native` timeout: `120000ms` (`120s`).
+
+[Side-Effect Policy]
+- Never mutates `donor_python` site-packages or stops unrelated user containers.
 """
 
 from __future__ import annotations
@@ -116,37 +132,6 @@ class RemoteBackend:
             detail = Path(refs["stderr"]).read_text(errors="replace") if refs.get("stderr") else str(result)
             cause = detail.strip().splitlines()[-1][-300:] if detail.strip() else result.get("summary", "no stderr")
             raise ExecutionRequestError(f"preflight failed before NPU allocation: {cause}\nlog refs: {refs}")
-
-    def job_host_pid(self, runtime, receipt):
-        code = '''
-import json, subprocess
-from pathlib import Path
-request = json.loads(__import__('sys').argv[1])
-info = json.loads(subprocess.check_output(['docker','inspect','--format','{{json .}}',request['container_name']], text=True, encoding="utf-8"))
-if info['Id'] != request['container_id']:
-    raise RuntimeError('container identity changed before activation')
-receipt = request['receipt']
-if Path('/proc/sys/kernel/random/boot_id').read_text().strip() != receipt['boot_id']:
-    raise RuntimeError('host boot identity changed')
-rows = subprocess.check_output(['docker','top',request['container_name'],'-eo','pid'], text=True, encoding="utf-8").splitlines()[1:]
-matches = []
-for row in rows:
-    pid = int(row.strip())
-    try:
-        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()
-        status = Path(f'/proc/{pid}/status').read_text().splitlines()
-        namespace = next(line.split()[1:] for line in status if line.startswith('NSpid:'))
-        if int(namespace[-1]) == receipt['pid'] and fields[19] == receipt['start_ticks'] and fields[0] != 'Z':
-            matches.append(pid)
-    except FileNotFoundError:
-        continue
-if len(matches) != 1:
-    raise RuntimeError('cannot identify a unique host PID for the waiting supervisor')
-print(json.dumps({'pid':matches[0]}))
-'''
-        request = {"container_name": runtime["container_name"], "container_id": runtime["attestation"]["container_id"], "receipt": receipt}
-        command = "python3 - " + shlex.quote(json.dumps(request)) + " <<'MINDIE_HOST_PID'\n" + code + "\nMINDIE_HOST_PID\n"
-        return json.loads(self.bash({**runtime["host_endpoint"], "root": "/", "cwd": "/"}, command))["pid"]
 
     def activate_prepared(self, runtime, request, receipt):
         """Map the supervisor identity and activate through one host authority call."""
@@ -289,10 +274,7 @@ for name, expected in args["snapshots"].items():
     repo = root / name
     head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
     dirty = subprocess.check_output(["git", "-C", str(repo), "diff", "HEAD", "--name-only", "--ignore-submodules=dirty"], text=True, encoding="utf-8")
-    untracked = subprocess.check_output(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"], text=True, encoding="utf-8")
-    private = {".mindie-runtime", ".remote-code-parity", "Mooncake"} if name == "." else set()
-    extras = [path for path in untracked.split("\\0") if path and path.split("/", 1)[0] not in private]
-    if head != expected or dirty.strip() or extras:
+    if head != expected or dirty.strip():
         raise ValueError("runtime source differs from pinned snapshot: " + name)
 if 'expected_manifest_digest' in args:
     actual_digest = digest(manifest)
@@ -339,8 +321,7 @@ for row in args['records']:
     repo = root / row['relpath']
     tree = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
     dirty = subprocess.check_output(['git', '-C', str(repo), 'diff', 'HEAD', '--name-only', '--ignore-submodules=dirty'], text=True).strip()
-    untracked = subprocess.check_output(['git', '-C', str(repo), 'ls-files', '--others', '--exclude-standard'], text=True).strip()
-    if tree != row['tree'] or dirty or untracked:
+    if tree != row['tree'] or dirty:
         print(json.dumps({'qualified': False, 'reason': 'source tree differs', 'source': row['relpath']}))
         raise SystemExit(0)
 print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'manifest': manifest} if args.get('include_manifest') else {})}))

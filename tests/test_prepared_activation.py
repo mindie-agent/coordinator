@@ -112,7 +112,7 @@ def test_prepared_activation_keeps_fence_epoch_deadline_and_guard_checks(authori
     elif failure == "epoch":
         request["coordination_epoch"] = "another-epoch"
     elif failure == "deadline":
-        clock[0] += 61
+        clock[0] += host.DEFAULT_START_TTL_SECONDS + 1
     else:
         state["marker"] = "b" * 32
     with pytest.raises(host.CoordinationError):
@@ -121,6 +121,23 @@ def test_prepared_activation_keeps_fence_epoch_deadline_and_guard_checks(authori
     # Read without housekeeping: rejection must not write an active task.
     with coordinator._transaction() as connection:
         assert coordinator._task_row(connection, "cpu-task")["state"] == "starting"
+
+
+@pytest.mark.parametrize("failing_cmd", ["inspect", "top"])
+def test_prepared_activation_enforces_5s_timeout_on_docker_inspect_and_top(supervisor, monkeypatch, failing_cmd):
+    prepared, guard, state = supervisor
+    seen_timeouts = []
+
+    def timed_docker(argv, **kwargs):
+        seen_timeouts.append((argv[1], kwargs.get("timeout")))
+        if argv[1] == failing_cmd:
+            raise host.subprocess.TimeoutExpired(argv, kwargs.get("timeout", 5))
+        return json.dumps({"Id": state["container_id"]})
+
+    monkeypatch.setattr(host.subprocess, "check_output", timed_docker)
+    with pytest.raises(host.CoordinationError, match=f"docker {failing_cmd} timed out"):
+        host.prepared_supervisor_host_pid(prepared, guard)
+    assert all(timeout == 5 for _, timeout in seen_timeouts)
 
 
 def test_explicit_pid_activation_keeps_legacy_path(authority, monkeypatch):

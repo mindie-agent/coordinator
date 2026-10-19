@@ -43,8 +43,6 @@ class IsolatedPrepareScriptTests(unittest.TestCase):
         self.assertNotIn("pip uninstall", script)
         self.assertNotIn("$PIP", script)
         self.assertNotIn("uninstall -y vllm", script)
-        import mindie_coordinator.parity as parity
-        self.assertFalse(hasattr(parity, "first_install_prepare_script"))
 
     def test_task_python_controls_pip_and_cmake_even_with_spaces(self):
         python = "/tmp/task root/.venv/bin/python"

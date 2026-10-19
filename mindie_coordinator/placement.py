@@ -1,8 +1,9 @@
 """Choose hosts and prepared roots from attested catalog + constraints.
 
-The host NPU coordinator remains the only device/port authority. This module
-never relaxes topology, recipe, ABI or hardware constraints, and never starts
-a partial group.
+[Role] Pure constraint solver mapping environment/resource/topology requirements to attested host candidates.
+[Invariants] Never relaxes topology, recipe, ABI, or hardware constraints, and never starts a partial multi-role group.
+[Timeouts & Locks] Pure in-memory evaluation; zero I/O or locks.
+[Side-Effect Policy] Side-effect free.
 """
 
 from __future__ import annotations

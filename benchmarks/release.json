@@ -1,0 +1,15 @@
+{
+  "schema_version": "mindie-release-suite/1",
+  "suite": "core",
+  "publishable": true,
+  "cases": [
+    {
+      "id": "two-role-placement",
+      "kind": "microbenchmark",
+      "required": true,
+      "repetitions": 5,
+      "timeout_seconds": 20,
+      "command": ["{python}", "benchmarks/release.py"]
+    }
+  ]
+}

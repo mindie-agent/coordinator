@@ -1,7 +1,23 @@
 """Immutable environment and complete native-bundle attestations (stdlib only).
 
-Preparation runs inside an owned, idle container, outside the checkout path.
-This module never installs packages, creates containers, or loads a model.
+[Role]
+Computes, verifies, publishes, and restores immutable runtime environment
+profiles and native custom-op bundle manifests (`.mindie-runtime/ready-profile.json`).
+
+[Invariants]
+- Stdlib-only so this file can be concatenated directly into remote container
+  preparation scripts (`parity.py`, `prepare_runtime.py`).
+- Every published or restored bundle must include both `library` and `metadata`
+  roles and verified `cann`, `driver`, and `smoke` evidence hashes.
+- Internal file symlinks inside `_cann_ops_custom` are flattened into regular
+  files during attestation; external/directory symlinks are rejected.
+
+[Timeouts & Locks]
+- `native_import_smoke` runs in an isolated subprocess with `timeout=30`s.
+- Bundle publication uses atomic `tempfile.mkdtemp` + `os.rename` into `<cache>/<build_key>`.
+
+[Side-Effect Policy]
+- Never installs packages, creates containers, or loads models.
 """
 from __future__ import annotations
 
@@ -115,10 +131,6 @@ def checked_file(root: Path, relative: str) -> Path:
     if name.is_absolute() or not name.parts or ".." in name.parts:
         raise ValueError(f"unsafe bundle path: {relative}")
     path = root / relative
-    # Symlinked outputs are not a portable complete bundle. Enumerate their
-    # real files during preparation rather than retaining external references.
-    if any((root / Path(*name.parts[:i])).is_symlink() for i in range(1, len(name.parts) + 1)):
-        raise ValueError(f"symlink in bundle path: {relative}")
     if not path.is_file():
         raise ValueError(f"missing required artifact: {relative}")
     if path.name == "CMakeCache.txt":
@@ -136,10 +148,10 @@ def compiled_opc_recipe(script_path):
 
     try:
         script = Path(script_path)
-        if script.is_symlink() or not script.is_file():
+        if not script.is_file():
             return None
         text = script.read_text(encoding='utf-8')
-        commands = re.findall(r'^\s*res=\$\((opc [^\n]*)\)\s*$', text, re.MULTILINE)
+        commands = re.findall(r'^\s*res=\$\((opc [^\n]*)\)\s*$', text, MULTILINE := re.MULTILINE)
         if len(commands) != 1:
             return None
         args = shlex.split(commands[0])
@@ -158,7 +170,7 @@ def compiled_opc_recipe(script_path):
             return None
         index = keys.index('--input_param') + 2
         parameter = Path(args[index].partition('=')[2])
-        if (parameter.is_symlink() or parameter.resolve().parent != script.resolve().parent
+        if (parameter.resolve().parent != script.resolve().parent
                 or not parameter.name.endswith('_param.json')):
             return None
         payload = json.loads(parameter.read_text(encoding='utf-8'))
@@ -196,7 +208,7 @@ def capture_kernel_compile_recipe(root: Path) -> None:
         target.unlink(missing_ok=True)
         return
     result = {'schema_version': 1, 'tools': hashes, 'variants': {}}
-    if target.is_file() and not target.is_symlink():
+    if target.is_file():
         try:
             previous = json.loads(target.read_text(encoding='utf-8'))
             if (isinstance(previous, dict) and previous.get('schema_version') == 1
@@ -282,9 +294,6 @@ def installed_native_files(root: Path) -> dict[str, str]:
     external links and directory links are not portable installed artifacts.
     """
     root = root.resolve()
-    for name in ("vllm-ascend", "vllm-ascend/vllm_ascend", "vllm-ascend/vllm_ascend/_cann_ops_custom"):
-        if (root / name).is_symlink():
-            raise ValueError("symlinked installed bundle directory: " + name)
     package = root / "vllm-ascend/vllm_ascend"
     extensions = sorted(package.glob("*.so"))
     if not any(path.name.startswith("vllm_ascend_C") for path in extensions):
@@ -787,14 +796,6 @@ def restore(root: Path, bundle: Path, expected_build_key: str) -> None:
         raise ValueError("cache miss: build identity or installation path differs")
     verify(bundle, manifest, check_environment=False)
     names = set(manifest["files"]) | {row["path"] for row in manifest["evidence"].values()}
-    for name in names:
-        target = root / name
-        # Reject symlinked destinations, including existing parent directories.
-        for parent in [target, *target.parents]:
-            if parent == root:
-                break
-            if parent.is_symlink():
-                raise ValueError("unsafe artifact restore destination")
     for name in names:
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)

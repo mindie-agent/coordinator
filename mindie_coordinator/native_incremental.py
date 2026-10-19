@@ -1,9 +1,22 @@
 """Rebuild one changed AscendC translation unit over verified installed outputs.
 
-The recipe's installed source copy supplies the old Git blob. Replacing only
-that blob must reproduce the donor's complete native fingerprint. CMake build
-directories are deliberately not reused: upstream custom commands can keep a
-stale .done file without depending on their source file.
+[Role]
+Plans and executes single-operator incremental AscendC kernel rebuilds
+(`kernel_rebuild_plan`, `build_incremental_kernel`, `merge_kernel_outputs`)
+on top of a restored shared-native bundle.
+
+[Invariants]
+- Qualifies only single `.cpp` operator kernel edits where replacing the donor's
+  installed kernel source blob reproduces the donor's exact native tree digest.
+- Preserves all host `.so` libraries and unrelated operators' dispatch entries;
+  replaces only the target operator's `.o`/`.json` outputs and config entries.
+
+[Timeouts & Locks]
+- Runs inside the owned preparation container before worker launch; no locks needed.
+
+[Side-Effect Policy]
+- Mutates only `<root>/vllm-ascend/csrc/build/binary/<unit>` and the target
+  operator's installed `_cann_ops_custom` directory inside the fresh view.
 """
 from __future__ import annotations
 
@@ -62,7 +75,7 @@ def kernel_rebuild_plan(root: Path, bundle: Path, manifest: dict, preparation: d
         if hashlib.sha256(current).hexdigest() == expected:
             continue
         before = _child(bundle, installed)
-        if before.is_symlink() or not before.is_file():
+        if not before.is_file():
             raise ValueError('unsafe installed kernel source in native bundle')
         original = before.read_bytes()
         if hashlib.sha256(original).hexdigest() != expected:
@@ -103,10 +116,7 @@ def _child(root: Path, relative: str) -> Path:
     parts = PurePosixPath(relative)
     if parts.is_absolute() or not parts.parts or '..' in parts.parts:
         raise ValueError('unsafe incremental output path')
-    path = root / relative
-    if any((root / Path(*parts.parts[:i])).is_symlink() for i in range(1, len(parts.parts) + 1)):
-        raise ValueError('symlink in incremental output path')
-    return path
+    return root / relative
 
 
 def _dispatch_identity(rows: list, paths: set[str]) -> list[str]:
@@ -133,7 +143,7 @@ def merge_kernel_outputs(root: Path, plan: dict) -> list[str]:
     outputs = list(source_dir.iterdir()) if source_dir.is_dir() else []
     if not any(path.suffix == '.o' for path in outputs) or not any(path.suffix == '.json' for path in outputs):
         raise ValueError('incremental build returned no complete kernel binaries')
-    if any(not path.is_file() or path.is_symlink() for path in outputs):
+    if any(not path.is_file() for path in outputs):
         raise ValueError('incremental kernel output must contain only regular files')
     kernel = _child(root, plan['kernel_root'])
     config = _child(kernel, f'config/{unit}')

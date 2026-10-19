@@ -1,8 +1,25 @@
 #!/usr/bin/env python3
-"""Host/container bootstrap scripts owned by mindie-coordinator.
+"""Host and container bootstrap operations owned by mindie-coordinator.
 
-Ported from the workspace machine-management helpers. SSH argv construction
-uses remote-dev; this module does not import consumer `.agents/` code.
+[Role]
+Resolves Ascend container image selectors (`local-latest`, `rc`, `main`,
+`stable`, or explicit non-`latest` tags), renders host/container bootstrap
+and smoke scripts, and executes bounded remote provisioning steps via `remote-dev`.
+
+[Invariants]
+- Never allows bare image repositories or moving `:latest` tags.
+- `run_remote_script` uses `remote-dev` transport (`run_rpc_script` for reusable
+  probes, `run_stream` for long-running bootstrap/install flows).
+
+[Timeouts & Locks]
+- Probe timeout: `DEFAULT_PROBE_TIMEOUT_SECONDS` (60s).
+- Container bootstrap timeout: `DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS` (1800s).
+- Smoke timeout: `DEFAULT_SMOKE_TIMEOUT_SECONDS` (240s).
+
+[Side-Effect Policy]
+- Non-interactive SSH only (`BatchMode=yes` or `SSH_ASKPASS` via `--password-env`).
+- Unknown or cancelled remote probe outcomes raise `MachineManagementError`
+  immediately without silent fallback or blind replay.
 """
 
 from __future__ import annotations
@@ -23,6 +40,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from mindie_coordinator.device_inventory import SOC_TO_MACHINE_TYPE
 from remote_dev.core.endpoint import Endpoint, resolve_endpoint
 from remote_dev.core.ssh_transport import run_stream, ssh_base_cmd
 
@@ -61,9 +79,6 @@ DEFAULT_IMAGE_CANDIDATES = tuple(f"{repo}:main" for repo in IMAGE_REGISTRY_MIRRO
 RELEASES_API = (
     "https://api.github.com/repos/vllm-project/vllm-ascend/releases?per_page=100"
 )
-LATEST_RELEASE_API = (
-    "https://api.github.com/repos/vllm-project/vllm-ascend/releases/latest"
-)
 RELEASES_PAGE = "https://github.com/vllm-project/vllm-ascend/releases"
 LATEST_RELEASE_PAGE = "https://github.com/vllm-project/vllm-ascend/releases/latest"
 LATEST_RELEASE_TIMEOUT_SECONDS = 10
@@ -90,34 +105,6 @@ IMAGE_SUFFIX_BY_MACHINE_TYPE = {
     "A5": "-a5",
     "310P": "-310p",
 }
-SOC_TO_MACHINE_TYPE = {
-    "910b": "A2",
-    "910c": "A3",
-    "310p": "310P",
-    "ascend910b1": "A2",
-    "ascend910b2": "A2",
-    "ascend910b2c": "A2",
-    "ascend910b3": "A2",
-    "ascend910b4": "A2",
-    "ascend910b4-1": "A2",
-    "ascend910_9391": "A3",
-    "ascend910_9381": "A3",
-    "ascend910_9372": "A3",
-    "ascend910_9392": "A3",
-    "ascend910_9382": "A3",
-    "ascend910_9362": "A3",
-    "ascend310p1": "310P",
-    "ascend310p3": "310P",
-    "ascend310p5": "310P",
-    "ascend310p7": "310P",
-    "ascend310p3vir01": "310P",
-    "ascend310p3vir02": "310P",
-    "ascend310p3vir04": "310P",
-    "ascend310p3vir08": "310P",
-}
-SOC_MATCH_ORDER = sorted(SOC_TO_MACHINE_TYPE, key=len, reverse=True)
-ASCEND_950_SOC_PATTERN = re.compile(r"\bascend950[a-z0-9_-]*", re.IGNORECASE)
-BARE_ASCEND_910_PATTERN = re.compile(r"\bascend910\b", re.IGNORECASE)
 
 
 LOCAL_IMAGE_DISCOVERY_PY = r'''
@@ -249,82 +236,6 @@ def normalize_machine_type(value: str | None) -> str | None:
     raise MachineManagementError(
         f"unsupported machine type {value!r}; expected one of: {', '.join(MACHINE_TYPE_CHOICES)}"
     )
-
-
-def normalize_soc_token(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip().lower()
-    return normalized or None
-
-
-def npu_smi_value(text: str | None, field: str) -> str | None:
-    """Return one labelled value from npu-smi's colon-delimited output."""
-    if not text:
-        return None
-    pattern = re.compile(
-        rf"^\s*{re.escape(field)}\s*:\s*(.*?)\s*$", re.IGNORECASE | re.MULTILINE
-    )
-    match = pattern.search(text)
-    if match is None:
-        return None
-    value = match.group(1).strip()
-    return value or None
-
-
-def canonical_soc_from_board_text(text: str | None) -> str | None:
-    """Build the full SoC token from a detailed ``npu-smi -t board`` result.
-
-    A2/310P report the architecture prefix in ``Chip Type``. A3 and A5 report
-    the distinguishing part in ``NPU Name``. This mirrors the official CANN
-    query contract and vllm-ascend's setup-time chip detection.
-    """
-    chip_name = npu_smi_value(text, "Chip Name")
-    if not chip_name:
-        return None
-    chip_type = npu_smi_value(text, "Chip Type")
-    npu_name = npu_smi_value(text, "NPU Name")
-    normalized_chip_name = re.sub(r"\s+", "", chip_name)
-    normalized_chip_type = re.sub(r"\s+", "", chip_type or "")
-    normalized_npu_name = re.sub(r"\s+", "", npu_name or "")
-    lowered_chip_name = normalized_chip_name.lower()
-
-    if "310" in lowered_chip_name and normalized_chip_type:
-        return normalize_soc_token(normalized_chip_type + normalized_chip_name)
-    if "910" in lowered_chip_name:
-        if normalized_chip_type:
-            return normalize_soc_token(normalized_chip_type + normalized_chip_name)
-        if normalized_npu_name:
-            return normalize_soc_token(
-                f"{normalized_chip_name}_{normalized_npu_name}"
-            )
-    if "950" in lowered_chip_name and normalized_npu_name:
-        return normalize_soc_token(f"{normalized_chip_name}_{normalized_npu_name}")
-    return normalize_soc_token(normalized_chip_name)
-
-
-def machine_type_from_soc(soc: str | None) -> str | None:
-    normalized = normalize_soc_token(soc)
-    if normalized is None:
-        return None
-    if normalized.startswith("ascend950"):
-        return "A5"
-    return SOC_TO_MACHINE_TYPE.get(normalized)
-
-
-def detect_machine_type_from_text(text: str | None) -> tuple[str | None, str | None]:
-    if not text:
-        return None, None
-    normalized = text.lower()
-    ascend_950_match = ASCEND_950_SOC_PATTERN.search(normalized)
-    if ascend_950_match is not None:
-        return ascend_950_match.group(0).lower(), "A5"
-    for token in SOC_MATCH_ORDER:
-        if token in normalized:
-            return token, SOC_TO_MACHINE_TYPE[token]
-    if BARE_ASCEND_910_PATTERN.search(normalized) is not None:
-        return "ascend910", "A3"
-    return None, None
 
 
 def image_tag_for_machine(base_tag: str, machine_type: str | None) -> str:
@@ -722,26 +633,11 @@ def run_local(
     return proc
 
 
-def run_local_interactive(cmd: Sequence[str]) -> int:
-    try:
-        proc = subprocess.run(list(cmd))
-    except FileNotFoundError as exc:
-        raise MachineManagementError(
-            f"required local command not found: {cmd[0]}"
-        ) from exc
-    return proc.returncode
-
-
 def shell_join(cmd: Sequence[str]) -> str:
     items = list(cmd)
     if os.name == "nt":
         return subprocess.list2cmdline(items)
     return shlex.join(items)
-
-
-def remote_shell_command(argv: Sequence[str]) -> str:
-    items = [str(item) for item in argv]
-    return " ".join(shlex.quote(item) for item in items)
 
 
 def _script_with_positional_args(script: str, args: Sequence[str]) -> str:
@@ -2729,39 +2625,8 @@ PY
     return template.replace("__SENTINEL__", SENTINEL)
 
 
-def render_mesh_remove_peer_script() -> str:
-    template = r"""#!/usr/bin/env bash
-set -euo pipefail
-peer_comment="$1"
-peer_host="$2"
-peer_port="$3"
-removed=0
-if [ -f /root/.ssh/authorized_keys ]; then
-  tmp="$(mktemp)"
-  before="$(wc -l < /root/.ssh/authorized_keys 2>/dev/null || echo 0)"
-  grep -vF "$peer_comment" /root/.ssh/authorized_keys > "$tmp" || true
-  cat "$tmp" > /root/.ssh/authorized_keys
-  rm -f "$tmp"
-  chmod 600 /root/.ssh/authorized_keys
-  after="$(wc -l < /root/.ssh/authorized_keys 2>/dev/null || echo 0)"
-  removed=$(( before - after ))
-fi
-if [ -f /root/.ssh/known_hosts ]; then
-  ssh-keygen -R "[${peer_host}]:${peer_port}" -f /root/.ssh/known_hosts >/dev/null 2>&1 || true
-fi
-python3 - <<'PY' "$peer_comment" "$peer_host" "$peer_port" "$removed"
-import json
-import sys
-print("__SENTINEL__" + json.dumps({
-    "success": True,
-    "peer_comment": sys.argv[1],
-    "peer_host": sys.argv[2],
-    "peer_port": int(sys.argv[3]),
-    "removed_authorized_key_lines": int(sys.argv[4]),
-}, ensure_ascii=False))
-PY
-"""
-    return template.replace("__SENTINEL__", SENTINEL)
+def _namespace(**values: Any) -> argparse.Namespace:
+    return argparse.Namespace(**values)
 
 
 def render_remove_container_host_script() -> str:
@@ -2799,10 +2664,6 @@ PY
 fi
 """
     return template.replace("__SENTINEL__", SENTINEL)
-
-
-def container_target(args: argparse.Namespace) -> SshTarget:
-    return SshTarget(host=args.host, user="root", port=args.container_ssh_port)
 
 
 def host_target(args: argparse.Namespace) -> SshTarget:
@@ -2927,209 +2788,6 @@ def cmd_bootstrap_host_key(args: argparse.Namespace) -> int:
     print_json(payload)
     return 2
 
-    print_json(payload)
-    return 0
-
-
-def cmd_probe_host(args: argparse.Namespace) -> int:
-    target = host_target(args)
-    image_request = image_request_payload(args.image, machine_type=args.machine_type)
-    result = run_remote_script(
-        target,
-        render_host_probe_script(),
-        args=[
-            json.dumps(image_request, ensure_ascii=False),
-            args.port_range,
-            args.managed_prefix,
-        ],
-        batch_mode=True,
-        timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,
-    )
-    payload = assert_remote_success(result)
-    payload["target"] = {
-        "host": target.host,
-        "user": target.user,
-        "port": target.port,
-    }
-    print_json(payload)
-    return 0
-
-
-def cmd_bootstrap_container(args: argparse.Namespace) -> int:
-    target = host_target(args)
-    key_path = find_public_key(args.public_key_file)
-    private_key = private_key_for_public_key(key_path)
-    public_key = load_public_key(key_path)
-    image_request = image_request_payload(args.image, machine_type=args.machine_type)
-    result = run_remote_script(
-        target,
-        render_bootstrap_host_script(),
-        args=[
-            args.container_name,
-            str(args.container_ssh_port),
-            json.dumps(image_request, ensure_ascii=False),
-            args.workdir,
-            public_key,
-            args.namespace or "",
-            "true" if args.replace_container_on_image_change else "false",
-            args.machine_type or "",
-            args.soc or "",
-        ],
-        batch_mode=True,
-        timeout_seconds=DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS,
-    )
-    payload = assert_remote_success(result)
-
-    ssh_check = check_direct_ssh(
-        SshTarget(host=args.host, user="root", port=args.container_ssh_port),
-        identity_file=private_key,
-    )
-    payload.update(
-        {
-            "public_key_file": str(key_path),
-            "private_key_file": str(private_key) if private_key is not None else None,
-            "namespace": args.namespace or None,
-            "direct_container_ssh": ssh_check,
-            "target": {
-                "host": target.host,
-                "user": target.user,
-                "host_port": target.port,
-                "container_ssh_port": args.container_ssh_port,
-            },
-        }
-    )
-    if not ssh_check["ok"]:
-        payload["success"] = False
-        payload["error"] = "container SSH did not come up after bootstrap"
-        print_json(payload)
-        return 2
-
-    print_json(payload)
-    return 0
-
-
-def smoke_payload(args: argparse.Namespace) -> dict[str, Any]:
-    target = container_target(args)
-    python_arg = args.python if args.python else ""
-    result = run_remote_script(
-        target,
-        render_smoke_script(),
-        args=[python_arg],
-        batch_mode=True,
-        timeout_seconds=DEFAULT_SMOKE_TIMEOUT_SECONDS,
-    )
-    payload = assert_remote_success(result, require_payload=True)
-    payload["target"] = {
-        "host": target.host,
-        "user": target.user,
-        "container_ssh_port": target.port,
-    }
-    return payload
-
-
-def cmd_smoke(args: argparse.Namespace) -> int:
-    payload = smoke_payload(args)
-    print_json(payload)
-    return 0
-
-
-def cmd_verify_machine(args: argparse.Namespace) -> int:
-    host = host_target(args)
-    container = container_target(args)
-    identity_file = None
-    try:
-        identity_file = private_key_for_public_key(find_public_key(None))
-    except MachineManagementError:
-        identity_file = None
-    host_check = check_direct_ssh(host, identity_file=identity_file)
-    container_check = check_direct_ssh(container, identity_file=identity_file)
-    result: dict[str, Any] = {
-        "host": {"host": host.host, "user": host.user, "port": host.port},
-        "container": {
-            "host": container.host,
-            "user": container.user,
-            "port": container.port,
-        },
-        "identity_file": str(identity_file) if identity_file is not None else None,
-        "host_ssh": host_check,
-        "container_ssh": container_check,
-    }
-    if container_check["ok"]:
-        smoke_args = argparse.Namespace(
-            host=args.host,
-            user=args.user,
-            container_ssh_port=args.container_ssh_port,
-            python=args.python,
-        )
-        try:
-            result["smoke"] = smoke_payload(smoke_args)
-        except MachineManagementError as exc:
-            result["smoke"] = {"success": False, "error": str(exc)}
-    else:
-        result["smoke"] = {"success": False, "skipped": "container SSH failed"}
-
-    result["ready"] = bool(
-        host_check["ok"]
-        and container_check["ok"]
-        and result["smoke"].get("success") is True
-    )
-    print_json(result)
-    return 0
-
-
-def cmd_mesh_export_key(args: argparse.Namespace) -> int:
-    target = container_target(args)
-    result = run_remote_script(
-        target,
-        render_mesh_export_key_script(),
-        args=[args.comment],
-        batch_mode=True,
-    )
-    payload = assert_remote_success(result)
-    payload["target"] = {
-        "host": target.host,
-        "user": target.user,
-        "container_ssh_port": target.port,
-    }
-    print_json(payload)
-    return 0
-
-
-def cmd_mesh_add_peer(args: argparse.Namespace) -> int:
-    target = container_target(args)
-    result = run_remote_script(
-        target,
-        render_mesh_add_peer_script(),
-        args=[args.peer_public_key, args.peer_host, str(args.peer_port)],
-        batch_mode=True,
-    )
-    payload = assert_remote_success(result)
-    payload["target"] = {
-        "host": target.host,
-        "user": target.user,
-        "container_ssh_port": target.port,
-    }
-    print_json(payload)
-    return 0
-
-
-def cmd_mesh_remove_peer(args: argparse.Namespace) -> int:
-    target = container_target(args)
-    result = run_remote_script(
-        target,
-        render_mesh_remove_peer_script(),
-        args=[args.peer_comment, args.peer_host, str(args.peer_port)],
-        batch_mode=True,
-    )
-    payload = assert_remote_success(result)
-    payload["target"] = {
-        "host": target.host,
-        "user": target.user,
-        "container_ssh_port": target.port,
-    }
-    print_json(payload)
-    return 0
-
 
 def remove_known_host_entry(
     host: str, port: int, known_hosts: pathlib.Path
@@ -3150,14 +2808,6 @@ def remove_known_host_entry(
         "stdout": proc.stdout.strip(),
         "stderr": proc.stderr.strip(),
     }
-
-
-def cmd_clean_local_known_hosts(args: argparse.Namespace) -> int:
-    known_hosts = pathlib.Path(args.known_hosts).expanduser().resolve()
-    payload = remove_known_host_entry(args.host, args.container_ssh_port, known_hosts)
-    payload.update({"host": args.host, "container_ssh_port": args.container_ssh_port})
-    print_json(payload)
-    return 0
 
 
 def cmd_remove_container(args: argparse.Namespace) -> int:
@@ -3182,310 +2832,3 @@ def cmd_remove_container(args: argparse.Namespace) -> int:
         )
     print_json(payload)
     return 0
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    subparsers = parser.add_subparsers(
-        dest="command",
-        required=True,
-        parser_class=lambda *args, **kwargs: argparse.ArgumentParser(
-            *args, allow_abbrev=False, **kwargs
-        ),
-    )
-
-    def add_host_args(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--host", required=True, help="host IP or DNS name")
-        p.add_argument(
-            "--user",
-            dest="user",
-            default=DEFAULT_HOST_USER,
-            help=f"SSH user (default: {DEFAULT_HOST_USER})",
-        )
-        p.add_argument(
-            "--host-port",
-            "--host-ssh-port",
-            dest="host_port",
-            type=int,
-            default=DEFAULT_HOST_PORT,
-            help=f"host SSH port (default: {DEFAULT_HOST_PORT})",
-        )
-
-    def add_container_args(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--host", required=True, help="host IP or DNS name")
-        p.add_argument(
-            "--user",
-            dest="user",
-            default=DEFAULT_HOST_USER,
-            help=f"SSH user (default: {DEFAULT_HOST_USER})",
-        )
-        p.add_argument(
-            "--container-ssh-port",
-            "--container-port",
-            "--port",
-            dest="container_ssh_port",
-            type=int,
-            required=True,
-            help="direct SSH port exposed by the managed container",
-        )
-
-    probe = subparsers.add_parser(
-        "probe-host", help="probe host prerequisites and choose a free high SSH port"
-    )
-    add_host_args(probe)
-    probe.add_argument(
-        "--image",
-        required=True,
-        help=(
-            "explicit image selector: `local-latest`, `rc`, `main`, `stable`, or a full non-latest image reference; "
-            f"`rc` resolves the newest official prerelease tag, and `main` tries {DEFAULT_IMAGE_CANDIDATES[0]} then {DEFAULT_IMAGE_CANDIDATES[1]}"
-        ),
-    )
-    probe.add_argument(
-        "--port-range",
-        default=DEFAULT_PORT_RANGE,
-        help=f"inclusive range START:END (default: {DEFAULT_PORT_RANGE})",
-    )
-    probe.add_argument(
-        "--managed-prefix",
-        default="mindie-",
-        help="managed container name prefix (default: mindie-)",
-    )
-    probe.add_argument(
-        "--machine-type",
-        choices=MACHINE_TYPE_CHOICES,
-        help="override detected machine type when selecting hardware-specific image tags",
-    )
-    probe.set_defaults(func=cmd_probe_host)
-
-    host_bootstrap = subparsers.add_parser(
-        "bootstrap-host-key",
-        help="bootstrap host key auth; use a supplied password non-interactively when available, otherwise fall back to an interactive prompt",
-    )
-    add_host_args(host_bootstrap)
-    host_bootstrap.add_argument(
-        "--public-key-file",
-        help="local SSH public key to install on the host; defaults to ~/.ssh/id_ed25519.pub if present",
-    )
-    password_group = host_bootstrap.add_mutually_exclusive_group()
-    password_group.add_argument(
-        "--password",
-        help="host password already supplied by the user in the current chat; convenient but exposes the value to process args and command logs",
-    )
-    password_group.add_argument(
-        "--password-env",
-        help="read the host password from one environment variable and keep it out of command args",
-    )
-    password_group.add_argument(
-        "--password-stdin",
-        action="store_true",
-        help="read the host password from standard input",
-    )
-    host_bootstrap.add_argument(
-        "--print-command",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="print the exact bootstrap command instead of running it",
-    )
-    host_bootstrap.set_defaults(func=cmd_bootstrap_host_key)
-
-    bootstrap = subparsers.add_parser(
-        "bootstrap-container",
-        help="create or repair the managed container and dedicated sshd",
-    )
-    add_host_args(bootstrap)
-    bootstrap.add_argument(
-        "--container-name",
-        "--name",
-        dest="container_name",
-        required=True,
-        help="container name to create or reuse",
-    )
-    bootstrap.add_argument(
-        "--container-ssh-port",
-        "--container-port",
-        "--port",
-        dest="container_ssh_port",
-        type=int,
-        required=True,
-        help="high non-default SSH port for the managed container",
-    )
-    bootstrap.add_argument(
-        "--image",
-        required=True,
-        help=(
-            "explicit image selector: `local-latest`, `rc`, `main`, `stable`, or a full non-latest image reference; "
-            f"`rc` resolves the newest official prerelease tag, and `main` tries {DEFAULT_IMAGE_CANDIDATES[0]} then {DEFAULT_IMAGE_CANDIDATES[1]}"
-        ),
-    )
-    bootstrap.add_argument(
-        "--replace-container-on-image-change",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="recreate the existing managed container when its current image does not match the requested selector",
-    )
-    bootstrap.add_argument(
-        "--workdir",
-        default=DEFAULT_WORKDIR,
-        help=f"container workdir (default: {DEFAULT_WORKDIR})",
-    )
-    bootstrap.add_argument(
-        "--namespace",
-        help="stable workspace machine username used for collision-safe container naming",
-    )
-    bootstrap.add_argument(
-        "--machine-type",
-        choices=MACHINE_TYPE_CHOICES,
-        help="override detected machine type when selecting hardware-specific image tags",
-    )
-    bootstrap.add_argument(
-        "--soc", help="optional detected SoC token, for example ascend910b1"
-    )
-    bootstrap.add_argument(
-        "--public-key-file",
-        help="local SSH public key to add to the container; defaults to ~/.ssh/id_ed25519.pub if present",
-    )
-    bootstrap.set_defaults(func=cmd_bootstrap_container)
-
-    smoke = subparsers.add_parser(
-        "smoke",
-        help="run the container-side torch/torch_npu smoke test with dynamic env discovery",
-    )
-    add_container_args(smoke)
-    smoke.add_argument(
-        "--python", help="optional explicit python path inside the container"
-    )
-    smoke.set_defaults(func=cmd_smoke)
-
-    verify = subparsers.add_parser(
-        "verify-machine",
-        help="check host SSH, container SSH, and smoke readiness together",
-    )
-    add_container_args(verify)
-    verify.add_argument(
-        "--host-port",
-        "--host-ssh-port",
-        dest="host_port",
-        type=int,
-        default=DEFAULT_HOST_PORT,
-        help=f"host SSH port (default: {DEFAULT_HOST_PORT})",
-    )
-    verify.add_argument(
-        "--python", help="optional explicit python path inside the container"
-    )
-    verify.set_defaults(func=cmd_verify_machine)
-
-    mesh_export = subparsers.add_parser(
-        "mesh-export-key",
-        help="ensure a mesh key exists in the container and print its public key",
-    )
-    add_container_args(mesh_export)
-    mesh_export.add_argument(
-        "--comment",
-        required=True,
-        help="stable mesh key comment, for example mindie-mesh:173.125.1.2",
-    )
-    mesh_export.set_defaults(func=cmd_mesh_export_key)
-
-    mesh_add = subparsers.add_parser(
-        "mesh-add-peer",
-        help="add a peer mesh key and known_hosts entry inside a managed container",
-    )
-    add_container_args(mesh_add)
-    mesh_add.add_argument(
-        "--peer-public-key",
-        required=True,
-        help="peer public key line, including its comment",
-    )
-    mesh_add.add_argument("--peer-host", required=True, help="peer host IP or DNS name")
-    mesh_add.add_argument(
-        "--peer-port", type=int, required=True, help="peer container SSH port"
-    )
-    mesh_add.set_defaults(func=cmd_mesh_add_peer)
-
-    mesh_remove = subparsers.add_parser(
-        "mesh-remove-peer",
-        help="remove a peer mesh key and known_hosts entry inside a managed container",
-    )
-    add_container_args(mesh_remove)
-    mesh_remove.add_argument(
-        "--peer-comment",
-        required=True,
-        help="stable mesh comment, for example mindie-mesh:173.125.1.2",
-    )
-    mesh_remove.add_argument(
-        "--peer-host", required=True, help="peer host IP or DNS name"
-    )
-    mesh_remove.add_argument(
-        "--peer-port", type=int, required=True, help="peer container SSH port"
-    )
-    mesh_remove.set_defaults(func=cmd_mesh_remove_peer)
-
-    clean_known_hosts = subparsers.add_parser(
-        "clean-local-known-hosts",
-        help="remove one managed container endpoint from local known_hosts",
-    )
-    clean_known_hosts.add_argument("--host", required=True, help="host IP or DNS name")
-    clean_known_hosts.add_argument(
-        "--container-ssh-port",
-        "--container-port",
-        "--port",
-        dest="container_ssh_port",
-        type=int,
-        required=True,
-        help="managed container SSH port",
-    )
-    clean_known_hosts.add_argument(
-        "--known-hosts",
-        default=str(DEFAULT_KNOWN_HOSTS),
-        help=f"known_hosts path (default: {DEFAULT_KNOWN_HOSTS})",
-    )
-    clean_known_hosts.set_defaults(func=cmd_clean_local_known_hosts)
-
-    remove = subparsers.add_parser(
-        "remove-container", help="remove a managed container from the host"
-    )
-    add_host_args(remove)
-    remove.add_argument(
-        "--container-name",
-        "--name",
-        dest="container_name",
-        required=True,
-        help="container name to remove",
-    )
-    remove.add_argument(
-        "--container-ssh-port",
-        "--container-port",
-        "--port",
-        dest="container_ssh_port",
-        type=int,
-        help="container SSH port for optional local known_hosts cleanup",
-    )
-    remove.add_argument(
-        "--known-hosts",
-        default=str(DEFAULT_KNOWN_HOSTS),
-        help=f"known_hosts path (default: {DEFAULT_KNOWN_HOSTS})",
-    )
-    remove.add_argument(
-        "--clean-local-known-hosts",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="also remove the endpoint from local known_hosts when --container-ssh-port is provided",
-    )
-    remove.set_defaults(func=cmd_remove_container)
-
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    try:
-        return args.func(args)
-    except MachineManagementError as exc:
-        print_json({"success": False, "error": str(exc)})
-        return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

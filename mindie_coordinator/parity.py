@@ -1,8 +1,28 @@
-"""Code parity: Git snapshot identity and remote materialization.
+"""Code parity: Git snapshot identity, remote materialization, and install step scripts.
 
-Owned by mindie-coordinator. Callers invoke this module as a library or as
-``python -m mindie_coordinator.parity``. This never locates a consumer skill
-script by filesystem path.
+[Role]
+- Builds content-addressed synthetic Git snapshots (`build_snapshot_records`),
+  materializes immutable source snapshots into remote container workspaces
+  (`materialize_fixed_sources`), and renders remote runtime installation shell
+  scripts (`runtime_install_step_script`).
+
+[Invariants]
+- Every execution source snapshot is pinned by exact Git commit and tree SHA-1
+  before remote materialization; working tree edits after admission never alter
+  in-flight execution inputs.
+- Small incremental edits (`<= 64 KiB`) ride inline in the remote Python RPC
+  payload (`_fixed_inline_pack`); cold or large trees fall back to atomic Git push.
+- Paired base-image packages (`torch`, `torch_npu`, `triton-ascend`, etc.) are
+  never downgraded when reconciling `vllm-ascend/requirements.txt`.
+
+[Timeouts & Locks]
+- Git transport operations enforce `DEFAULT_GIT_TRANSPORT_TIMEOUT_SECONDS` (`900s`).
+- Local clean-HEAD base discovery is strictly bounded to `5s` (`_clean_head_snapshot_base`)
+  and `10s` (`_local_snapshot_bases`).
+
+[Side-Effect Policy]
+- Uncertain remote materialization or object export outcomes raise
+  `PreparationUncertain` / `ParityUnavailable` and are never silently replayed.
 """
 from __future__ import annotations
 
@@ -22,11 +42,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote
 
 from mindie_coordinator.build_inputs import (
-    BUILD_INPUT_ENV_KEYS,
-    DEPENDENCY_INSTALL_PATTERNS,
     VLLM_ASCEND_REINSTALL_PATTERNS,
     VLLM_REINSTALL_PATTERNS,
     build_input_fingerprints,
@@ -38,20 +56,14 @@ from mindie_coordinator.parity_support import (
     SshEndpoint,
     ensure_local_git_identity,
     git,
-    glob_match_any,
     is_git_worktree,
     json_dump,
-    load_state,
     now_utc,
     quoted,
-    repo_root_from,
     sanitize_repo_id,
-    save_state,
     ssh_exec,
     ssh_exec_stream,
-    ssh_stream_bytes_to_file,
     ssh_stream_to_file,
-    update_state,
 )
 
 
@@ -123,8 +135,6 @@ def _write_materialized_build_source(root, data):
     from pathlib import Path
     started = time.monotonic()
     directory = Path(root) / '.mindie-runtime'
-    if directory.is_symlink():
-        raise ValueError('build metadata escaped owned runtime')
     directory.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.build-source-', dir=directory)
     try:
@@ -618,10 +628,7 @@ DEFAULT_CONTAINER_LOCK_STALE_SECONDS = 3600
 # Keep runtime-private state and profiling artifacts that may be needed for
 # post-run analysis across parity refreshes.
 DEFAULT_ROOT_PRESERVE_PATHS = ('Mooncake', '.mindie-runtime', '.venv', 'venv', 'build')
-STATE_FILENAME = 'runtime-state.json'
-CONSENT_FILENAME = 'install-consents.json'
 PARITY_BRANCH_NAME = 'parity-current'
-TRANSFER_MODES = ('auto', 'git', 'bundle')
 
 REMOTE_RUNTIME_ENV_PASSTHROUGH = (
     'CMAKE_ARGS', 'LDFLAGS', 'CC', 'CXX', 'VLLM_TARGET_DEVICE',
@@ -643,24 +650,6 @@ REMOTE_RUNTIME_ENV_PASSTHROUGH = (
     'C_COMPILER',
     'CXX_COMPILER',
     'VERBOSE',
-    'ASCEND_HOME_PATH',
-)
-
-RUNTIME_INSTALL_ENV_KEYS = (
-    'MAX_JOBS',
-    'CMAKE_BUILD_PARALLEL_LEVEL',
-    'CMAKE_BUILD_TYPE',
-    'FETCHCONTENT_BASE_DIR',
-    'XDG_CACHE_HOME',
-    'PIP_CACHE_DIR',
-    'PIP_CONFIG_FILE',
-    'PIP_INDEX_URL',
-    'PIP_TRUSTED_HOST',
-    'MINDIE_BUILD_JOBS',
-    'SOC_VERSION',
-    'COMPILE_CUSTOM_KERNELS',
-    'C_COMPILER',
-    'CXX_COMPILER',
     'ASCEND_HOME_PATH',
 )
 
@@ -732,33 +721,6 @@ def remote_runtime_env_exports() -> list[str]:
     return lines
 
 
-def redact_url_value(value: str) -> str:
-    parts = value.split()
-    redacted_parts: list[str] = []
-    for part in parts:
-        try:
-            parsed = urlsplit(part)
-        except ValueError:
-            redacted_parts.append(part)
-            continue
-        if parsed.scheme and parsed.netloc and '@' in parsed.netloc:
-            host = parsed.netloc.rsplit('@', 1)[1]
-            redacted_parts.append(urlunsplit((parsed.scheme, f'***@{host}', parsed.path, parsed.query, parsed.fragment)))
-        else:
-            redacted_parts.append(part)
-    return ' '.join(redacted_parts)
-
-
-def redact_runtime_env(env: dict[str, str]) -> dict[str, str]:
-    redacted: dict[str, str] = {}
-    for key, value in env.items():
-        if key.endswith('_URL') or 'INDEX' in key or 'PATH' in key:
-            redacted[key] = redact_url_value(value)
-        else:
-            redacted[key] = value
-    return redacted
-
-
 def resolved_root_preserve_paths(marker_dirname: str, extra_paths: list[str]) -> tuple[str, ...]:
     ordered: list[str] = []
     for path in [*DEFAULT_ROOT_PRESERVE_PATHS, marker_dirname, *extra_paths]:
@@ -766,12 +728,6 @@ def resolved_root_preserve_paths(marker_dirname: str, extra_paths: list[str]) ->
         if normalized not in ordered:
             ordered.append(normalized)
     return tuple(ordered)
-
-
-@dataclass
-class RuntimeInstallMarker:
-    path: str
-    record: dict[str, Any] | None
 
 
 def emit_progress(phase: str, **fields: Any) -> None:
@@ -1025,30 +981,6 @@ def cleanup_synthetic_refs(workspace_root: Path, records: list[SnapshotRecord]) 
         git(repo, ['update-ref', '-d', record.ref], check=False)
 
 
-def load_runtime_state(repo_root: Path) -> dict[str, Any]:
-    return load_state(repo_root, STATE_FILENAME, {'schema_version': 2, 'servers': {}})
-
-
-def save_runtime_state(repo_root: Path, state: dict[str, Any]) -> Path:
-    return save_state(repo_root, STATE_FILENAME, state)
-
-
-def load_consent(repo_root: Path) -> dict[str, Any]:
-    return load_state(repo_root, CONSENT_FILENAME, {'schema_version': 1, 'consents': {}})
-
-
-def resolve_install_consent(repo_root: Path, server_name: str, container_identity: str) -> str:
-    state = load_consent(repo_root)
-    decision = (
-        state.get('consents', {})
-        .get(server_name, {})
-        .get('containers', {})
-        .get(container_identity, {})
-        .get('decision')
-    )
-    return decision or 'unknown'
-
-
 def cache_workspace_root(container_cache_root: str, workspace_id: str) -> str:
     return f"{container_cache_root.rstrip('/')}/workspaces/{workspace_id}"
 
@@ -1058,11 +990,6 @@ def mirror_path_for(container_cache_root: str, workspace_id: str, record: Snapsh
     if record.repo_id == 'workspace':
         return str(root / 'workspace.git')
     return str(root / 'nested' / f'{record.repo_id}.git')
-
-
-def bundle_path_for(container_cache_root: str, workspace_id: str, record: SnapshotRecord) -> str:
-    root = PurePosixPath(cache_workspace_root(container_cache_root, workspace_id)) / 'bundles'
-    return str(root / f'{record.repo_id}-{record.commit}.bundle')
 
 
 def git_remote_url(container: SshEndpoint, mirror_path: str) -> str:
@@ -1230,39 +1157,6 @@ def ensure_remote_bare_repos(
     return observed
 
 
-def cleanup_failed_mirror_hydration(container: SshEndpoint, mirror_path: str) -> None:
-    script = '\n'.join(
-        [
-            'set +e',
-            f'mirror={quoted(mirror_path)}',
-            'for pid in $(pgrep -x git-receive-pack 2>/dev/null || true); do',
-            '  cmd="$(tr "\\000" " " <"/proc/$pid/cmdline" 2>/dev/null || true)"',
-            '  case "$cmd" in',
-            '    *"$mirror"*)',
-            '      pkill -TERM -P "$pid" >/dev/null 2>&1 || true',
-            '      kill -TERM "$pid" >/dev/null 2>&1 || true',
-            '      ;;',
-            '  esac',
-            'done',
-            'sleep 1',
-            'for pid in $(pgrep -x git-receive-pack 2>/dev/null || true); do',
-            '  cmd="$(tr "\\000" " " <"/proc/$pid/cmdline" 2>/dev/null || true)"',
-            '  case "$cmd" in',
-            '    *"$mirror"*)',
-            '      pkill -KILL -P "$pid" >/dev/null 2>&1 || true',
-            '      kill -KILL "$pid" >/dev/null 2>&1 || true',
-            '      ;;',
-            '  esac',
-            'done',
-            'rm -rf "$mirror"',
-        ]
-    )
-    try:
-        ssh_exec(container, script, check=False)
-    except Exception:
-        pass
-
-
 def push_snapshot_via_git(
     repo: Path,
     *,
@@ -1320,105 +1214,6 @@ def push_snapshot_via_git(
         'detail': result.stdout.strip(),
     }
 
-
-def push_snapshot_via_bundle(
-    repo: Path,
-    *,
-    container: SshEndpoint,
-    mirror_path: str,
-    container_cache_root: str,
-    record: SnapshotRecord,
-    workspace_id: str,
-) -> dict[str, Any]:
-    target_ref = f'refs/parity/{workspace_id}/current'
-    remote_bundle_path = bundle_path_for(container_cache_root, workspace_id, record)
-    local_bundle = tempfile.NamedTemporaryFile(prefix='parity-bundle-', suffix='.bundle', delete=False)
-    local_bundle.close()
-    local_bundle_path = Path(local_bundle.name)
-    started = time.monotonic()
-    try:
-        git(repo, ['bundle', 'create', str(local_bundle_path), record.ref], timeout=DEFAULT_GIT_TRANSPORT_TIMEOUT_SECONDS)
-        bundle_payload = local_bundle_path.read_bytes()
-        bundle_bytes = len(bundle_payload)
-        ssh_stream_bytes_to_file(container, remote_bundle_path, bundle_payload)
-        script = '\n'.join(
-            [
-                'set -eo pipefail',
-                f'mkdir -p {quoted(str(PurePosixPath(mirror_path).parent))}',
-                f'if [ ! -d {quoted(mirror_path)} ]; then git init --bare {quoted(mirror_path)} >/dev/null; fi',
-                (
-                    f'git -C {quoted(mirror_path)} fetch --force {quoted(remote_bundle_path)} '
-                    f'{quoted(record.ref + ":" + target_ref)} '
-                    f'{quoted(record.ref + ":refs/heads/" + PARITY_BRANCH_NAME)} >/dev/null'
-                ),
-                f'rm -f {quoted(remote_bundle_path)}',
-            ]
-        )
-        ssh_exec(container, script)
-        return {
-            'repo': record.relpath,
-            'transport': 'bundle',
-            'elapsed_seconds': round(time.monotonic() - started, 6),
-            'bundle_bytes': bundle_bytes,
-        }
-    except Exception:
-        cleanup_failed_mirror_hydration(container, mirror_path)
-        raise
-    finally:
-        local_bundle_path.unlink(missing_ok=True)
-
-
-def push_snapshot_to_mirror(
-    repo: Path,
-    *,
-    container: SshEndpoint,
-    mirror_path: str,
-    container_cache_root: str,
-    record: SnapshotRecord,
-    workspace_id: str,
-    dry_run: bool,
-    transport: str = 'auto',
-    remote_refs: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    if transport not in TRANSFER_MODES:
-        raise ValueError(f'unsupported parity transport: {transport}')
-    if dry_run:
-        return {'repo': record.relpath, 'transport': f'{transport}-dry-run'}
-
-    git_error: Exception | None = None
-    if transport in {'auto', 'git'}:
-        try:
-            return push_snapshot_via_git(
-                repo,
-                container=container,
-                mirror_path=mirror_path,
-                record=record,
-                workspace_id=workspace_id,
-                remote_refs=remote_refs,
-            )
-        except Exception as exc:
-            if transport == 'git':
-                raise
-            git_error = exc
-            emit_progress(
-                'push-mirror-fallback',
-                relpath=record.relpath,
-                from_transport='git',
-                to_transport='bundle',
-                reason=str(exc),
-            )
-
-    result = push_snapshot_via_bundle(
-        repo,
-        container=container,
-        mirror_path=mirror_path,
-        container_cache_root=container_cache_root,
-        record=record,
-        workspace_id=workspace_id,
-    )
-    if git_error is not None:
-        result['fallback_from'] = 'git'
-    return result
 
 def acquire_container_lock(
     container: SshEndpoint,
@@ -1606,28 +1401,6 @@ def materialize_runtime(
         collect_scripts(root_record, repo_scripts)
     parts.extend(repo_scripts)
     ssh_exec(container, '\n'.join(parts))
-
-def reinstall_required_for_repo(record: SnapshotRecord, patterns: tuple[str, ...]) -> bool:
-    return any(glob_match_any(path, patterns) for path in record.changed_paths)
-
-
-def dependency_install_required_for_repo(record: SnapshotRecord) -> bool:
-    return any(glob_match_any(path, DEPENDENCY_INSTALL_PATTERNS) for path in record.changed_paths)
-
-
-def committed_changed_paths(repo: Path, last_head: str, current_head: str) -> list[str] | None:
-    """Paths changed between the last synced HEAD and the current HEAD.
-
-    Returns ``None`` when the diff cannot be computed (e.g. the old commit was
-    garbage-collected), in which case callers must fall back to the
-    conservative reinstall behavior.
-    """
-    if last_head == current_head:
-        return []
-    result = git(repo, ['diff', '--name-only', f'{last_head}..{current_head}'], check=False)
-    if result.returncode != 0:
-        return None
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def runtime_install_step_script(
@@ -2031,37 +1804,6 @@ def run_runtime_install_step(
         ssh_exec(container, script)
 
 
-def read_runtime_install_marker(
-    *,
-    container: SshEndpoint,
-    runtime_root: str,
-    marker_dirname: str,
-) -> RuntimeInstallMarker:
-    # The marker read is a read-only remote cat, so it is safe under dry-run
-    # and takes no dry_run switch.
-    path = marker_path_for(runtime_root, marker_dirname)
-    script = '\n'.join(
-        [
-            'set -eo pipefail',
-            f'if [ -f {quoted(path)} ]; then cat {quoted(path)}; fi',
-        ]
-    )
-    result = ssh_exec(container, script)
-    content = result.stdout.strip()
-    if not content:
-        return RuntimeInstallMarker(path=path, record=None)
-    try:
-        return RuntimeInstallMarker(path=path, record=json.loads(content))
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f'container runtime-install marker at {path} is invalid JSON: {exc}') from exc
-
-
-def first_install_needed(marker: RuntimeInstallMarker, container_identity: str, runtime_root: str) -> bool:
-    if marker.record is None:
-        return True
-    return marker.record.get('container_identity') != container_identity or marker.record.get('runtime_root') != runtime_root
-
-
 def verify_runtime_commits_map(
     *,
     container: SshEndpoint,
@@ -2099,105 +1841,6 @@ def verify_runtime_commits(
     if dry_run:
         return expected
     return verify_runtime_commits_map(container=container, runtime_root=runtime_root, expected=expected)
-
-
-def workspace_fingerprint(workspace_root: Path, source_roots: dict[str, Path] | None = None) -> str:
-    """Hash dirty content, not just the names/status of dirty files.
-
-    A second edit of an already modified file has identical porcelain status.
-    Hash tracked diffs and untracked bytes so it cannot disappear in the fast
-    path. Prefix the format to invalidate the old status-only cache.
-    """
-    tree = discover_repo_tree(workspace_root, '.', None, source_roots)
-    hasher = hashlib.sha256()
-    for node in iter_postorder(tree):
-        repo = node.repo_path
-        head = git_head(repo) or ''
-        dirty = git(repo, ['diff', '--binary', '--no-ext-diff', 'HEAD', '--']).stdout if head else ''
-        for token in (node.relpath, head, dirty):
-            hasher.update(token.encode('utf-8'))
-            hasher.update(b'\0')
-        untracked = git(repo, ['ls-files', '--others', '--exclude-standard', '-z']).stdout
-        for relpath in sorted(filter(None, untracked.split('\0'))):
-            path = repo / relpath
-            hasher.update(relpath.encode('utf-8') + b'\0')
-            hasher.update(str(path.lstat().st_mode).encode('ascii') + b'\0')
-            if path.is_symlink():
-                hasher.update(os.readlink(path).encode('utf-8'))
-            else:
-                with path.open('rb') as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-                        hasher.update(chunk)
-            hasher.update(b'\0')
-    build_env = {key: os.environ[key] for key in BUILD_INPUT_ENV_KEYS if key in os.environ}
-    hasher.update(json.dumps(build_env, sort_keys=True).encode('utf-8'))
-    return 'content-v2:' + hasher.hexdigest()
-
-
-def changed_build_inputs(current: dict[str, str], installed: dict[str, str] | None) -> tuple[bool, bool]:
-    if not installed:
-        return True, True  # One conservative rebuild migrates legacy state.
-    dependencies = current.get('dependencies') != installed.get('dependencies')
-    native = dependencies or any(current.get(key) != installed.get(key) for key in ('native', 'build_env'))
-    return native, dependencies
-
-
-def read_runtime_install_env(
-    *,
-    container: SshEndpoint,
-    runtime_root: str,
-    dry_run: bool,
-) -> dict[str, str]:
-    if dry_run:
-        return {}
-    lines = ['set -euo pipefail', f'mkdir -p {quoted(runtime_root)}', f'cd {quoted(runtime_root)}']
-    lines.extend(remote_runtime_env_exports())
-    lines.append(f'export MINDIE_RUNTIME_ROOT={quoted(runtime_root)}')
-    lines.extend(DEFAULT_ENV_PREAMBLE)
-    lines.extend(
-        [
-            '"$PYTHON" - <<\'PY\'',
-            'import json',
-            'import os',
-            f'keys = {json.dumps(RUNTIME_INSTALL_ENV_KEYS)}',
-            'env = {key: os.environ[key] for key in keys if key in os.environ}',
-            'print(json.dumps(env, sort_keys=True))',
-            'PY',
-        ]
-    )
-    result = ssh_exec(container, '\n'.join(lines))
-    raw = json.loads(result.stdout.strip() or '{}')
-    return redact_runtime_env({str(key): str(value) for key, value in raw.items()})
-
-
-def update_runtime_state(
-    *,
-    repo_root: Path,
-    server_name: str,
-    container_identity: str,
-    runtime_root: str,
-    container_cache_root: str,
-    marker_dirname: str,
-    records: list[SnapshotRecord],
-    first_reinstall_completed: bool,
-    runtime_install_env: dict[str, str] | None,
-) -> None:
-    def apply_update(state: dict[str, Any]) -> None:
-        server_state = state.setdefault('servers', {}).setdefault(server_name, {})
-        containers = server_state.setdefault('containers', {})
-        containers[container_identity] = {
-            'runtime_root': runtime_root,
-            'container_cache_root': container_cache_root,
-            'marker_dirname': marker_dirname,
-            'last_sync_at': now_utc(),
-            'first_reinstall_completed': first_reinstall_completed,
-            'last_snapshot_commits': {record.relpath: record.commit for record in records},
-            'last_head_commits': {record.relpath: record.source_head for record in records},
-            'installed_build_inputs': {record.relpath: record.build_inputs for record in records if record.build_inputs},
-            'last_runtime_install_env': runtime_install_env or {},
-        }
-
-    update_state(repo_root, STATE_FILENAME, {'schema_version': 2, 'servers': {}}, apply_update)
 
 
 def make_manifest(
@@ -2365,38 +2008,6 @@ def resolve_state_root(workspace_root: str | None, sources: dict[str, Path]) -> 
     raise ValueError('bind the actual vllm and vllm-ascend worktrees')
 
 
-def run_plan(args: argparse.Namespace) -> int:
-    sources = parse_sources(getattr(args, 'source', []))
-    if not {'vllm', 'vllm-ascend'}.issubset(sources):
-        raise ValueError('bind the actual vllm and vllm-ascend worktrees')
-    workspace_root = resolve_state_root(getattr(args, 'workspace_root', None), sources)
-    workspace_id = normalize_workspace_id(args.workspace_id)
-    runtime_root = validate_absolute_posix_path(args.runtime_root, label='runtime root')
-    container_cache_root = validate_absolute_posix_path(args.container_cache_root, label='container cache root')
-    marker_dirname = validate_relative_posix_path(args.marker_dirname, label='marker dirname')
-    root_preserve_paths = resolved_root_preserve_paths(marker_dirname, args.preserve_path)
-    snapshot_id = args.snapshot_id or now_utc().replace(':', '').replace('-', '')
-    records: list[SnapshotRecord] = []
-    try:
-        records = build_snapshot_records(workspace_root, workspace_id, snapshot_id, tuple(DEFAULT_DENYLIST), sources, records)
-        manifest = make_manifest(
-            workspace_root=workspace_root,
-            workspace_id=workspace_id,
-            snapshot_id=snapshot_id,
-            server_name=args.server_name,
-            container_identity=args.container_identity,
-            runtime_root=runtime_root,
-            container_cache_root=container_cache_root,
-            marker_dirname=marker_dirname,
-            root_preserve_paths=root_preserve_paths,
-            records=records,
-        )
-        print(json_dump(manifest))
-        return 0
-    finally:
-        cleanup_synthetic_refs(workspace_root, records)
-
-
 def run_sync(args: argparse.Namespace) -> int:
     sources = parse_sources(getattr(args, 'source', []))
     fixed = json.loads(Path(args.snapshot_file).read_text(encoding="utf-8")) if getattr(args, 'snapshot_file', None) else None
@@ -2424,319 +2035,7 @@ def run_sync(args: argparse.Namespace) -> int:
         else:
             records = build_snapshot_records(workspace_root, workspace_id, snapshot_id, tuple(DEFAULT_DENYLIST), sources, records)
         try:
-            record_map = {record.relpath: record for record in records}
-            prior_runtime_state = load_runtime_state(workspace_root)
-            last_container_state = (
-                prior_runtime_state
-                .get('servers', {})
-                .get(args.server_name, {})
-                .get('containers', {})
-                .get(args.container_identity, {})
-            )
-            last_commits = last_container_state.get('last_snapshot_commits', {})
-            installed_inputs = last_container_state.get('installed_build_inputs', {})
-
-            def changes(relpath: str) -> tuple[bool, bool]:
-                record = record_map.get(relpath)
-                return changed_build_inputs(record.build_inputs, installed_inputs.get(relpath)) if record else (False, False)
-
-            reinstall_vllm, vllm_dependency_changed = changes('vllm')
-            reinstall_vllm_ascend, vllm_ascend_dependency_changed = changes('vllm-ascend')
-            if reinstall_vllm and 'vllm-ascend' in record_map:
-                reinstall_vllm_ascend = True
-
-            if args.force_reinstall:
-                if 'vllm' in record_map:
-                    reinstall_vllm = True
-                if 'vllm-ascend' in record_map:
-                    reinstall_vllm_ascend = True
-            install_vllm_ascend_deps = vllm_ascend_dependency_changed or vllm_dependency_changed
-
             snapshot_commits = {record.relpath: record.commit for record in records}
-
-            if (
-                args.apply_mode in ('auto', 'install') and not args.dry_run
-                and not args.force_reinstall and not reinstall_vllm and not reinstall_vllm_ascend
-                and snapshot_commits == last_commits and last_container_state.get('first_reinstall_completed')
-            ):
-                marker = read_runtime_install_marker(container=container, runtime_root=runtime_root, marker_dirname=marker_dirname)
-                if not first_install_needed(marker, args.container_identity, runtime_root):
-                    observed = verify_runtime_commits_map(container=container, runtime_root=runtime_root, expected=snapshot_commits)
-                    if observed == snapshot_commits:
-                        summary = summary_payload(status='ready', server_name=args.server_name, container_identity=args.container_identity, workspace_id=workspace_id, container_cache_root=container_cache_root, records=records, reinstall_status='not-needed', reason='snapshot and installed build inputs unchanged', first_install=False, runtime_install_env=last_container_state.get('last_runtime_install_env', {}), observed_runtime_commits=observed)
-                        summary['fast_path'] = 'snapshot'
-                        print(json_dump(summary))
-                        keep_refs = True
-                        return 0
-
-            auto_selected_materialize = False
-            if args.apply_mode == 'auto':
-                needs_install = args.force_reinstall or reinstall_vllm or reinstall_vllm_ascend or install_vllm_ascend_deps
-                if not needs_install and not args.dry_run:
-                    current_phase = 'auto-apply-mode'
-                    marker = read_runtime_install_marker(
-                        container=container,
-                        runtime_root=runtime_root,
-                        marker_dirname=marker_dirname,
-                    )
-                    needs_install = first_install_needed(marker, args.container_identity, runtime_root)
-                args.apply_mode = 'install' if needs_install else 'materialize'
-                auto_selected_materialize = args.apply_mode == 'materialize'
-                emit_progress(
-                    'auto-apply-mode',
-                    selected=args.apply_mode,
-                    reinstall_vllm=reinstall_vllm,
-                    reinstall_vllm_ascend=reinstall_vllm_ascend,
-                    dependency_install=install_vllm_ascend_deps,
-                )
-
-            if args.apply_mode in {'source-only', 'materialize'}:
-                runtime_install_env: dict[str, str] = {}
-                manifest = make_manifest(
-                    workspace_root=workspace_root,
-                    workspace_id=workspace_id,
-                    snapshot_id=snapshot_id,
-                    server_name=args.server_name,
-                    container_identity=args.container_identity,
-                    runtime_root=runtime_root,
-                    container_cache_root=container_cache_root,
-                    marker_dirname=marker_dirname,
-                    root_preserve_paths=root_preserve_paths,
-                    records=records,
-                    runtime_install_env=runtime_install_env,
-                )
-                manifest['apply_mode'] = args.apply_mode
-                if args.print_manifest:
-                    print(json_dump(manifest))
-
-                if args.dry_run:
-                    summary = summary_payload(
-                        status='dry-run',
-                        server_name=args.server_name,
-                        container_identity=args.container_identity,
-                        workspace_id=workspace_id,
-                        container_cache_root=container_cache_root,
-                        records=records,
-                        reinstall_status='skipped-by-apply-mode',
-                        reason=f'apply_mode={args.apply_mode} skips runtime install/rebuild',
-                        first_install=False,
-                        runtime_install_env=runtime_install_env,
-                        observed_runtime_commits=None,
-                    )
-                    summary['apply_mode'] = args.apply_mode
-                    summary['manifest_path'] = manifest_path
-                    print(json_dump(summary))
-                    keep_refs = True
-                    return 0
-
-                lock_path = lock_path_for(container_cache_root, workspace_id, args.container_identity)
-                current_phase = 'acquire-lock'
-                emit_progress(current_phase, lock_path=lock_path, apply_mode=args.apply_mode)
-                acquire_container_lock(container, lock_path, args.dry_run)
-                try:
-                    if args.apply_mode == 'materialize' and not auto_selected_materialize:
-                        # Managed retries often change only the launch options.
-                        # Observe the exact current sources under the same lock
-                        # before deciding that transport/reset can be omitted.
-                        observed = verify_runtime_commits_map(
-                            container=container, runtime_root=runtime_root,
-                            expected=snapshot_commits, include_untracked=True,
-                        )
-                        if observed == snapshot_commits:
-                            summary = summary_payload(
-                                status='materialized', server_name=args.server_name,
-                                container_identity=args.container_identity, workspace_id=workspace_id,
-                                container_cache_root=container_cache_root, records=records,
-                                reinstall_status='skipped-by-apply-mode',
-                                reason='remote sources already match the clean snapshot',
-                                first_install=False, runtime_install_env={},
-                                observed_runtime_commits=observed,
-                            )
-                            summary.update(apply_mode='materialize', fast_path='materialized-snapshot', transfers=[])
-                            emit_progress('complete', status='materialized', fast_path='materialized-snapshot')
-                            print(json_dump(summary))
-                            keep_refs = True
-                            return 0
-                    current_phase = 'push-mirrors'
-                    emit_progress(current_phase, repo_count=len(records), apply_mode=args.apply_mode)
-                    all_mirror_paths = [mirror_path_for(container_cache_root, workspace_id, r) for r in records]
-                    mirror_refs = ensure_remote_bare_repos(
-                        container, all_mirror_paths, args.dry_run,
-                        refs=snapshot_mirror_refs(workspace_id) if args.transport in {'auto', 'git'} else (),
-                    )
-                    transfer_reports: list[dict[str, Any]] = []
-                    for record in records:
-                        emit_progress('push-mirror', relpath=record.relpath, transport=args.transport)
-                        transfer = push_snapshot_to_mirror(
-                            repo=record_source(workspace_root, record),
-                            container=container,
-                            mirror_path=mirror_path_for(container_cache_root, workspace_id, record),
-                            container_cache_root=container_cache_root,
-                            record=record,
-                            workspace_id=workspace_id,
-                            dry_run=args.dry_run,
-                            transport=args.transport,
-                            remote_refs=mirror_refs.get(mirror_path_for(container_cache_root, workspace_id, record)),
-                        )
-                        transfer_reports.append(transfer)
-                        emit_progress('push-mirror-complete', **transfer)
-                    manifest['transfers'] = transfer_reports
-
-                    current_phase = 'upload-manifest'
-                    emit_progress(current_phase, manifest_path=manifest_path, apply_mode=args.apply_mode)
-                    upload_manifest(container, manifest_path, manifest, args.dry_run)
-
-                    observed_runtime_commits = None
-                    status = 'source-only'
-                    if args.apply_mode == 'materialize':
-                        current_phase = 'materialize-runtime'
-                        emit_progress(current_phase, runtime_root=runtime_root, install='skipped')
-                        materialize_runtime(
-                            container=container,
-                            runtime_root=runtime_root,
-                            container_cache_root=container_cache_root,
-                            workspace_id=workspace_id,
-                            marker_dirname=marker_dirname,
-                            root_preserve_paths=root_preserve_paths,
-                            records=records,
-                            dry_run=args.dry_run,
-                        )
-                        current_phase = 'verify-runtime-commits'
-                        emit_progress(current_phase, repo_count=len(records))
-                        observed_runtime_commits = verify_runtime_commits(
-                            container=container,
-                            runtime_root=runtime_root,
-                            records=records,
-                            dry_run=args.dry_run,
-                        )
-                        expected_runtime_commits = {record.relpath: record.commit for record in records}
-                        if observed_runtime_commits != expected_runtime_commits:
-                            upload_manifest(
-                                container,
-                                manifest_path,
-                                final_manifest(
-                                    manifest,
-                                    status='failed',
-                                    reinstall_status='skipped-by-apply-mode',
-                                    runtime_commits=observed_runtime_commits,
-                                ),
-                                False,
-                            )
-                            summary = summary_payload(
-                                status='failed',
-                                server_name=args.server_name,
-                                container_identity=args.container_identity,
-                                workspace_id=workspace_id,
-                                container_cache_root=container_cache_root,
-                                records=records,
-                                reinstall_status='skipped-by-apply-mode',
-                                reason='runtime commit verification mismatch',
-                                first_install=False,
-                                runtime_install_env=runtime_install_env,
-                                observed_runtime_commits=observed_runtime_commits,
-                            )
-                            summary['apply_mode'] = args.apply_mode
-                            summary['manifest_path'] = manifest_path
-                            summary['transfers'] = transfer_reports
-                            print(json_dump(summary))
-                            return 1
-                        status = 'materialized'
-                        if auto_selected_materialize:
-                            # Auto mode proved no native/dependency changes, so
-                            # recording this snapshot keeps future runs on the
-                            # fingerprint fast path without hiding install needs.
-                            current_phase = 'update-local-state'
-                            emit_progress(current_phase, server_name=args.server_name)
-                            update_runtime_state(
-                                repo_root=workspace_root,
-                                server_name=args.server_name,
-                                container_identity=args.container_identity,
-                                runtime_root=runtime_root,
-                                container_cache_root=container_cache_root,
-                                marker_dirname=marker_dirname,
-                                records=records,
-                                first_reinstall_completed=last_container_state.get('first_reinstall_completed', False),
-                                runtime_install_env=last_container_state.get('last_runtime_install_env', {}),
-                            )
-
-                    current_phase = 'finalize-manifest'
-                    emit_progress(current_phase, manifest_path=manifest_path, apply_mode=args.apply_mode)
-                    upload_manifest(
-                        container,
-                        manifest_path,
-                        final_manifest(
-                            manifest,
-                            status=status,
-                            reinstall_status='skipped-by-apply-mode',
-                            runtime_commits=observed_runtime_commits,
-                        ),
-                        False,
-                    )
-                    emit_progress('complete', status=status, apply_mode=args.apply_mode)
-                    summary = summary_payload(
-                        status=status,
-                        server_name=args.server_name,
-                        container_identity=args.container_identity,
-                        workspace_id=workspace_id,
-                        container_cache_root=container_cache_root,
-                        records=records,
-                        reinstall_status='skipped-by-apply-mode',
-                        reason=f'apply_mode={args.apply_mode} skipped runtime install/rebuild',
-                        first_install=False,
-                        runtime_install_env=runtime_install_env,
-                        observed_runtime_commits=observed_runtime_commits,
-                    )
-                    summary['apply_mode'] = args.apply_mode
-                    summary['manifest_path'] = manifest_path
-                    summary['transfers'] = transfer_reports
-                    print(json_dump(summary))
-                    keep_refs = True
-                    return 0
-                finally:
-                    emit_progress('release-lock', lock_path=lock_path)
-                    release_container_lock(container, lock_path, args.dry_run)
-
-            current_phase = 'read-runtime-marker'
-            emit_progress(current_phase, runtime_root=runtime_root)
-            marker = read_runtime_install_marker(
-                container=container,
-                runtime_root=runtime_root,
-                marker_dirname=marker_dirname,
-            )
-            first_install = first_install_needed(marker, args.container_identity, runtime_root)
-            if first_install:
-                current_phase = 'check-consent'
-                emit_progress(current_phase, container_identity=args.container_identity)
-                consent = resolve_install_consent(workspace_root, args.server_name, args.container_identity)
-                if consent != 'allow':
-                    summary = summary_payload(
-                        status='blocked',
-                        server_name=args.server_name,
-                        container_identity=args.container_identity,
-                        workspace_id=workspace_id,
-                        container_cache_root=container_cache_root,
-                        records=records,
-                        reinstall_status='blocked-by-consent',
-                        reason='first-time runtime replacement requires explicit consent',
-                        first_install=True,
-                        observed_runtime_commits=None,
-                    )
-                    print(json_dump(summary))
-                    return 2
-                reinstall_vllm = True if 'vllm' in record_map else reinstall_vllm
-                reinstall_vllm_ascend = True if 'vllm-ascend' in record_map else reinstall_vllm_ascend
-                install_vllm_ascend_deps = True if 'vllm-ascend' in record_map else install_vllm_ascend_deps
-
-            runtime_install_env: dict[str, str] = {}
-            if not args.dry_run:
-                current_phase = 'runtime-install-env'
-                emit_progress(current_phase, runtime_root=runtime_root)
-                runtime_install_env = read_runtime_install_env(
-                    container=container,
-                    runtime_root=runtime_root,
-                    dry_run=args.dry_run,
-                )
-
             manifest = make_manifest(
                 workspace_root=workspace_root,
                 workspace_id=workspace_id,
@@ -2748,13 +2047,12 @@ def run_sync(args: argparse.Namespace) -> int:
                 marker_dirname=marker_dirname,
                 root_preserve_paths=root_preserve_paths,
                 records=records,
-                runtime_install_env=runtime_install_env,
             )
+            manifest['apply_mode'] = args.apply_mode
             if args.print_manifest:
                 print(json_dump(manifest))
 
             if args.dry_run:
-                reinstall_status = 'would-perform' if (reinstall_vllm or reinstall_vllm_ascend) else 'not-needed'
                 summary = summary_payload(
                     status='dry-run',
                     server_name=args.server_name,
@@ -2762,40 +2060,61 @@ def run_sync(args: argparse.Namespace) -> int:
                     workspace_id=workspace_id,
                     container_cache_root=container_cache_root,
                     records=records,
-                    reinstall_status=reinstall_status,
-                    reason=None,
-                    first_install=first_install,
-                    runtime_install_env=runtime_install_env,
+                    reinstall_status='skipped-by-apply-mode',
+                    reason=f'apply_mode={args.apply_mode} skips runtime install/rebuild',
+                    first_install=False,
                     observed_runtime_commits=None,
                 )
+                summary['apply_mode'] = args.apply_mode
+                summary['manifest_path'] = manifest_path
                 print(json_dump(summary))
                 keep_refs = True
                 return 0
 
             lock_path = lock_path_for(container_cache_root, workspace_id, args.container_identity)
             current_phase = 'acquire-lock'
-            emit_progress(current_phase, lock_path=lock_path)
+            emit_progress(current_phase, lock_path=lock_path, apply_mode=args.apply_mode)
             acquire_container_lock(container, lock_path, args.dry_run)
             try:
+                if args.apply_mode == 'materialize':
+                    # Managed retries often change only the launch options.
+                    # Observe the exact current sources under the same lock
+                    # before deciding that transport/reset can be omitted.
+                    observed = verify_runtime_commits_map(
+                        container=container, runtime_root=runtime_root,
+                        expected=snapshot_commits, include_untracked=True,
+                    )
+                    if observed == snapshot_commits:
+                        summary = summary_payload(
+                            status='materialized', server_name=args.server_name,
+                            container_identity=args.container_identity, workspace_id=workspace_id,
+                            container_cache_root=container_cache_root, records=records,
+                            reinstall_status='skipped-by-apply-mode',
+                            reason='remote sources already match the clean snapshot',
+                            first_install=False, runtime_install_env={},
+                            observed_runtime_commits=observed,
+                        )
+                        summary.update(apply_mode='materialize', fast_path='materialized-snapshot', transfers=[])
+                        emit_progress('complete', status='materialized', fast_path='materialized-snapshot')
+                        print(json_dump(summary))
+                        keep_refs = True
+                        return 0
                 current_phase = 'push-mirrors'
-                emit_progress(current_phase, repo_count=len(records))
+                emit_progress(current_phase, repo_count=len(records), apply_mode=args.apply_mode)
                 all_mirror_paths = [mirror_path_for(container_cache_root, workspace_id, r) for r in records]
                 mirror_refs = ensure_remote_bare_repos(
                     container, all_mirror_paths, args.dry_run,
-                    refs=snapshot_mirror_refs(workspace_id) if args.transport in {'auto', 'git'} else (),
+                    refs=snapshot_mirror_refs(workspace_id),
                 )
                 transfer_reports: list[dict[str, Any]] = []
                 for record in records:
-                    emit_progress('push-mirror', relpath=record.relpath, transport=args.transport)
-                    transfer = push_snapshot_to_mirror(
+                    emit_progress('push-mirror', relpath=record.relpath, transport='git')
+                    transfer = push_snapshot_via_git(
                         repo=record_source(workspace_root, record),
                         container=container,
                         mirror_path=mirror_path_for(container_cache_root, workspace_id, record),
-                        container_cache_root=container_cache_root,
                         record=record,
                         workspace_id=workspace_id,
-                        dry_run=args.dry_run,
-                        transport=args.transport,
                         remote_refs=mirror_refs.get(mirror_path_for(container_cache_root, workspace_id, record)),
                     )
                     transfer_reports.append(transfer)
@@ -2803,204 +2122,91 @@ def run_sync(args: argparse.Namespace) -> int:
                 manifest['transfers'] = transfer_reports
 
                 current_phase = 'upload-manifest'
-                emit_progress(current_phase, manifest_path=manifest_path)
+                emit_progress(current_phase, manifest_path=manifest_path, apply_mode=args.apply_mode)
                 upload_manifest(container, manifest_path, manifest, args.dry_run)
 
-                if first_install:
-                    current_phase = 'first-install-prepare'
-                    emit_progress(current_phase, runtime_root=runtime_root)
-                    ssh_exec(container, prepare_isolated_root_script(runtime_root))
-
-                current_phase = 'materialize-runtime'
-                emit_progress(current_phase, runtime_root=runtime_root)
-                materialize_runtime(
-                    container=container,
-                    runtime_root=runtime_root,
-                    container_cache_root=container_cache_root,
-                    workspace_id=workspace_id,
-                    marker_dirname=marker_dirname,
-                    root_preserve_paths=root_preserve_paths,
-                    records=records,
-                    dry_run=args.dry_run,
-                )
-
-                reinstall_status = 'not-needed'
-                if reinstall_vllm or reinstall_vllm_ascend:
-                    reinstall_status = 'performed'
-                    current_phase = 'runtime-install'
-                    emit_progress(
-                        current_phase,
-                        reinstall_vllm=reinstall_vllm,
-                        reinstall_vllm_ascend=reinstall_vllm_ascend,
-                    )
-                    if not first_install:
-                        uninstall_pkgs: list[str] = []
-                        if reinstall_vllm:
-                            uninstall_pkgs.append('vllm')
-                        if reinstall_vllm_ascend:
-                            uninstall_pkgs.extend(['vllm-ascend', 'vllm_ascend'])
-                        emit_progress('runtime-install-uninstall', packages=uninstall_pkgs)
-                        run_runtime_install_step(
-                            container=container,
-                            runtime_root=runtime_root,
-                            marker_dirname=marker_dirname,
-                            container_identity=args.container_identity,
-                            step='uninstall',
-                            stream_progress=False,
-                            uninstall_packages=tuple(uninstall_pkgs),
-                        )
-                    if reinstall_vllm:
-                        emit_progress('runtime-install-vllm', package='vllm')
-                        run_runtime_install_step(
-                            container=container,
-                            runtime_root=runtime_root,
-                            marker_dirname=marker_dirname,
-                            container_identity=args.container_identity,
-                            step='install-vllm',
-                            stream_progress=True,
-                        )
-                    if reinstall_vllm_ascend:
-                        emit_progress('runtime-install-check-build-compat')
-                        run_runtime_install_step(
-                            container=container,
-                            runtime_root=runtime_root,
-                            marker_dirname=marker_dirname,
-                            container_identity=args.container_identity,
-                            step='check-build-compat',
-                            stream_progress=True,
-                        )
-                        if install_vllm_ascend_deps:
-                            emit_progress('runtime-install-vllm-ascend-requirements', requirements='requirements.txt')
-                            run_runtime_install_step(
-                                container=container,
-                                runtime_root=runtime_root,
-                                marker_dirname=marker_dirname,
-                                container_identity=args.container_identity,
-                                step='install-vllm-ascend-requirements',
-                                stream_progress=True,
-                            )
-                        else:
-                            emit_progress(
-                                'runtime-install-vllm-ascend-requirements',
-                                requirements='skipped-paired-image-deps',
-                            )
-                        emit_progress('runtime-install-vllm-ascend', package='vllm-ascend')
-                        run_runtime_install_step(
-                            container=container,
-                            runtime_root=runtime_root,
-                            marker_dirname=marker_dirname,
-                            container_identity=args.container_identity,
-                            step='install-vllm-ascend',
-                            stream_progress=True,
-                        )
-                    emit_progress('runtime-install-verify-imports')
-                    run_runtime_install_step(
+                observed_runtime_commits = None
+                status = 'source-only'
+                if args.apply_mode == 'materialize':
+                    current_phase = 'materialize-runtime'
+                    emit_progress(current_phase, runtime_root=runtime_root, install='skipped')
+                    materialize_runtime(
                         container=container,
                         runtime_root=runtime_root,
-                        marker_dirname=marker_dirname,
-                        container_identity=args.container_identity,
-                        step='verify-imports',
-                        stream_progress=True,
-                    )
-                    emit_progress('runtime-install-verify-deps')
-                    run_runtime_install_step(
-                        container=container,
-                        runtime_root=runtime_root,
-                        marker_dirname=marker_dirname,
-                        container_identity=args.container_identity,
-                        step='verify-deps',
-                        stream_progress=True,
-                    )
-                    emit_progress('runtime-install-marker')
-                    run_runtime_install_step(
-                        container=container,
-                        runtime_root=runtime_root,
-                        marker_dirname=marker_dirname,
-                        container_identity=args.container_identity,
-                        step='write-marker',
-                        stream_progress=False,
-                    )
-
-                current_phase = 'verify-runtime-commits'
-                emit_progress(current_phase, repo_count=len(records))
-                observed_runtime_commits = verify_runtime_commits(
-                    container=container,
-                    runtime_root=runtime_root,
-                    records=records,
-                    dry_run=args.dry_run,
-                )
-                expected_runtime_commits = {record.relpath: record.commit for record in records}
-                if observed_runtime_commits != expected_runtime_commits:
-                    upload_manifest(
-                        container,
-                        manifest_path,
-                        final_manifest(
-                            manifest,
-                            status='failed',
-                            reinstall_status=reinstall_status,
-                            runtime_commits=observed_runtime_commits,
-                        ),
-                        False,
-                    )
-                    summary = summary_payload(
-                        status='failed',
-                        server_name=args.server_name,
-                        container_identity=args.container_identity,
-                        workspace_id=workspace_id,
                         container_cache_root=container_cache_root,
+                        workspace_id=workspace_id,
+                        marker_dirname=marker_dirname,
+                        root_preserve_paths=root_preserve_paths,
                         records=records,
-                        reinstall_status=reinstall_status,
-                        reason='runtime commit verification mismatch',
-                        first_install=first_install,
-                        runtime_install_env=runtime_install_env,
-                        observed_runtime_commits=observed_runtime_commits,
+                        dry_run=args.dry_run,
                     )
-                    summary['transfers'] = transfer_reports
-                    print(json_dump(summary))
-                    return 1
+                    current_phase = 'verify-runtime-commits'
+                    emit_progress(current_phase, repo_count=len(records))
+                    observed_runtime_commits = verify_runtime_commits(
+                        container=container,
+                        runtime_root=runtime_root,
+                        records=records,
+                        dry_run=args.dry_run,
+                    )
+                    if observed_runtime_commits != snapshot_commits:
+                        upload_manifest(
+                            container,
+                            manifest_path,
+                            final_manifest(
+                                manifest,
+                                status='failed',
+                                reinstall_status='skipped-by-apply-mode',
+                                runtime_commits=observed_runtime_commits,
+                            ),
+                            False,
+                        )
+                        summary = summary_payload(
+                            status='failed',
+                            server_name=args.server_name,
+                            container_identity=args.container_identity,
+                            workspace_id=workspace_id,
+                            container_cache_root=container_cache_root,
+                            records=records,
+                            reinstall_status='skipped-by-apply-mode',
+                            reason='runtime commit verification mismatch',
+                            first_install=False,
+                            observed_runtime_commits=observed_runtime_commits,
+                        )
+                        summary['apply_mode'] = args.apply_mode
+                        summary['manifest_path'] = manifest_path
+                        summary['transfers'] = transfer_reports
+                        print(json_dump(summary))
+                        return 1
+                    status = 'materialized'
 
-                current_phase = 'update-local-state'
-                emit_progress(current_phase, server_name=args.server_name)
-                update_runtime_state(
-                    repo_root=workspace_root,
-                    server_name=args.server_name,
-                    container_identity=args.container_identity,
-                    runtime_root=runtime_root,
-                    container_cache_root=container_cache_root,
-                    marker_dirname=marker_dirname,
-                    records=records,
-                    first_reinstall_completed=first_install
-                    or last_container_state.get('first_reinstall_completed', False)
-                    or reinstall_status == 'performed',
-                    runtime_install_env=runtime_install_env,
-                )
                 current_phase = 'finalize-manifest'
-                emit_progress(current_phase, manifest_path=manifest_path)
+                emit_progress(current_phase, manifest_path=manifest_path, apply_mode=args.apply_mode)
                 upload_manifest(
                     container,
                     manifest_path,
                     final_manifest(
                         manifest,
-                        status='ready',
-                        reinstall_status=reinstall_status,
+                        status=status,
+                        reinstall_status='skipped-by-apply-mode',
                         runtime_commits=observed_runtime_commits,
                     ),
                     False,
                 )
-                emit_progress('complete', status='ready')
+                emit_progress('complete', status=status, apply_mode=args.apply_mode)
                 summary = summary_payload(
-                    status='ready',
+                    status=status,
                     server_name=args.server_name,
                     container_identity=args.container_identity,
                     workspace_id=workspace_id,
                     container_cache_root=container_cache_root,
                     records=records,
-                    reinstall_status=reinstall_status,
-                    reason=None,
-                    first_install=first_install,
-                    runtime_install_env=runtime_install_env,
+                    reinstall_status='skipped-by-apply-mode',
+                    reason=f'apply_mode={args.apply_mode} skipped runtime install/rebuild',
+                    first_install=False,
                     observed_runtime_commits=observed_runtime_commits,
                 )
+                summary['apply_mode'] = args.apply_mode
+                summary['manifest_path'] = manifest_path
                 summary['transfers'] = transfer_reports
                 print(json_dump(summary))
                 keep_refs = True
@@ -3015,76 +2221,32 @@ def run_sync(args: argparse.Namespace) -> int:
             cleanup_synthetic_refs(workspace_root, records)
 
 
-def run_gc(args: argparse.Namespace) -> int:
-    lib = Path(__file__).resolve().parents[3] / 'lib'
-    if str(lib) not in sys.path:
-        sys.path.insert(0, str(lib))
-    from mindie_coordinator.code_identity import gc_parity_refs
-
-    result = gc_parity_refs(
-        Path(args.workspace_root),
-        max_age_days=args.max_age_days,
-        now=args.now,
-    )
-    print(json_dump(result))
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Prepare or enforce remote code parity for a ready runtime.', allow_abbrev=False)
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    def add_shared_arguments(target: argparse.ArgumentParser) -> None:
-        target.add_argument('--workspace-root', default='', help='Optional local state directory; bound --source worktrees are snapshotted directly.')
-        target.add_argument('--source', action='append', default=[], help='Use an actual external business worktree: vllm=/path or vllm-ascend=/path.')
-        target.add_argument('--workspace-id', required=True, help='Stable workspace id used for container cache namespacing.')
-        target.add_argument('--server-name', required=True)
-        target.add_argument('--runtime-root', required=True)
-        target.add_argument('--container-identity', required=True)
-        target.add_argument('--container-cache-root', default=DEFAULT_CONTAINER_CACHE_ROOT)
-        target.add_argument('--marker-dirname', default=DEFAULT_MARKER_DIRNAME)
-        target.add_argument('--preserve-path', action='append', default=[])
-
-    plan = subparsers.add_parser('plan', help='Build a synthetic snapshot manifest without remote mutations.')
-    add_shared_arguments(plan)
-    plan.add_argument('--snapshot-id', default=None)
-
-    sync = subparsers.add_parser('sync', help='Publish container-local mirrors, materialize runtime state, and reinstall when required.')
-    add_shared_arguments(sync)
+    sync = subparsers.add_parser('sync', help='Publish container-local mirrors and materialize runtime state.')
+    sync.add_argument('--workspace-root', default='', help='Optional local state directory; bound --source worktrees are snapshotted directly.')
+    sync.add_argument('--source', action='append', default=[], help='Use an actual external business worktree: vllm=/path or vllm-ascend=/path.')
+    sync.add_argument('--workspace-id', required=True, help='Stable workspace id used for container cache namespacing.')
+    sync.add_argument('--server-name', required=True)
+    sync.add_argument('--runtime-root', required=True)
+    sync.add_argument('--container-identity', required=True)
+    sync.add_argument('--container-cache-root', default=DEFAULT_CONTAINER_CACHE_ROOT)
+    sync.add_argument('--marker-dirname', default=DEFAULT_MARKER_DIRNAME)
+    sync.add_argument('--preserve-path', action='append', default=[])
     sync.add_argument('--snapshot-id', default=None)
     sync.add_argument('--snapshot-file', help='Use a previously captured execution source descriptor without rereading worktrees.')
     sync.add_argument('--container-host', required=True)
     sync.add_argument('--container-port', type=int, required=True)
     sync.add_argument('--container-user', required=True)
-    sync.add_argument('--force-reinstall', action='store_true', help='Force reinstall of vllm and vllm-ascend regardless of what changed.')
     sync.add_argument('--dry-run', action='store_true')
     sync.add_argument('--print-manifest', action='store_true')
     sync.add_argument(
-        '--transport',
-        choices=TRANSFER_MODES,
-        default='auto',
-        help='auto prefers incremental Git push and falls back to the full-bundle transport.',
-    )
-    sync.add_argument(
         '--apply-mode',
-        choices=('auto', 'source-only', 'materialize', 'install'),
-        default='auto',
-        help='auto picks materialize for pure-Python changes and install only when native/dependency files changed (or first install); source-only publishes snapshots only; materialize updates runtime sources without install/rebuild; install forces the full parity behavior.',
+        choices=('source-only', 'materialize'),
+        default='materialize',
     )
-
-    gc = subparsers.add_parser(
-        'gc',
-        help='Delete unused refs/parity refs older than seven days.',
-    )
-    gc.add_argument('--workspace-root', required=True, help='Local workspace root.')
-    gc.add_argument('--max-age-days', type=int, default=7)
-    gc.add_argument(
-        '--now',
-        type=float,
-        default=None,
-        help='Unix timestamp used as now; tests pin this so age is deterministic.',
-    )
-
     return parser
 
 
@@ -3094,12 +2256,8 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        if args.command == 'plan':
-            return run_plan(args)
         if args.command == 'sync':
             return run_sync(args)
-        if args.command == 'gc':
-            return run_gc(args)
         parser.error(f'unsupported command: {args.command}')
         return 2
     except Exception as exc:

@@ -185,6 +185,66 @@ class FleetProbeTests(unittest.TestCase):
         self.assertEqual(len(weights), 1)
         self.assertEqual(weights[0]["mountpoint"], "/data/weights")
 
+    def test_parse_real_golden_a2_and_a3_fixtures(self):
+        fixtures_dir = Path(__file__).parent / "fixtures"
+        a2_raw = (fixtures_dir / "a2-173-125-1-2.txt").read_text(encoding="utf-8")
+        a3_idle_raw = (fixtures_dir / "a3-192-168-13-165-idle.txt").read_text(encoding="utf-8")
+        a3_busy_raw = (fixtures_dir / "a3-192-168-13-154-busy.txt").read_text(encoding="utf-8")
+
+        a2 = parse_npu_smi_info(a2_raw)
+        self.assertEqual(a2["smi_version"], "25.2.2")
+        self.assertEqual(a2["driver_version"], "25.2.2")
+        self.assertEqual(len(a2["npus"]), 8)
+        self.assertEqual([n["npu_id"] for n in a2["npus"]], list(range(8)))
+        self.assertEqual([n["phy_ids"] for n in a2["npus"]], [[i] for i in range(8)])
+        self.assertTrue(all(not n["busy"] for n in a2["npus"]))
+
+        a3_idle = parse_npu_smi_info(a3_idle_raw)
+        self.assertEqual(a3_idle["smi_version"], "26.0.rc1")
+        self.assertEqual(a3_idle["driver_version"], "26.0.rc1")
+        self.assertEqual(len(a3_idle["npus"]), 8)
+        self.assertEqual([n["npu_id"] for n in a3_idle["npus"]], list(range(8)))
+        self.assertEqual(
+            [n["phy_ids"] for n in a3_idle["npus"]],
+            [[i * 2, i * 2 + 1] for i in range(8)],
+        )
+        self.assertTrue(all(n["die_count"] == 2 and not n["busy"] for n in a3_idle["npus"]))
+        self.assertEqual(a3_idle["npus"][0]["hbm_total_mb"], 131072)
+
+        a3_busy = parse_npu_smi_info(a3_busy_raw)
+        self.assertEqual(len(a3_busy["npus"]), 8)
+        self.assertTrue(all(n["busy"] for n in a3_busy["npus"]))
+        self.assertEqual(len(a3_busy["processes"]), 16)
+        self.assertEqual(
+            sorted(p["phy_id"] for p in a3_busy["processes"]),
+            list(range(16)),
+        )
+
+    def test_capacity_finder_maps_a3_dual_die_to_physical_phy_ids(self):
+        fixtures_dir = Path(__file__).parent / "fixtures"
+        a3_idle_raw = (fixtures_dir / "a3-192-168-13-165-idle.txt").read_text(encoding="utf-8")
+        probe_out = f"===SECTION:NPU_SMI===\n{a3_idle_raw}\n===SECTION:SYSTEM===\nHOSTNAME:a3-node\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = MachineDirectory(path=root / "machines.json")
+            store.upsert_machine({"alias": "atlas-a3", "host": {"ip": "192.168.13.165", "port": 22}})
+            cap = find_fleet_capacity(
+                count=2,
+                directory=store,
+                state_dir=root,
+                mode="live",
+                runner=lambda _spec, _script: probe_out,
+            )
+            self.assertEqual(cap["matched_count"], 1)
+            rec = cap["recommended"]
+            self.assertEqual(rec["alias"], "atlas-a3")
+            self.assertEqual(rec["recommended_npu_ids"], [0, 1])
+            self.assertEqual(rec["recommended_phy_ids"], [0, 1, 2, 3])
+            self.assertEqual(rec["recommended_devices"], [0, 1, 2, 3])
+            self.assertEqual(rec["ascend_rt_visible_devices"], "0,1,2,3")
+            self.assertEqual(rec["free_phy_ids"], list(range(16)))
+            self.assertTrue(rec["contiguous"])
+
     def test_capacity_finder_prefers_contiguous_free_npus(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -266,65 +326,133 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
             mounts = mindie_call("mindie.probe", {"action": "mounts", "alias": "atlas-a3", "mode": "cache"})["result"]
             self.assertEqual(mounts["data"]["hosts"][0]["weights_mounts"][0]["mountpoint"], "/data/weights")
 
-    def test_lease_acquire_heartbeat_and_release_with_host_queue(self):
+    def test_lease_acquire_heartbeat_and_release_with_real_host_coordinator(self):
+        from mindie_coordinator.host import mindie_npu_coordination
+
+        fixtures_dir = Path(__file__).parent / "fixtures"
+        a2_raw = (fixtures_dir / "a2-173-125-1-2.txt").read_text(encoding="utf-8")
+        host_state_dir = self.root / "remote_host_state"
+
         store = MachineDirectory(path=self.root / "machines.json")
-        store.upsert_machine({"alias": "atlas-a3", "host": {"ip": "10.0.0.12", "port": 22}})
+        store.upsert_machine({"alias": "atlas-a2", "host": {"ip": "173.125.1.2", "port": 22}})
 
-        def fake_run(_target, command):
-            if '"action":"acquire"' in command:
-                return json.dumps(
-                    {
-                        "status": "acquired",
-                        "task": {
-                            "task_id": "lease-alice-1",
-                            "state": "active",
-                            "allocated_npus": [2, 3],
-                            "service_port": 18005,
-                            "job_token": "tok-123",
-                        },
-                    }
-                )
-            if '"action":"heartbeat"' in command:
-                return json.dumps(
-                    {
-                        "status": "active",
-                        "task": {
-                            "task_id": "lease-alice-1",
-                            "state": "active",
-                            "allocated_npus": [2, 3],
-                            "service_port": 18005,
-                        },
-                    }
-                )
-            if '"action":"release"' in command:
-                return json.dumps({"status": "released", "task": {"task_id": "lease-alice-1", "state": "released"}})
-            return json.dumps({"status": "ok", "tasks": []})
+        class RealCoordinatorHostQueue(HostQueue):
+            def __init__(self):
+                super().__init__(lambda _target, _cmd: "{}")
 
-        queue = HostQueue(fake_run)
+            def request(self, target, payload):
+                req = {**dict(payload), "state_dir": str(host_state_dir)}
+                return mindie_npu_coordination.handle_request(
+                    req,
+                    probe=lambda: mindie_npu_coordination.parse_npu_smi_info(a2_raw),
+                    listening_ports=lambda: {"status": "ok", "ports": [], "source": "test"},
+                )
+
+        queue = RealCoordinatorHostQueue()
         acquired = handle_lease(
-            {"action": "acquire", "alias": "atlas-a3", "lease_id": "lease-alice-1", "npu_count": 2, "service_port": 0},
+            {"action": "acquire", "alias": "atlas-a2", "lease_id": "lease-alice-1", "npu_count": 2, "service_port": 0},
             directory=store,
             queue=queue,
+            state_dir=self.root,
         )
         self.assertEqual(acquired["state"], "active")
-        self.assertEqual(acquired["devices"], [2, 3])
-        self.assertEqual(acquired["ascend_rt_visible_devices"], "2,3")
-        self.assertEqual(acquired["service_port"], 18005)
-        self.assertEqual(acquired["env"]["ASCEND_RT_VISIBLE_DEVICES"], "2,3")
+        self.assertEqual(acquired["lease_state"], "granted")
+        self.assertEqual(acquired["devices"], [0, 1])
+        self.assertEqual(acquired["ascend_rt_visible_devices"], "0,1")
+        self.assertGreaterEqual(acquired["service_port"], 18000)
+        self.assertIsNotNone(acquired["fence_token"])
+        self.assertEqual(acquired["env"]["ASCEND_RT_VISIBLE_DEVICES"], "0,1")
 
         hb = handle_lease(
-            {"action": "heartbeat", "alias": "atlas-a3", "lease_id": "lease-alice-1"},
+            {"action": "heartbeat", "alias": "atlas-a2", "lease_id": "lease-alice-1"},
             directory=store,
             queue=queue,
+            state_dir=self.root,
         )
         self.assertEqual(hb["state"], "active")
+        self.assertEqual(hb["lease_state"], "granted")
+        self.assertEqual(hb["fence_token"], acquired["fence_token"])
 
-        rel = handle_lease(
-            {"action": "release", "alias": "atlas-a3", "lease_id": "lease-alice-1"},
+        status = handle_lease(
+            {"action": "status", "alias": "atlas-a2", "lease_id": "lease-alice-1"},
             directory=store,
             queue=queue,
+            state_dir=self.root,
+        )
+        self.assertEqual(status["count"], 1)
+        self.assertEqual(status["leases"][0]["lease_id"], "lease-alice-1")
+
+        rel = handle_lease(
+            {"action": "release", "alias": "atlas-a2", "lease_id": "lease-alice-1"},
+            directory=store,
+            queue=queue,
+            state_dir=self.root,
         )
         self.assertEqual(rel["state"], "released")
+
+    def test_container_provision_reserves_port_and_preserves_multi_alias_same_host(self):
+        from mindie_coordinator import provision
+        from mindie_coordinator.host import mindie_npu_coordination
+
+        fixtures_dir = Path(__file__).parent / "fixtures"
+        a3_idle_raw = (fixtures_dir / "a3-192-168-13-165-idle.txt").read_text(encoding="utf-8")
+        host_state_dir = self.root / "remote_host_state"
+        store = MachineDirectory(path=self.root / "machines.json")
+        store.upsert_machine({"alias": "atlas-a3-alice", "host": {"ip": "192.168.13.165", "port": 22}})
+        store.upsert_machine({"alias": "atlas-a3-bob", "host": {"ip": "192.168.13.165", "port": 22}})
+        self.assertEqual(len(store.machines()), 2)
+
+        reserved_requests = []
+
+        class RealPortReserveQueue(HostQueue):
+            def __init__(self):
+                super().__init__(lambda _target, _cmd: "{}")
+
+            def request(self, target, payload):
+                reserved_requests.append(payload)
+                req = {**dict(payload), "state_dir": str(host_state_dir)}
+                return mindie_npu_coordination.handle_request(
+                    req,
+                    probe=lambda: mindie_npu_coordination.parse_npu_smi_info(a3_idle_raw),
+                    listening_ports=lambda: {"status": "ok", "ports": [], "source": "test"},
+                )
+
+        with mock.patch.object(
+            provision.host_ops,
+            "run_remote_script",
+            side_effect=["probe", "bootstrap", "smoke"],
+        ), mock.patch.object(
+            provision.host_ops,
+            "assert_remote_success",
+            side_effect=[{"free_port": 46000}, {}, {}],
+        ), mock.patch.object(
+            provision.host_ops,
+            "find_public_key",
+            return_value=self.root / "key.pub",
+        ), mock.patch.object(
+            provision.host_ops,
+            "load_public_key",
+            return_value="ssh-ed25519 test",
+        ):
+            res = handle_container(
+                {
+                    "action": "provision",
+                    "alias": "atlas-a3-bob",
+                    "user_tag": "bob",
+                    "image": "stable",
+                },
+                directory=store,
+                queue=RealPortReserveQueue(),
+            )
+        self.assertEqual(res["alias"], "atlas-a3-bob")
+        self.assertTrue(any(r.get("action") == "container-ssh-reserve" for r in reserved_requests))
+        # Verify both aliases on 192.168.13.165 remain intact
+        aliases = [m["alias"] for m in store.machines()]
+        self.assertEqual(aliases, ["atlas-a3-alice", "atlas-a3-bob"])
+        bob_rec = store.record("atlas-a3-bob")
+        self.assertEqual(bob_rec["container"]["name"], "mindie-bob")
+        self.assertGreaterEqual(bob_rec["container"]["ssh_port"], 2222)
+
 
     def test_coordinator_to_remote_dev_six_harness_bridge(self):
         import remote_dev.core.endpoint as rd_endpoint
@@ -390,6 +518,41 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
                 ep_host = mock_bash.call_args.args[0]
                 self.assertEqual((ep_host.host, ep_host.port, ep_host.container), ("10.0.0.88", 22, None))
                 self.assertEqual(mock_bash.call_args.kwargs["command"], "npu-smi info")
+
+    def test_fleet_probe_script_never_runs_untimed_npu_smi_after_timeout(self):
+        import subprocess
+        from mindie_coordinator.fleet_probe import REMOTE_FLEET_PROBE_SCRIPT
+
+        bin_dir = self.root / "fake_bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        calls_log = self.root / "npu_smi_calls.log"
+        fake_npu_smi = bin_dir / "npu-smi"
+        fake_npu_smi.write_text(
+            "#!/bin/sh\necho \"direct:$*\" >> npu_smi_calls.log\nexit 0\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        fake_npu_smi.chmod(0o755)
+        fake_timeout = bin_dir / "timeout"
+        fake_timeout.write_text(
+            "#!/bin/sh\necho \"timed:$*\" >> npu_smi_calls.log\nexit 124\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        fake_timeout.chmod(0o755)
+
+        npu_section = REMOTE_FLEET_PROBE_SCRIPT.split('echo "===SECTION:CONTAINERS==="')[0] + 'echo "===SECTION:CONTAINERS==="\n'
+        npu_section = npu_section.replace(
+            'export PATH="/usr/local/Ascend/driver/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
+            'export PATH="$PWD/fake_bin:$PATH"',
+        )
+        # Git's sh on Windows also needs shell-native paths and LF scripts.
+        res = subprocess.run(
+            ["sh", "-c", npu_section], cwd=self.root, capture_output=True, text=True, timeout=5, check=True
+        )
+        self.assertIn("===SECTION:NPU_SMI===", res.stdout)
+        recorded = calls_log.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(recorded, ["timed:10 npu-smi info"])
 
 
 if __name__ == "__main__":

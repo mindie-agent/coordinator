@@ -1,8 +1,24 @@
 """On-demand export from existing verified MindIE roots on one Docker host.
 
-Run only after a shared-cache miss. Discovery reads donor metadata; export
-writes only the host-shared cache. No donor interpreter, source or container
-configuration is modified, and unqualified historical installs are skipped.
+[Role]
+Discovers compatible verified `.mindie-runtime/ready-profile.json` donor roots
+across running `mindie-*` containers on the same Docker host and exports their
+native bundle into `/tmp/mindie-native-cache` on a shared-cache miss.
+
+[Invariants]
+- Only containers matching the exact `image_digest` with a RW bind mount of host
+  `/tmp` -> `/tmp` are eligible donors; exact native-key matches sort before
+  dependency-compatible incremental baselines.
+- One unavailable container during read-only metadata discovery is recorded in
+  `reasons` without discarding other valid candidates.
+
+[Timeouts & Locks]
+- `docker ps` / `docker inspect`: `15s`; `docker exec` metadata query: `30s`;
+  `docker exec` bundle export: `60s`.
+
+[Side-Effect Policy]
+- Donor containers and worktrees are strictly read-only; export writes only into
+  the host-shared `/tmp/mindie-native-cache`.
 """
 from __future__ import annotations
 
@@ -19,8 +35,6 @@ base=pathlib.Path('/vllm-workspace')
 result=[]
 for pattern in ('tasks/*/*/*/.mindie-runtime/ready-profile.json','executions/*/*/*/.mindie-runtime/ready-profile.json'):
     for marker in base.glob(pattern):
-        if marker.is_symlink():
-            continue
         try:
             manifest=json.loads(marker.read_text())
             profile=manifest['profile']

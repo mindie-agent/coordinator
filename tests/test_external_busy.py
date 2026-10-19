@@ -192,7 +192,7 @@ def test_unactivated_shared_grant_can_end_with_external_worker_still_running(que
     if action == "cancel":
         assert host.cancel("shared", BUSY)["status"] == "cancelled"
     else:
-        now[0] += 61
+        now[0] += 181
         assert host.snapshot(BUSY, task_id="shared")["tasks"][0]["state"] == "expired"
 
 

@@ -103,3 +103,52 @@ def test_cold_venv_setup_is_carried_by_first_owned_job(preparation, monkeypatch)
     assert isinstance(process, PreparationProcess) and process.endpoint == preparation.endpoint
     assert [name for name, _script in process.setup] == ['prepare-root', 'create-venv']
     assert process.step == 'finalize-runtime'
+
+
+def test_unverified_idle_execution_root_automatically_repairs_while_active_raises_busy():
+    from mindie_coordinator.provision.task_environment import (
+        TaskRootBusy,
+        isolated_root,
+        prepare_task_environment,
+        task_runtime_id,
+    )
+    session_id, role_name, host = 'sess-repair', 'worker', '192.0.2.1'
+    root = isolated_root(session_id, role_name, host)
+    runtime_id = task_runtime_id(session_id, host, role_name)
+    donor = {'host': host, 'ssh_port': 46001, 'python': '/donor/.venv/bin/python', 'container_name': 'mindie-alice'}
+    snapshot = {'id': 'fixed-source', 'records': []}
+    prepared_calls = []
+
+    class FakeBackend:
+        def command_environment(self, _donor):
+            return {'python': '/donor/.venv/bin/python', 'launch_env': {}}
+
+        def prepare_task_root(self, spec, **kwargs):
+            prepared_calls.append(spec['endpoint']['root'])
+            return {'profile_key': 'pk', 'build_key': 'bk', 'container_id': 'c1', 'profile': {'launch_env': {}}}
+
+    class FakePool:
+        def __init__(self, busy: bool):
+            self.backend = FakeBackend()
+            self.runtime_busy = lambda _rid: busy
+
+        def catalog(self):
+            return [{'runtime_id': runtime_id, 'root': root, 'state': 'needs_repair'}]
+
+        def register(self, rid, spec, **_kwargs):
+            return {'id': rid, 'root': spec['endpoint']['root'], 'state': 'ready', 'attestation': {'profile_key': 'pk'}}
+
+    with pytest.raises(TaskRootBusy, match='active task'):
+        prepare_task_environment(
+            FakePool(busy=True), user='alice', session_id=session_id, role_name=role_name,
+            environment={}, donor=donor, sources={}, source_snapshot=snapshot,
+        )
+    assert prepared_calls == []
+
+    recovered = prepare_task_environment(
+        FakePool(busy=False), user='alice', session_id=session_id, role_name=role_name,
+        environment={}, donor=donor, sources={}, source_snapshot=snapshot,
+    )
+    assert recovered['state'] == 'ready'
+    assert prepared_calls == [root]
+

@@ -11,8 +11,8 @@ license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@10cc3391ed358d7b7e0e1acb99ca5be4d1934b47",
-    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@0a9efa4d2d21ad66f19fca8dafd44e1881407daa",
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@7da7f66d119098e0515f8f37bfd5e7cf8cc32fee",
+    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@d9ac0a45db39c9e73e0ed38e797bc4fb2306cc3f",
     "setuptools-scm>=8",
 ]
 
@@ -32,5 +32,14 @@ packages = ["mindie_coordinator"]
 allow-direct-references = true
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = "-m 'not live_npu'"
+markers = [
+    "unit: fast unit tests with no external system dependencies",
+    "integration: local integration tests using in-memory SQLite or subprocesses",
+    "live_npu: live SSH integration tests against real Ascend NPU hosts",
+]
+
+

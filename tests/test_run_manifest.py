@@ -215,6 +215,43 @@ class CodeIdentityTests(unittest.TestCase):
             self.assertRegex(identity["snapshot_commit"], GIT_SHA_RE.pattern)
             self.assertNotEqual(identity["snapshot_commit"], source_head)
 
+    def test_each_capture_includes_edits_inside_untracked_directories(self) -> None:
+        from mindie_coordinator import code_identity as ci_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "git_worktree"
+            _init_repo(repo)
+            source = repo / "new module" / "kernel.py"
+            source.parent.mkdir()
+            source.write_text("result = 1\n")
+            before = manifest_code(repo)
+            parent_mtime = source.parent.stat().st_mtime_ns
+            source.write_text("result = 2000\n")
+            self.assertEqual(source.parent.stat().st_mtime_ns, parent_mtime)
+            after = ci_mod.inspect_source_identity(repo)
+            self.assertNotEqual(before["snapshot_commit"], after["snapshot_commit"])
+            self.assertEqual(
+                _run(repo, "show", f"{after['snapshot_commit']}:new module/kernel.py"),
+                "result = 2000",
+            )
+            self.assertEqual(
+                _run(repo, "show", f"{before['snapshot_commit']}:new module/kernel.py"),
+                "result = 1",
+            )
+
+    def test_inspect_non_git_native_runtime_metadata(self) -> None:
+        from mindie_coordinator import code_identity as ci_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            so_dir = Path(tmp) / "runtime_so_only"
+            so_dir.mkdir(parents=True, exist_ok=True)
+            so_file = so_dir / "vllm_ascend_C.abi3.so"
+            so_file.write_bytes(b"\x7fELF-so-payload")
+            so_first = ci_mod.inspect_source_identity(so_dir)
+            so_second = ci_mod.inspect_source_identity(so_dir)
+            self.assertEqual(so_first, so_second)
+            self.assertIn("vllm_ascend_C.abi3.so", so_first["so_hashes"])
+
 
 class ParityCommandTests(unittest.TestCase):
     def test_materialize_command_uses_the_in_package_module(self) -> None:

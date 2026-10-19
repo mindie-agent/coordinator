@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
-"""Cooperative host-local NPU task coordination.
+"""Cooperative host-local NPU task coordination and lease state machine.
 
-The coordinator is deliberately advisory.  It gives independent MindIE agents a
-shared queue and lease ledger on one host, but it does not prevent an operator
-or a non-participating process from using an NPU. Observed occupancy blocks
-admission unless a request explicitly allows external use of one named device.
-Managed leases, holds, owned processes and service ports remain protected.
+[Role]
+Stdlib-only host script executed on bare-metal Ascend servers via `HostQueue`.
+Maintains a SQLite-backed cooperative FIFO queue, physical NPU lease ledger,
+fencing tokens, TCP port reservations (`container_ssh` and `service`), holds,
+and peer coordination messages under `/tmp/mindie-npu-coordinator/v1`.
 
-The module is stdlib-only because the agent-facing wrapper sends this source to
-the bare-metal host and executes it there.  State defaults to
-``/tmp/mindie-npu-coordinator/v1`` (override with ``MINDIE_NPU_COORDINATOR_STATE_DIR``
-or ``request["state_dir"]``) and is expected to disappear after a host or
-``/tmp`` reset; a missing database simply starts a new coordination epoch.
+[Invariants]
+- Physical NPU allocation identity is resolved from `npu-smi info` device/chip
+  tables (`Phy-ID` on A3/multi-Die, header NPU ID on single-chip A2).
+- Leases transition `queued -> granted -> starting -> active -> released`
+  (or `orphaned_busy` if processes/hardware/ports remain busy at release/expiry).
+- Managed jobs with `process_guard` (`REMOTE_DEV_JOB_TOKEN`) cannot be released
+  until `/proc` confirms no live non-zombie process carries the marker AND
+  `completion_confirmed=True` (when `retain_until_release=True`).
+
+[Timeouts & Locks]
+- SQLite connection uses `WAL`, `synchronous=FULL`, `busy_timeout=30000`, and
+  `BEGIN IMMEDIATE` transactions.
+- Subprocess probes (`docker inspect`, `docker top`, `ss`, `npu-smi`) use
+  bounded timeouts (`5s`–`15s`).
+
+[Side-Effect Policy]
+- Advisory and non-destructive: never kills host processes or mutates containers;
+  observed external occupancy blocks admission unless `allow_external_busy=True`
+  is explicitly requested for a single named physical device.
 """
 
 from __future__ import annotations
@@ -54,24 +68,13 @@ def resolve_host_state_dir(explicit: str | Path | None = None) -> str:
         return str(explicit)
     return os.environ.get(HOST_STATE_DIR_ENV) or DEFAULT_STATE_DIR
 DEFAULT_QUEUE_TTL_SECONDS = 3600
-DEFAULT_GRANT_TTL_SECONDS = 60
-DEFAULT_START_TTL_SECONDS = 60
+DEFAULT_GRANT_TTL_SECONDS = 180
+DEFAULT_START_TTL_SECONDS = 180
 DEFAULT_HEARTBEAT_TTL_SECONDS = 120
 DEFAULT_ESTIMATED_DURATION_SECONDS = 3600
 HBM_BUSY_THRESHOLD_MB = 4096
 JOB_TOKEN_ENV = "REMOTE_DEV_JOB_TOKEN"
 
-TASK_STATES = {
-    "queued",
-    "granted",
-    "starting",
-    "active",
-    "orphaned_busy",
-    "released",
-    "expired",
-    "cancelled",
-}
-RESERVING_TASK_STATES = {"granted", "starting", "active", "orphaned_busy"}
 PORT_KINDS = {"container_ssh", "service"}
 CONTAINER_SSH_TASK_PREFIX = "ssh."
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$")
@@ -97,15 +100,27 @@ def prepared_supervisor_host_pid(prepared: dict, process_guard: dict | None) -> 
     container_id = prepared["container_id"]
     if not isinstance(container_name, str) or not container_name or not isinstance(container_id, str) or not container_id:
         raise CoordinationError("prepared activation requires the expected container identity")
-    info = json.loads(subprocess.check_output(
-        ["docker", "inspect", "--format", "{{json .}}", container_name], text=True, encoding="utf-8"))
+    try:
+        info = json.loads(subprocess.check_output(
+            ["docker", "inspect", "--format", "{{json .}}", container_name],
+            text=True, encoding="utf-8", timeout=5))
+    except subprocess.TimeoutExpired as exc:
+        raise CoordinationError(f"docker inspect timed out after {exc.timeout}s for {container_name}") from exc
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        raise CoordinationError(f"docker inspect failed for {container_name}: {exc}") from exc
     if info["Id"] != container_id:
         raise CoordinationError("container identity changed before activation")
     if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != receipt["boot_id"]:
         raise CoordinationError("host boot identity changed")
     # Use the inspected immutable ID if the name is reassigned during lookup.
-    rows = subprocess.check_output(["docker", "top", container_id, "-eo", "pid"],
-                                   text=True, encoding="utf-8").splitlines()[1:]
+    try:
+        rows = subprocess.check_output(
+            ["docker", "top", container_id, "-eo", "pid"],
+            text=True, encoding="utf-8", timeout=5).splitlines()[1:]
+    except subprocess.TimeoutExpired as exc:
+        raise CoordinationError(f"docker top timed out after {exc.timeout}s for {container_id}") from exc
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise CoordinationError(f"docker top failed for {container_id}: {exc}") from exc
     marker = (JOB_TOKEN_ENV + "=" + process_guard["marker"]).encode()
     matches = []
     for row in rows:
@@ -339,58 +354,6 @@ def probe_listening_ports() -> dict[str, Any]:
             "source": command[0],
         }
     return {"status": "failed", "error": last_error, "ports": []}
-
-
-def probe_named_container(name: str) -> dict[str, Any]:
-    """Report whether a docker container name exists and is running."""
-    if not name:
-        return {"status": "ok", "exists": False, "running": False, "name": name}
-    try:
-        listed = subprocess.run(
-            ["docker", "container", "ls", "-a", "--format", "{{.Names}}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"status": "failed", "error": str(exc), "exists": None, "running": None, "name": name}
-    if listed.returncode != 0:
-        return {
-            "status": "failed",
-            "error": "host Docker state unavailable",
-            "exists": None,
-            "running": None,
-            "name": name,
-            "stderr": (listed.stderr or listed.stdout)[-2000:],
-        }
-    exists = name in listed.stdout.splitlines()
-    running = False
-    if exists:
-        try:
-            inspected = subprocess.run(
-                ["docker", "inspect", "--type", "container", name],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return {"status": "failed", "error": str(exc), "exists": True, "running": None, "name": name}
-        if inspected.returncode != 0:
-            return {
-                "status": "failed",
-                "error": "docker inspect failed",
-                "exists": True,
-                "running": None,
-                "name": name,
-            }
-        try:
-            payload = json.loads(inspected.stdout)
-            running = bool(payload[0]["State"]["Running"])
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            return {"status": "failed", "error": str(exc), "exists": True, "running": None, "name": name}
-    return {"status": "ok", "exists": exists, "running": running, "name": name}
 
 
 def _parse_npu_smi_device_table(
@@ -1837,19 +1800,30 @@ class NpuCoordinator:
         with self._transaction() as connection:
             row = self._task_row(connection, task_id)
             self._check_token(row, token)
-            if row["state"] not in {"active", "orphaned_busy"}:
+            if row["state"] not in {"active", "orphaned_busy", "granted", "starting"}:
                 raise CoordinationError(f"task {task_id} is {row['state']}, expected active or orphaned_busy")
-            connection.execute(
-                """
-                UPDATE tasks
-                SET state='active', heartbeat_at=?, heartbeat_deadline=?,
-                    updated_at=?, message=?
-                WHERE task_id=?
-                """,
-                (now, now + heartbeat_ttl_seconds, now, "heartbeat received", task_id),
-            )
+            if row["state"] in {"granted", "starting"}:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET activation_deadline=?, heartbeat_at=?, heartbeat_deadline=?,
+                        updated_at=?, message=?
+                    WHERE task_id=?
+                    """,
+                    (now + heartbeat_ttl_seconds, now, now + heartbeat_ttl_seconds, now, "heartbeat received", task_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET state='active', heartbeat_at=?, heartbeat_deadline=?,
+                        updated_at=?, message=?
+                    WHERE task_id=?
+                    """,
+                    (now, now + heartbeat_ttl_seconds, now, "heartbeat received", task_id),
+                )
             row = self._task_row(connection, task_id)
-        return {"status": "active", "task": self._serialize_task(row)}
+        return {"status": row["state"], "task": self._serialize_task(row)}
 
     def release(self, task_id: str, token: int, observed: dict[str, Any] | None, *,
                 completion_confirmed: bool = False, listening: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1997,9 +1971,14 @@ class NpuCoordinator:
         with self._transaction() as connection:
             epoch = connection.execute("SELECT value FROM meta WHERE key='coordination_epoch'").fetchone()[0]
             task = connection.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-        info = json.loads(subprocess.check_output(
-            ["docker", "inspect", "--format", '{"Id":{{json .Id}},"State":{{json .State}}}', container_name],
-            text=True, encoding="utf-8"))
+        try:
+            info = json.loads(subprocess.check_output(
+                ["docker", "inspect", "--format", '{"Id":{{json .Id}},"State":{{json .State}}}', container_name],
+                text=True, encoding="utf-8", timeout=5))
+        except subprocess.TimeoutExpired as exc:
+            raise CoordinationError(f"docker inspect timed out after {exc.timeout}s for {container_name}") from exc
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            raise CoordinationError(f"docker inspect failed for {container_name}: {exc}") from exc
         return {"status": "ok", "coordination_epoch": epoch,
                 "tasks": [self._serialize_task(task)] if task is not None else [], "container": info}
 

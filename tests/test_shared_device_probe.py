@@ -161,7 +161,7 @@ def test_expired_conflicting_reservation_keeps_full_probe_reclamation(queue, sta
         coordinator.preflight("peer", token, FREE)
     if state in {"active", "orphaned_busy"}:
         coordinator.activate("peer", token, pid=123, heartbeat_ttl_seconds=1)
-    now[0] += 61
+    now[0] += host.DEFAULT_GRANT_TTL_SECONDS + 1
     if state == "orphaned_busy":
         coordinator.snapshot(None)
     device = Mock(side_effect=AssertionError("reclamation needs full occupancy"))

@@ -1,8 +1,9 @@
 """Task-facing operations exposed identically to every MCP host.
 
-Task lifecycle and optional coordination messages are coordinator semantics.
-Clients pass command and experiment needs; this
-package owns placement, environment, and recovery.
+[Role] Validates MCP tool arguments and formats `CoordinatorService` results via `presentation.present`.
+[Invariants] Returns structured `make_result` payloads; caller errors map to `isError=True` with actionable remedies.
+[Timeouts & Locks] Enforces `wait_timeout_seconds` (`0..600s`) before delegating to `TaskClient`/`CoordinatorService`.
+[Side-Effect Policy] Delegates all session and execution mutations to `TaskClient` and `CoordinatorService`.
 """
 
 from __future__ import annotations
@@ -156,6 +157,9 @@ TOOL_SCHEMAS = {
         "service_port": {"type": "integer", "minimum": 0, "maximum": 65535, "description": "0 reserves a free host port in 18000..18999; positive int reserves that specific port."},
         "purpose": {"type": "string", "description": "Human/agent-readable description of what this lease is running."},
         "ttl_seconds": {"type": "integer", "minimum": 30, "maximum": 86400, "default": 900},
+        "fence_token": {"type": "integer", "minimum": 1, "description": "Fence token issued by acquire for heartbeat/release."},
+        "coordination_epoch": {"type": "string", "description": "Optional observed host coordination epoch."},
+        "remote_state_dir": {"type": "string", "description": "Optional remote host coordinator state directory override."},
     }),
 }
 TOOL_SCHEMAS["mindie.run"]["oneOf"] = [

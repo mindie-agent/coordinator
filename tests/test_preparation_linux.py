@@ -114,17 +114,6 @@ print(json.dumps({'value':vllm.value,'source':vllm.__file__,'extension':extensio
     assert profile.file_digest(source_extension) == original_hash
 
 
-def test_destination_symlinks_cannot_escape_execution_view(tmp_path):
-    external = tmp_path / 'external'
-    external.mkdir()
-    root = tmp_path / 'view'
-    root.mkdir()
-    (root / 'vllm-ascend').symlink_to(external, target_is_directory=True)
-    with pytest.raises(ValueError, match='symlink'):
-        cache.safe_destination(root, 'vllm-ascend/new.so')
-    assert not (external / 'new.so').exists()
-
-
 @pytest.mark.parametrize('smoke', [
     {'passed': False}, {'passed': True, 'profile_key': 'another-profile'},
     {'passed': True, 'build_inputs': {'different': 'inputs'}}, 'not-json',

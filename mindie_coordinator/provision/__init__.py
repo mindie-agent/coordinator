@@ -1,7 +1,24 @@
-"""Prepare the per-user container and a task work root from a named recipe.
+"""Per-user Ascend container provisioning and task work root entrypoints.
 
-This package owns bootstrap/image/smoke. Consumers pass host/image/user;
-they do not import workspace machine-management scripts.
+[Role]
+Orchestrates `provision_user_container` across host SSH key bootstrap, existing
+container verification (`existing_container.observe_existing`), host prerequisite
+probing, cooperative SSH port reservation, container creation, and metadata
+smoke readiness.
+
+[Invariants]
+- Requires an explicit image selector (`local-latest`, `rc`, `main`, `stable`,
+  or concrete image reference); rejects `auto` or bare `:latest`.
+- Records ready container endpoints in `MachineDirectory` only after metadata
+  smoke verification succeeds.
+
+[Timeouts & Locks]
+- Delegates bounded timeouts to `host_ops` (`60s` probe, `1800s` bootstrap,
+  `240s` smoke).
+
+[Side-Effect Policy]
+- Emits structured phase timings via `on_progress`; raises `MachineManagementError`
+  on any verification or reservation mismatch.
 """
 
 from __future__ import annotations
@@ -24,6 +41,7 @@ from mindie_coordinator.ready_runtime import safe_id, user_container_name
 from mindie_coordinator.user_identity import load_github_identity
 
 DEFAULT_WORKDIR = host_ops.DEFAULT_WORKDIR
+_namespace = host_ops._namespace
 
 
 def task_work_root(session_id: str) -> str:
@@ -44,6 +62,7 @@ def provision_user_container(
     machines: MachineDirectory | None = None,
     reserve_port=None,
     on_progress=None,
+    alias: str | None = None,
 ) -> dict[str, Any]:
     """Create or reuse `mindie-<user>` on `host` from a named image/recipe."""
     timings, observation = {}, {}
@@ -112,7 +131,7 @@ def provision_user_container(
                 if int(reserved.get('port') or chosen_port) != chosen_port:
                     raise host_ops.MachineManagementError('reserved SSH port differs from the verified existing listener')
             return {**_record_ready_container(host, image, user, host_user, host_port,
-                                             chosen_port, machine_type, machines),
+                                             chosen_port, machine_type, machines, alias=alias),
                     'image_verification': existing}
     probe_payload = remote('host-probe',
         host_target,
@@ -165,13 +184,13 @@ def provision_user_container(
         require_payload=True,
     )
     return _record_ready_container(host, image, user, host_user, host_port,
-                                   chosen_port, machine_type, machines)
+                                   chosen_port, machine_type, machines, alias=alias)
 
 
-def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines):
+def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines, alias=None):
     container = user_container_name(user)
     record = {
-        "alias": host,
+        "alias": alias or host,
         "host": {"ip": host, "port": host_port, "user": host_user, "machine_type": machine_type},
         "container": {"name": container, "ssh_port": chosen_port, "user": "root", "workdir": DEFAULT_WORKDIR},
         "image": {"requested": image},
@@ -188,7 +207,3 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "workdir": DEFAULT_WORKDIR,
         "state": "ready",
     }
-
-
-def _namespace(**values):
-    return type("Args", (), values)()

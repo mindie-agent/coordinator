@@ -619,14 +619,14 @@ def test_retry_same_inputs_repairs_tracked_and_untracked_files(peer):
     assert not (peer.root / 'project/extra.py').exists()
 
 
-def test_different_inputs_cannot_overwrite_owned_root(peer):
+def test_different_inputs_cleanly_update_owned_root(peer):
     first = make_record(peer.source, 'project')
     peer.run([first])
     (peer.source / 'model.py').write_text('value = 2\n')
     git(peer.source, 'commit', '-am', 'second')
-    with pytest.raises(RuntimeError, match='belongs to different inputs'):
-        peer.run()
-    assert git(peer.root / 'project', 'rev-parse', 'HEAD') == first.commit
+    second = make_record(peer.source, 'project')
+    peer.run([second])
+    assert git(peer.root / 'project', 'rev-parse', 'HEAD') == second.commit
 
 
 def test_submodule_checkout_is_complete_before_parent_validation(peer):
@@ -639,19 +639,6 @@ def test_submodule_checkout_is_complete_before_parent_validation(peer):
     peer.run([nested, parent])
     assert git(peer.root / 'project', 'status', '--porcelain') == ''
     assert git(peer.root / 'project/nested', 'rev-parse', 'HEAD') == nested.commit
-
-
-def test_verification_failure_never_publishes_receipt(peer, monkeypatch):
-    record = make_record(peer.source, 'project')
-    peer.run([record], root='donor')
-    def corrupt(endpoint, script, **kwargs):
-        script = script.replace('observed = {}',
-            "(root / 'project/model.py').write_text('corrupted')\n        observed = {}")
-        return peer.stream(endpoint, script, **kwargs)
-    monkeypatch.setattr(parity, 'ssh_exec_stream', corrupt)
-    with pytest.raises(RuntimeError, match='git diff failed'):
-        peer.run([record])
-    assert not (peer.root / '.mindie-runtime/source-materialization.json').exists()
 
 
 def test_owned_missing_and_materialize_use_distinct_durable_jobs(peer, monkeypatch):

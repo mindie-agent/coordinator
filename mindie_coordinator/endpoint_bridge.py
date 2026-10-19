@@ -1,14 +1,9 @@
 """Bridge coordinator's MachineDirectory (machines.json) to remote-dev endpoints.
 
-`remote-dev` resolves targets from:
-1. Explicit `{host, port}` mappings (with optional `container` for `docker exec`),
-2. Registered resolver plugins (`REMOTE_DEV_RESOLVERS="mindie_coordinator.endpoint_bridge:setup_resolvers"`),
-3. Static alias files (`REMOTE_DEV_ENDPOINTS_FILE` pointing to `endpoints.json`).
-
-This module keeps `<coordinator_state_dir>/endpoints.json` synchronized with
-`MachineDirectory` (`machines.json`) and provides a zero-ceremony `remote-dev`
-resolver so Agents can pass `alias` (or rely on `default_alias`) seamlessly across
-all 19 `remote-dev` tools.
+[Role] Synchronizes `<coordinator_state_dir>/endpoints.json` with `machines.json` and registers a `remote-dev` alias resolver.
+[Invariants] Disabled or unverified hosts are excluded from active alias resolution unless explicitly requested.
+[Timeouts & Locks] Atomic temp-file write + `os.replace` for `endpoints.json`; zero network I/O.
+[Side-Effect Policy] Writes `<coordinator_state_dir>/endpoints.json` and registers in-process `remote-dev` resolver callbacks.
 """
 
 from __future__ import annotations

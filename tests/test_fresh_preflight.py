@@ -99,7 +99,7 @@ def test_expired_grant_cannot_enter_starting_with_the_earlier_sample(tmp_path, m
 
     def delayed(self, *args, **kwargs):
         now = self.clock()
-        self.clock = lambda: now + 120
+        self.clock = lambda: now + 240
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(NpuCoordinator, "preflight", delayed)

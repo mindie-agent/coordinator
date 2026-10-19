@@ -1,25 +1,42 @@
 #!/usr/bin/env python3
 """Workspace code identity from git objects.
 
-Code identity is a git commit: HEAD when the worktree is clean, otherwise a
-deterministic parentless snapshot of the current tree. The snapshot ref keeps
-that orphan commit reachable for experiment records.
+[Role]
+Computes deterministic Git commit / worktree / native `.so` tree identities for
+Run Manifests and native runtime inspection.
 
-Owned by mindie-coordinator. Snapshot construction uses the in-package parity
-module; this never locates a consumer skill script by filesystem path.
+[Invariants]
+- When the worktree is clean, `snapshot_commit == source_head`.
+- When dirty, creates a deterministic parentless snapshot commit via `parity`
+  and retains it under `refs/parity/identity/current/`.
+- Each Git capture observes the current worktree. A submission retains that
+  captured identity in its manifest; separate submissions never share a cache.
+- Non-Git native runtime inspection caches metadata by root/signature for 30s.
+
+[Timeouts & Locks]
+- Local git status/rev-parse subprocesses only; no network I/O or file locks.
+
+[Side-Effect Policy]
+- Clean worktrees are strictly read-only; dirty worktrees write only synthetic
+  Git objects and `refs/parity/identity/current/*` refs using a temporary index.
 """
 
 from __future__ import annotations
 
-import json
+import copy
+import hashlib
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
 GIT_SHA_RE = r"^[0-9a-f]{40}$"
 IDENTITY_WORKSPACE_ID = "identity"
 IDENTITY_SNAPSHOT_ID = "current"
+DEFAULT_IDENTITY_CACHE_TTL_SECONDS = 30.0
+
+_SOURCE_IDENTITY_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 
 
 class CodeIdentityError(RuntimeError):
@@ -47,11 +64,28 @@ def _git_head(repo: Path) -> str:
     return head
 
 
-def _repo_dirty(repo: Path) -> bool:
-    status = _git(
+def _repo_status_porcelain(repo: Path) -> str:
+    return _git(
         repo, "status", "--porcelain=v1", "--untracked-files=normal"
     ).stdout
-    return bool(status.strip())
+
+
+def _so_tree_mtime_signature(root: Path) -> tuple[str, dict[str, str]]:
+    hasher = hashlib.sha256()
+    so_hashes: dict[str, str] = {}
+    for path in sorted(root.rglob("*.so*")):
+        if not path.is_file():
+            continue
+        if path.suffix == ".so" or ".so." in path.name:
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            entry = f"{rel}:{st.st_mtime_ns}:{st.st_size}"
+            hasher.update(f"{entry}\0".encode("utf-8"))
+            so_hashes[rel] = hashlib.sha256(entry.encode("utf-8")).hexdigest()
+    return hasher.hexdigest(), so_hashes
 
 
 def _load_parity():
@@ -111,7 +145,8 @@ def code_identity(workspace_root: Path | str) -> dict[str, Any]:
     if not (root / ".git").exists():
         raise CodeIdentityError(f"not a git worktree: {root}")
     source_head = _git_head(root)
-    dirty = _repo_dirty(root)
+    status_output = _repo_status_porcelain(root)
+    dirty = bool(status_output.strip())
 
     if not dirty:
         repos = _clean_repos(source_head)
@@ -129,6 +164,34 @@ def code_identity(workspace_root: Path | str) -> dict[str, Any]:
         "dirty": True,
         "repos": repos,
     }
+
+
+def inspect_source_identity(
+    workspace_root: Path | str,
+    *,
+    ttl_seconds: float = DEFAULT_IDENTITY_CACHE_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Capture Git identity or inspect cached non-Git native runtime metadata."""
+    root = Path(workspace_root).resolve()
+    if (root / ".git").exists():
+        return code_identity(root)
+    if not root.is_dir():
+        raise CodeIdentityError(f"workspace root does not exist: {root}")
+    mtime_sig, so_hashes = _so_tree_mtime_signature(root)
+    cache_key = (str(root), mtime_sig)
+    now = time.monotonic()
+    cached = _SOURCE_IDENTITY_CACHE.get(cache_key)
+    if cached is not None and (now - cached[0]) <= ttl_seconds:
+        return copy.deepcopy(cached[1])
+    result = {
+        "root": str(root),
+        "source_head": None,
+        "snapshot_commit": mtime_sig,
+        "dirty": False,
+        "so_hashes": so_hashes,
+    }
+    _SOURCE_IDENTITY_CACHE[cache_key] = (now, copy.deepcopy(result))
+    return result
 
 
 def manifest_code(workspace_root: Path | str) -> dict[str, Any]:
@@ -190,80 +253,3 @@ def identity_workspace(sources: Mapping[str, str]) -> Path:
         "business tree picked by name"
     )
 
-
-def collect_referenced_snapshot_commits(workspace_root: Path) -> set[str]:
-    """Collect ``code.snapshot_commit`` values from Run Manifests under ``.mindie-local/``."""
-    referenced: set[str] = set()
-    local = Path(workspace_root) / ".mindie-local"
-    if not local.is_dir():
-        return referenced
-    for path in local.rglob("*.json"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        if not isinstance(payload, Mapping):
-            continue
-        code = payload.get("code")
-        if not isinstance(code, Mapping):
-            continue
-        snapshot = code.get("snapshot_commit")
-        if isinstance(snapshot, str) and len(snapshot) == 40:
-            referenced.add(snapshot)
-    return referenced
-
-
-def gc_parity_refs(
-    workspace_root: Path,
-    *,
-    max_age_days: int = 7,
-    now: float | None = None,
-) -> dict[str, Any]:
-    """Delete ``refs/parity/`` older than ``max_age_days`` and not referenced."""
-    import time
-
-    parity = _load_parity()
-    root = Path(workspace_root).resolve()
-    referenced = collect_referenced_snapshot_commits(root)
-    cutoff = (time.time() if now is None else now) - max_age_days * 86400
-    deleted: list[dict[str, str]] = []
-    kept: list[dict[str, str]] = []
-    tree = parity.discover_repo_tree(root, ".", None, None, unpopulated="gitlink")
-    for node in parity.iter_postorder(tree):
-        if node.gitlink_commit or not parity.is_git_worktree(node.repo_path):
-            continue
-        listed = parity.git(
-            node.repo_path,
-            ["for-each-ref", "--format=%(objectname)\t%(refname)", "refs/parity"],
-            check=False,
-        )
-        git_dir = Path(
-            parity.git(node.repo_path, ["rev-parse", "--git-dir"]).stdout.strip()
-        )
-        if not git_dir.is_absolute():
-            git_dir = node.repo_path / git_dir
-        for line in listed.stdout.splitlines():
-            if "\t" not in line:
-                continue
-            sha, ref = line.split("\t", 1)
-            ref_path = git_dir / ref
-            if ref_path.is_file():
-                mtime = ref_path.stat().st_mtime
-            else:
-                mtime = 0.0
-            row = {
-                "repo": node.relpath,
-                "ref": ref,
-                "commit": sha,
-            }
-            if sha in referenced or mtime >= cutoff:
-                kept.append(row)
-                continue
-            parity.git(node.repo_path, ["update-ref", "-d", ref], check=False)
-            deleted.append(row)
-    return {
-        "status": "ok",
-        "deleted": deleted,
-        "kept": kept,
-        "referenced": sorted(referenced),
-    }

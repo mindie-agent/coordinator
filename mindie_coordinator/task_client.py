@@ -1,4 +1,10 @@
-"""Local task facade. Hosted work is admitted to the persistent coordinator."""
+"""Local task facade. Hosted work is admitted to the persistent coordinator.
+
+[Role] Resolves local session/task identity and dispatches task lifecycle requests to `CoordinatorService`.
+[Invariants] Local-first (`session` and `finish` require no remote machine); hosted `run` delegates to the runtime pool.
+[Timeouts & Locks] Honours caller `wait_timeout_seconds` (`0..600s`); uses `AgentSessions` file lock for session state.
+[Side-Effect Policy] Local session/context persistence; delegates remote side effects to `CoordinatorService`.
+"""
 
 from __future__ import annotations
 

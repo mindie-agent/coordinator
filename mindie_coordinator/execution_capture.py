@@ -1,4 +1,24 @@
-"""Incremental local capture; cached records always name retained Git objects."""
+"""Incremental local capture; cached records always name retained Git objects.
+
+[Role]
+Captures local repository worktrees (`vllm`, `vllm-ascend`, and submodules) into
+deterministic synthetic Git snapshot commits with incremental index reuse and
+atomic topology/worktree stability verification.
+
+[Invariants]
+- Cached snapshot records are reused only when their retained Git refs
+  (`refs/parity/execution-inputs/...`) still resolve to the exact commit SHA.
+- Concurrent edits during capture are detected via pre/post `observe()` comparison
+  and retried up to `attempts` times before rejecting admission.
+
+[Timeouts & Locks]
+- Uses `GIT_OPTIONAL_LOCKS=0` and isolated temporary `GIT_INDEX_FILE` per incremental
+  tree write so user worktrees and index locks are never contended.
+
+[Side-Effect Policy]
+- Never modifies the user's working tree or main `.git/index`; writes only
+  synthetic Git objects, `refs/parity/execution-inputs/*`, and `<state_dir>/source-inputs/capture-*.json`.
+"""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -107,8 +127,12 @@ def observe(node):
     scm = None
     if node.relpath in {"vllm", "vllm-ascend"}:
         tags = git(node.repo_path, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/tags"], env=env).stdout
+        try:
+            scm_ver = version("setuptools-scm")
+        except Exception:
+            scm_ver = "builtin"
         scm = digest([head, dirty, tags, config, file_bytes(common / "shallow").hex(),
-                      datetime.now(timezone.utc).date().isoformat(), version("setuptools-scm"),
+                      datetime.now(timezone.utc).date().isoformat(), scm_ver,
                       {key: value for key, value in os.environ.items()
                        if key.startswith("SETUPTOOLS_SCM_") or key == "SOURCE_DATE_EPOCH"}])
     return {"content": hasher.hexdigest(), "scm": scm, "head": head, "paths": paths, "untracked": untracked,

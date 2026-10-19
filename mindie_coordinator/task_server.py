@@ -1,13 +1,9 @@
 """Stdio MCP server for task lifecycle and optional coordination messages.
 
-`mindie_session`, `mindie_run`, `mindie_execution` and `mindie_finish` are coordinator
-semantics. This process is their home. It is local-first: `mindie_session` and
-`mindie_finish` need no remote resources; `mindie_run` uses this process's own
-runtime pool.
-
-Wire contract: JSON-RPC 2.0 over stdio. The first bytes decide the framing
-for the whole session: Content-Length framed or one JSON object per line.
-Standard library only for the transport; results use `remote_dev.result`.
+[Role] Exposes `mindie_session`, `mindie_run`, `mindie_execution`, and `mindie_finish` over JSON-RPC 2.0 stdio.
+[Invariants] Auto-detects `Content-Length` vs line-delimited JSON framing from the first bytes; never mixes stdout protocol frames with diagnostics.
+[Timeouts & Locks] Request dispatch runs on a bounded `ThreadPoolExecutor` with serialized stdout writes (`_write_lock`).
+[Side-Effect Policy] Delegates tool side effects to `ops.py` and `CoordinatorService`.
 """
 
 from __future__ import annotations

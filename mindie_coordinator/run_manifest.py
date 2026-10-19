@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Run Manifest v1: Git-identity evidence records for workspace workflows.
 
-Owned by mindie-coordinator. ``code`` is required and is Git identity
-(``source_head``, ``snapshot_commit``), never a content hash of source files.
+[Role] Validates and writes immutable Git-identity run manifests (`source_head`, `snapshot_commit`).
+[Invariants] `code` is always Git commit identity, never a content hash of source files.
+[Timeouts & Locks] Atomic temp-file write + `os.replace` on local filesystem; no network waits.
+[Side-Effect Policy] Local manifest file creation only.
 """
 
 from __future__ import annotations
