@@ -36,7 +36,7 @@ jobs:
           mkdir -p "$HOME"
           uv venv
           uv pip install -e ".[test]"
-          .venv/bin/python -m pytest -q --durations=20 --junitxml=linux-coordinator.xml
+          .venv/bin/python -m pytest -q -m "not live_npu" --durations=20 --junitxml=linux-coordinator.xml
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -96,7 +96,7 @@ jobs:
           uv venv
           uv pip install -e ".[test]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .venv/Scripts/python.exe -m pytest -q tests --durations=20 --junitxml=windows-coordinator.xml
+          .venv/Scripts/python.exe -m pytest -q tests -m "not live_npu" --durations=20 --junitxml=windows-coordinator.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -119,7 +119,7 @@ jobs:
           mkdir -p "$HOME"
           uv venv
           uv pip install -e ".[test]"
-          .venv/bin/python -m pytest -q tests --durations=20 --junitxml=macos-coordinator.xml
+          .venv/bin/python -m pytest -q tests -m "not live_npu" --durations=20 --junitxml=macos-coordinator.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
