@@ -20,7 +20,10 @@ from mindie_coordinator.host.mindie_npu_coordination import (
 )
 
 
-@unittest.skipUnless(sys.platform == "linux", "process guards use Linux /proc")
+@unittest.skipUnless(
+    sys.platform == "linux" and os.geteuid() == 0,
+    "host-wide process guards require Linux root; CI runs this case separately",
+)
 class OwnedCompletionTests(unittest.TestCase):
     def test_exclusive_completion_releases_only_drained_owner_and_port(self):
         children = []
