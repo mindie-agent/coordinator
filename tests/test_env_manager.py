@@ -528,23 +528,28 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
         calls_log = self.root / "npu_smi_calls.log"
         fake_npu_smi = bin_dir / "npu-smi"
         fake_npu_smi.write_text(
-            f"#!/bin/sh\necho \"direct:$*\" >> {calls_log}\nexit 0\n",
+            "#!/bin/sh\necho \"direct:$*\" >> npu_smi_calls.log\nexit 0\n",
             encoding="utf-8",
+            newline="\n",
         )
         fake_npu_smi.chmod(0o755)
         fake_timeout = bin_dir / "timeout"
         fake_timeout.write_text(
-            f"#!/bin/sh\necho \"timed:$*\" >> {calls_log}\nexit 124\n",
+            "#!/bin/sh\necho \"timed:$*\" >> npu_smi_calls.log\nexit 124\n",
             encoding="utf-8",
+            newline="\n",
         )
         fake_timeout.chmod(0o755)
 
         npu_section = REMOTE_FLEET_PROBE_SCRIPT.split('echo "===SECTION:CONTAINERS==="')[0] + 'echo "===SECTION:CONTAINERS==="\n'
         npu_section = npu_section.replace(
             'export PATH="/usr/local/Ascend/driver/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
-            f'export PATH="{bin_dir}:$PATH"',
+            'export PATH="$PWD/fake_bin:$PATH"',
         )
-        res = subprocess.run(["sh", "-c", npu_section], capture_output=True, text=True, timeout=5, check=True)
+        # Git's sh on Windows also needs shell-native paths and LF scripts.
+        res = subprocess.run(
+            ["sh", "-c", npu_section], cwd=self.root, capture_output=True, text=True, timeout=5, check=True
+        )
         self.assertIn("===SECTION:NPU_SMI===", res.stdout)
         recorded = calls_log.read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(recorded, ["timed:10 npu-smi info"])
