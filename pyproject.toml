@@ -11,8 +11,8 @@ license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@10cc3391ed358d7b7e0e1acb99ca5be4d1934b47",
-    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@0a9efa4d2d21ad66f19fca8dafd44e1881407daa",
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@7da7f66d119098e0515f8f37bfd5e7cf8cc32fee",
+    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@e864da0585782705975552f227afe8a3bfd9411e",
     "setuptools-scm>=8",
 ]
 
