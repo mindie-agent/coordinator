@@ -775,20 +775,21 @@ class PoolTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             restarted.managed_control("bob", job["id"], "stop")
 
-    def test_managed_finish_defers_release_for_real_device_occupancy(self):
+    def test_managed_finish_releases_owned_lease_while_foreign_occupancy_remains(self):
         binding = self.bind("alice", self.root / "a")
         job = self.managed("alice", binding)
         self.backend.jobs[job["job_id"]].update(state="succeeded", quiet=True, result={"state": "succeeded", "exit_code": 0})
         self.backend.busy = [0]
         result = self.pool.managed_control("alice", job["id"])
-        self.assertEqual((result["state"], result["lease_state"]), ("releasing", "orphaned_busy"))
-        self.backend.busy = []
-        result = self.pool.managed_control("alice", job["id"])
-        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual((result["state"], result["lease_state"]), ("succeeded", "released"))
+        self.assertEqual(self.backend.busy, [0])
+        self.assertNotIn(("job", "stop"), self.backend.calls)
         manifest = json.loads((self.root / "manager/runs" / (job["id"] + ".json")).read_text())
         self.assertEqual(manifest["process"]["state"], "succeeded")
         self.assertTrue(manifest["resources"]["released"])
         self.assertEqual(manifest["process"]["result"]["exit_code"], 0)
+        waiting = self.managed("alice", binding, request_id="next-exclusive")
+        self.assertEqual(waiting["lease_state"], "queued")
 
     def test_explicit_shared_job_finishes_while_external_worker_remains_busy(self):
         binding = self.bind("alice", self.root / "a")
