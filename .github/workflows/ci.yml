@@ -24,7 +24,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.12'
+          # Match the reusable release publisher's managed interpreter.
+          python-version: '3.13'
           activate-environment: false
 
       - name: Documented developer setup

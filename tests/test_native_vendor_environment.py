@@ -1,6 +1,5 @@
 """Custom-op search paths exist before Python starts and point at owned files."""
 import importlib.machinery
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -28,7 +27,7 @@ def test_vendor_paths_follow_manifest_layout_and_all_vendors():
 
 
 @pytest.fixture
-def native_loader(tmp_path, monkeypatch):
+def native_loader(tmp_path, monkeypatch, native_extension):
     if sys.platform != 'linux':
         pytest.skip('actual ELF loader and colon-delimited paths require Linux')
     root, image = tmp_path / 'owned', tmp_path / 'image'
@@ -37,7 +36,7 @@ def native_loader(tmp_path, monkeypatch):
         (image / (name + '.py')).write_text('')
     # An image/donor library with the same basename must not win the search.
     (image / 'libopapi.so').write_bytes(b'incompatible donor library')
-    extension = Path(importlib.util.find_spec('_ctypes_test').origin)
+    module_name, extension = native_extension
     package = root / 'vllm-ascend/vllm_ascend'
     package.mkdir(parents=True)
     target_extension = package / ('vllm_ascend_C' + importlib.machinery.EXTENSION_SUFFIXES[0])
@@ -47,12 +46,12 @@ def native_loader(tmp_path, monkeypatch):
     library.parent.mkdir(parents=True)
     shutil.copy2(extension, library)
     (vendor / 'config.json').write_text('{}')
-    # Reuse a real stdlib ELF fixture under the supported alias. Its original
-    # PyInit name remains _ctypes_test; both imported ELF and opapi are owned.
+    # Preserve the wheel's PyInit name while loading the copied ELF under
+    # the supported native alias; both the extension and opapi are owned.
     (package / '__init__.py').write_text(
         'import ctypes, importlib.util, pathlib, sys\n'
         f'p = pathlib.Path(__file__).parent / {target_extension.name!r}\n'
-        'spec = importlib.util.spec_from_file_location("_ctypes_test", p)\n'
+        f'spec = importlib.util.spec_from_file_location({module_name!r}, p)\n'
         'vllm_ascend_C = importlib.util.module_from_spec(spec)\n'
         'spec.loader.exec_module(vllm_ascend_C)\n'
         'sys.modules[__name__ + ".vllm_ascend_C"] = vllm_ascend_C\n'
