@@ -925,8 +925,9 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(bound[0]["runtime_id"], "runtime-c")
         self.assertTrue(all(row.get("status") == "cache_miss" for row in results if row is not bound[0]))
         self.assertEqual(next(row for row in pool.catalog() if row["runtime_id"] == "runtime-c")["state"], "bound")
+        winning_request = "race-" + str(results.index(bound[0]))
         with ThreadPoolExecutor(2) as workers:
-            replays = list(workers.map(lambda _: pool.checkout("alice", session["id"], "profile-a", "race-0"), range(2)))
+            replays = list(workers.map(lambda _: pool.checkout("alice", session["id"], "profile-a", winning_request), range(2)))
         self.assertEqual({row["id"] for row in replays}, {bound[0]["id"]})
 
     def test_concurrent_conflicting_registration_has_exactly_one_winner(self):
