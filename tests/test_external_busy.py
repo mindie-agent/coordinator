@@ -71,8 +71,8 @@ def test_default_occupancy_policy_cannot_be_relaxed_by_acquire_hints(queue, tmp_
         submit(host, "strict")
 
 
-@pytest.mark.parametrize("shared,expected_samples", [(True, 0), (False, 2)])
-def test_release_samples_follow_host_owned_sharing_policy(queue, monkeypatch, tmp_path, shared, expected_samples):
+@pytest.mark.parametrize("shared", [True, False])
+def test_confirmed_owned_completion_does_not_require_whole_device_idleness(queue, monkeypatch, tmp_path, shared):
     host, _ = queue
     submit(host, allow_external_busy=shared)
     grant = host.acquire("shared", FREE)["task"]
@@ -84,13 +84,27 @@ def test_release_samples_follow_host_owned_sharing_policy(queue, monkeypatch, tm
     samples = []
     def probe():
         samples.append(True)
-        return BUSY if shared else FREE
+        return BUSY
     result = handle_request({"action": "release", "task_id": "shared", "state_dir": str(tmp_path),
                              "coordination_epoch": host.snapshot(None)["coordination_epoch"], "fence_token": token,
                              "completion_confirmed": True, "allow_external_busy": not shared,
                              "interval_seconds": 0.001}, clock=host.clock, probe=probe)
     assert result["status"] == "released"
-    assert len(samples) == expected_samples
+    assert samples == []
+
+
+@pytest.mark.parametrize("guard", [None, {**GUARD, "retain_until_release": False}])
+def test_exclusive_completion_without_retained_owner_proof_keeps_busy_lease(queue, monkeypatch, guard):
+    host, _ = queue
+    submit(host, "strict", allow_external_busy=False)
+    token = host.acquire("strict", FREE)["task"]["fence_token"]
+    host.preflight("strict", token, FREE)
+    monkeypatch.setattr(host_protocol, "process_guard_busy", lambda *args, **kwargs: True)
+    host.activate("strict", token, pid=9876, process_guard=guard)
+    monkeypatch.setattr(host_protocol, "process_guard_busy", lambda *args, **kwargs: False)
+    result = host.release("strict", token, BUSY, completion_confirmed=True)
+    assert result["status"] == "orphaned_busy"
+    assert result["conflicting_devices"] == [0]
 
 
 @pytest.mark.parametrize("extra", [

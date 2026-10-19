@@ -15,6 +15,8 @@ and peer coordination messages under `/tmp/mindie-npu-coordinator/v1`.
 - Managed jobs with `process_guard` (`REMOTE_DEV_JOB_TOKEN`) cannot be released
   until `/proc` confirms no live non-zombie process carries the marker AND
   `completion_confirmed=True` (when `retain_until_release=True`).
+- Confirmed owned completion releases the lease even if unrelated work is busy;
+  the next exclusive admission still requires idle devices.
 
 [Timeouts & Locks]
 - SQLite connection uses `WAL`, `synchronous=FULL`, `busy_timeout=30000`, and
@@ -186,14 +188,15 @@ def unguarded_shared_process(row: sqlite3.Row) -> bool:
             and (row['state'] == 'active' or (row['state'] == 'orphaned_busy' and row['started_at'] is not None)))
 
 
-def _managed_shared_completion(row, completion_confirmed):
-    """A drained managed shared lease releases ownership, not whole-card idleness.
+def _managed_completion(row, completion_confirmed):
+    """A drained managed lease releases ownership, not whole-card idleness.
 
     This selects the hardware-independent path, not proof of process completion:
     release still checks the stored guard's boot/marker and live family, ports
-    and fence. Malformed or legacy guards retain the original hardware path.
+    and fence. Admission keeps the stored exclusive/shared occupancy policy.
+    Malformed or legacy guards retain the original hardware path.
     """
-    if completion_confirmed is not True or not row['allow_external_busy'] or row['state'] not in {'active', 'orphaned_busy'}:
+    if completion_confirmed is not True or row['state'] not in {'active', 'orphaned_busy'}:
         return False
     try:
         guard = json.loads(row['process_guard']) if row['process_guard'] else None
@@ -1839,7 +1842,7 @@ class NpuCoordinator:
             row = self._task_row(connection, task_id)
             self._check_token(row, token)
             devices = set(_load_devices(row["granted_devices"]))
-            managed_completion = _managed_shared_completion(row, completion_confirmed)
+            managed_completion = _managed_completion(row, completion_confirmed)
             conflicts = [] if managed_completion else (
                 sorted((set() if row["allow_external_busy"] else devices & busy) | (devices - visible))
                 if busy is not None and visible is not None else sorted(devices))
@@ -1865,7 +1868,7 @@ class NpuCoordinator:
             self._clear_service_ports(connection, task_id)
             connection.execute(
                 "UPDATE tasks SET state='released', process_guard=NULL, updated_at=?, message=? WHERE task_id=?",
-                (now, "owned process and ports are clear; shared lease released" if row["allow_external_busy"]
+                (now, "owned process and ports are clear; managed lease released" if managed_completion
                  else "requested resources are free; cooperative lease released", task_id),
             )
             self._event(connection, "task-released", task_id=task_id, now=now)
@@ -1951,7 +1954,7 @@ class NpuCoordinator:
         with self._transaction() as connection:
             row = self._task_row(connection, require_safe_id(task_id, label="task id"))
             shared = bool(row["allow_external_busy"])
-            if _managed_shared_completion(row, completion_confirmed):
+            if _managed_completion(row, completion_confirmed):
                 return None
         # A legacy/unconfirmed shared lease still needs visibility. One fresh
         # sample establishes device visibility; repeating a free-device
