@@ -3,14 +3,15 @@
 
 [Role]
 Computes deterministic Git commit / worktree / native `.so` tree identities for
-Run Manifests and in-process source identity caching (`_SOURCE_IDENTITY_CACHE`).
+Run Manifests and native runtime inspection.
 
 [Invariants]
 - When the worktree is clean, `snapshot_commit == source_head`.
 - When dirty, creates a deterministic parentless snapshot commit via `parity`
   and retains it under `refs/parity/identity/current/`.
-- In-process cache entries expire after `ttl_seconds` (default 30s) and are
-  keyed by `(root_path, worktree_or_so_signature)`.
+- Each Git capture observes the current worktree. A submission retains that
+  captured identity in its manifest; separate submissions never share a cache.
+- Non-Git native runtime inspection caches metadata by root/signature for 30s.
 
 [Timeouts & Locks]
 - Local git status/rev-parse subprocesses only; no network I/O or file locks.
@@ -24,7 +25,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import os
 import subprocess
 import time
@@ -68,30 +68,6 @@ def _repo_status_porcelain(repo: Path) -> str:
     return _git(
         repo, "status", "--porcelain=v1", "--untracked-files=normal"
     ).stdout
-
-
-def _repo_dirty(repo: Path) -> bool:
-    return bool(_repo_status_porcelain(repo).strip())
-
-
-def _worktree_fingerprint(root: Path, source_head: str, status_output: str) -> str:
-    hasher = hashlib.sha256()
-    hasher.update(source_head.encode("utf-8"))
-    hasher.update(b"\0")
-    hasher.update(status_output.encode("utf-8"))
-    for raw_line in status_output.splitlines():
-        if len(raw_line) < 4:
-            continue
-        rel = raw_line[3:].strip()
-        if " -> " in rel:
-            rel = rel.split(" -> ", 1)[1].strip()
-        candidate = root / rel
-        try:
-            st = candidate.lstat()
-            hasher.update(f"\0{rel}:{st.st_mtime_ns}:{st.st_size}".encode("utf-8"))
-        except OSError:
-            hasher.update(f"\0{rel}:missing".encode("utf-8"))
-    return hasher.hexdigest()
 
 
 def _so_tree_mtime_signature(root: Path) -> tuple[str, dict[str, str]]:
@@ -157,11 +133,7 @@ def _clean_repos(source_head: str) -> dict[str, dict[str, Any]]:
     }
 
 
-def code_identity(
-    workspace_root: Path | str,
-    *,
-    ttl_seconds: float = DEFAULT_IDENTITY_CACHE_TTL_SECONDS,
-) -> dict[str, Any]:
+def code_identity(workspace_root: Path | str) -> dict[str, Any]:
     """Return git-object identity for ``workspace_root``.
 
     When the worktree is clean, ``snapshot_commit`` equals ``source_head``.
@@ -185,22 +157,13 @@ def code_identity(
             "repos": repos,
         }
 
-    state_key = _worktree_fingerprint(root, source_head, status_output)
-    cache_key = (str(root), state_key)
-    now = time.monotonic()
-    cached = _SOURCE_IDENTITY_CACHE.get(cache_key)
-    if cached is not None and (now - cached[0]) <= ttl_seconds:
-        return copy.deepcopy(cached[1])
-
     snapshot, repos = _create_identity_snapshot(root)
-    result = {
+    return {
         "source_head": source_head,
         "snapshot_commit": snapshot,
         "dirty": True,
         "repos": repos,
     }
-    _SOURCE_IDENTITY_CACHE[cache_key] = (now, copy.deepcopy(result))
-    return result
 
 
 def inspect_source_identity(
@@ -208,15 +171,10 @@ def inspect_source_identity(
     *,
     ttl_seconds: float = DEFAULT_IDENTITY_CACHE_TTL_SECONDS,
 ) -> dict[str, Any]:
-    """Fast in-process cached source & native `.so` identity check.
-
-    Keys by `(root_path, git_head_or_mtime)` so repeated invocations across
-    `prepare_runtime`, `backend.preflight`, and `task_environment` within a
-    single task flow do not re-hash the entire `.so` / worktree tree 3-4 times.
-    """
+    """Capture Git identity or inspect cached non-Git native runtime metadata."""
     root = Path(workspace_root).resolve()
     if (root / ".git").exists():
-        return code_identity(root, ttl_seconds=ttl_seconds)
+        return code_identity(root)
     if not root.is_dir():
         raise CodeIdentityError(f"workspace root does not exist: {root}")
     mtime_sig, so_hashes = _so_tree_mtime_signature(root)

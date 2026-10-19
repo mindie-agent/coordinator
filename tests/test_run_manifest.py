@@ -215,29 +215,34 @@ class CodeIdentityTests(unittest.TestCase):
             self.assertRegex(identity["snapshot_commit"], GIT_SHA_RE.pattern)
             self.assertNotEqual(identity["snapshot_commit"], source_head)
 
-    def test_inspect_source_identity_caches_repeated_dirty_and_so_tree_calls(self) -> None:
+    def test_each_capture_includes_edits_inside_untracked_directories(self) -> None:
         from mindie_coordinator import code_identity as ci_mod
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "git_worktree"
             _init_repo(repo)
-            (repo / "custom_op.so").write_bytes(b"\x7fELF-dirty-binary-v1")
-            with mock.patch.object(
-                ci_mod, "_create_identity_snapshot", wraps=ci_mod._create_identity_snapshot
-            ) as build_snap:
-                first = ci_mod.inspect_source_identity(repo)
-                second = ci_mod.inspect_source_identity(repo)
-                third = ci_mod.code_identity(repo)
-                self.assertEqual(build_snap.call_count, 1)
-                self.assertEqual(first["snapshot_commit"], second["snapshot_commit"])
-                self.assertEqual(first["snapshot_commit"], third["snapshot_commit"])
+            source = repo / "new module" / "kernel.py"
+            source.parent.mkdir()
+            source.write_text("result = 1\n")
+            before = manifest_code(repo)
+            parent_mtime = source.parent.stat().st_mtime_ns
+            source.write_text("result = 2000\n")
+            self.assertEqual(source.parent.stat().st_mtime_ns, parent_mtime)
+            after = ci_mod.inspect_source_identity(repo)
+            self.assertNotEqual(before["snapshot_commit"], after["snapshot_commit"])
+            self.assertEqual(
+                _run(repo, "show", f"{after['snapshot_commit']}:new module/kernel.py"),
+                "result = 2000",
+            )
+            self.assertEqual(
+                _run(repo, "show", f"{before['snapshot_commit']}:new module/kernel.py"),
+                "result = 1",
+            )
 
-                # Modifying the .so binary invalidates the (root, git_head_or_mtime) cache entry
-                (repo / "custom_op.so").write_bytes(b"\x7fELF-dirty-binary-v2-modified")
-                fourth = ci_mod.inspect_source_identity(repo)
-                self.assertEqual(build_snap.call_count, 2)
-                self.assertNotEqual(first["snapshot_commit"], fourth["snapshot_commit"])
+    def test_inspect_non_git_native_runtime_metadata(self) -> None:
+        from mindie_coordinator import code_identity as ci_mod
 
+        with tempfile.TemporaryDirectory() as tmp:
             so_dir = Path(tmp) / "runtime_so_only"
             so_dir.mkdir(parents=True, exist_ok=True)
             so_file = so_dir / "vllm_ascend_C.abi3.so"
