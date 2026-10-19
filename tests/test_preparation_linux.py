@@ -51,15 +51,16 @@ def test_image_pip_installs_only_in_new_owned_venv(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux extension loading contract')
-def test_python_source_view_loads_copied_extension_and_own_scm_metadata(tmp_path, monkeypatch):
-    import _ctypes_test
+def test_python_source_view_loads_copied_extension_and_own_scm_metadata(tmp_path, monkeypatch,
+                                                                     native_extension):
+    module_name, installed_extension = native_extension
     original, view = tmp_path / 'published', tmp_path / 'view'
-    # Use Python's installed extension as an ABI-correct native fixture; this
+    # Use the installed wheel as an ABI-correct native fixture; this
     # test invokes neither pip nor a compiler or a model/device runtime.
-    extension = 'vllm-ascend/vllm_ascend/' + Path(_ctypes_test.__file__).name
+    extension = 'vllm-ascend/vllm_ascend/' + installed_extension.name
     source_extension = original / extension
     source_extension.parent.mkdir(parents=True)
-    shutil.copy2(_ctypes_test.__file__, source_extension)
+    shutil.copy2(installed_extension, source_extension)
     config = original / 'vllm-ascend/vllm_ascend/config.json'
     config.write_text('{}')
     for name in ('vllm', 'vllm-ascend'):
@@ -94,7 +95,7 @@ def test_python_source_view_loads_copied_extension_and_own_scm_metadata(tmp_path
     original_hash = profile.file_digest(source_extension)
     cache.copy_native_view(view, original, manifest,
         {name: {'version': '2.0.dev3+g123abc', 'source_head': 'real-source-head'} for name in ('vllm', 'vllm-ascend')})
-    command = '''import json, importlib.metadata, vllm, vllm_ascend._ctypes_test as extension
+    command = f'import json, importlib.metadata, vllm, vllm_ascend.{module_name} as extension\n' + '''
 from vllm._version import __version__, __commit_id__
 print(json.dumps({'value':vllm.value,'source':vllm.__file__,'extension':extension.__file__,
  'version':__version__,'metadata':importlib.metadata.version('vllm'),'commit':__commit_id__,
@@ -110,7 +111,7 @@ print(json.dumps({'value':vllm.value,'source':vllm.__file__,'extension':extensio
     assert Path(actual['extension']).is_relative_to(view)
     assert actual['version'] == actual['metadata'] == '2.0.dev3+g123abc'
     assert actual['commit'] == 'real-source-head'
-    assert actual['loaded'] == 'vllm_ascend._ctypes_test'
+    assert actual['loaded'] == 'vllm_ascend.' + module_name
     assert profile.file_digest(source_extension) == original_hash
 
 

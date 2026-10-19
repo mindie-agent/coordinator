@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,7 +18,7 @@ from mindie_coordinator.provision.task_environment import reusable_preparation
 
 
 @pytest.fixture
-def bundle(tmp_path, monkeypatch):
+def bundle(tmp_path, monkeypatch, native_extension):
     monkeypatch.setattr(cache, 'native_import_receipt', profile.native_import_receipt, raising=False)
     monkeypatch.setattr(cache, 'native_import_receipt', profile.native_import_receipt, raising=False)
     source, target, shared = tmp_path / 'alice-build', tmp_path / 'bob-execution', tmp_path / 'host-cache'
@@ -37,7 +36,7 @@ def bundle(tmp_path, monkeypatch):
             package = root / name / name.replace('-', '_')
             package.mkdir(parents=True)
             (package / '__init__.py').write_text('value = ' + repr(root.name))
-    extension = Path(importlib.util.find_spec('_ctypes_test').origin)
+    _, extension = native_extension
     relative = 'vllm-ascend/vllm_ascend/' + extension.name
     shutil.copy2(extension, source / relative)
     metadata = 'vllm-ascend/vllm_ascend/_build_info.py'
@@ -79,7 +78,10 @@ def test_cross_user_reuse_loads_real_extension_without_donor_runtime(bundle):
     assert cache.store_shared_native(source, shared)['status'] == 'stored'
     shutil.rmtree(source)  # No donor interpreter, editable source or runtime is reused.
     assert cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)['status'] == 'hit'
-    command = "import json,vllm,vllm_ascend._ctypes_test as extension;from vllm._version import __commit_id__;print(json.dumps({'source':vllm.value,'extension':extension.__file__,'head':__commit_id__}))"
+    module_name = Path(relative).name.split('.')[0]
+    command = (f"import json,vllm,vllm_ascend.{module_name} as extension;"
+               "from vllm._version import __commit_id__;"
+               "print(json.dumps({'source':vllm.value,'extension':extension.__file__,'head':__commit_id__}))")
     result = subprocess.run([sys.executable, '-c', command], capture_output=True, text=True,
                             env={**os.environ, 'PYTHONPATH': os.pathsep.join(map(str, [target / '.mindie-runtime/metadata',
                                                                                 target / 'vllm', target / 'vllm-ascend']))})
