@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@26d889179ffe5b4e6803fb127fdfb517a85266f0
+    uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@f65b6bbe39e6d72110341476a2066e30b2adbf77
     with:
       setup-command: |
         uv venv --python 3.13 && uv pip install -e ".[test]"
