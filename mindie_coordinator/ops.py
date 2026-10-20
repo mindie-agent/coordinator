@@ -17,6 +17,7 @@ from remote_dev.runtime import process_identity, runtime_status
 from mindie_coordinator.presentation import present
 from mindie_coordinator.placement import ENVIRONMENT_KEYS
 from mindie_coordinator.state_paths import coordinator_state_dir
+from mindie_coordinator.topology_gang import PLACEMENT_POLICIES, SCALES
 
 LOADED_RUNTIMES = [process_identity(name) for name in ("mindie-coordinator", "remote-dev")]
 
@@ -75,7 +76,16 @@ TOOL_SCHEMAS = {
         "topology": {"type": "object", "additionalProperties": False, "properties": {
             "host": {"type": "string", "minLength": 1, "description": "Host constraint for one default role; use roles[].host for a role group."},
             "roles": {"type": "array", "minItems": 1, "items": ROLE_SCHEMA},
-            "distinct_hosts": {"type": "boolean"}}, "not": {"required": ["host", "roles"]}},
+            "distinct_hosts": {"type": "boolean"},
+            "scale": {"type": "string", "enum": list(SCALES)},
+            "die_count": {"type": "integer", "minimum": 1, "maximum": 32},
+            "placement_policy": {"type": "string", "enum": list(PLACEMENT_POLICIES)},
+            "prefill_die_count": {"type": "integer", "minimum": 1},
+            "decode_die_count": {"type": "integer", "minimum": 1},
+            "node_count": {"type": "integer", "minimum": 1},
+            "visible_phy_ids": {"type": "array", "items": {"type": "integer", "minimum": 0},
+                                "minItems": 1, "maxItems": 32, "uniqueItems": True}},
+         "not": {"required": ["host", "roles"]}},
         "timeout_seconds": {"type": ["integer", "null"], "default": 1800},
         "service": {"type": ["string", "null"], "description": "Ensure a task-scoped service with identical fixed sources and configuration. Changed inputs require restart. To connect without capture, use mindie_execution(service=...)."},
         "restart": {"type": "boolean", "description": "Replace a live named service, including one with the same spec"},
