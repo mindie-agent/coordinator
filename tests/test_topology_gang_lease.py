@@ -584,7 +584,7 @@ echo "===HYGIENE_END==="
 def test_tier2_live_a2_and_a3_multi_die_gang_lease_in_sandbox():
     hosts = (A2_HOST, A3_IDLE_HOST, A3_PARTIAL_HOST)
     sandboxes = {
-        host: f"/tmp/mindie-npu-test-{uuid.uuid4().hex}" for host in hosts
+        host: f"/tmp/mindie-npu-test-coord-{uuid.uuid4().hex}" for host in hosts
     }
     topologies = {}
     cleanup_failures: list[str] = []

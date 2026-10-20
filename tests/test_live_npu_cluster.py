@@ -86,7 +86,7 @@ def test_live_fleet_probe_and_capacity_across_a2_and_a3():
     ],
 )
 def test_live_lease_lifecycle_in_isolated_remote_state_dir(alias: str, host: str, npu_count: int):
-    remote_state_dir = f"/tmp/mindie-npu-test-{uuid.uuid4().hex[:10]}"
+    remote_state_dir = f"/tmp/mindie-npu-test-coord-{uuid.uuid4().hex[:10]}"
     lease_id = f"test-lease-{uuid.uuid4().hex[:8]}"
     try:
         with tempfile.TemporaryDirectory() as tmp:
