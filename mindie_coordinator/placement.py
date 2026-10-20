@@ -1,7 +1,10 @@
 """Choose hosts and prepared roots from attested catalog + constraints.
 
-[Role] Pure constraint solver mapping environment/resource/topology requirements to attested host candidates.
+[Role] Pure constraint solver mapping environment/resource/topology requirements
+to attested host candidates, including observed topology-gang role plans.
 [Invariants] Never relaxes topology, recipe, ABI, or hardware constraints, and never starts a partial multi-role group.
+- A topology-gang plan is executable only with observed host/card topology;
+  explicit host, physical devices, and service ports are preserved or rejected.
 - Optional `npu-top` observations may only reorder matching ready roots. An
   explicit role/topology host still filters by identity and is never rewritten;
   the host queue remains the allocation authority.
@@ -12,13 +15,27 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Sequence
+
+from mindie_coordinator.topology_gang import (
+    POLICY_DISAGGREGATED_PD_PAIR,
+    POLICY_MULTI_NODE_ROCE,
+    POLICY_SAME_NPU_DUAL_DIE,
+    SCALE_S3,
+    GangLeaseError,
+    TopologySpec,
+    allocate_gang_lease,
+)
 
 SUPPORTED_RECIPES = {"rc", "main", "stable", "local-latest"}
 RESERVED_ENV = {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", "MINDIE_EXECUTION_OBSERVATION"}
 ENVIRONMENT_KEYS = {"recipe", "image", "python_abi", "cann", "soc", "machine_type"}
 RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy"}
-TOPOLOGY_KEYS = {"host", "roles", "distinct_hosts"}
+TOPOLOGY_GANG_KEYS = {
+    "scale", "die_count", "placement_policy", "prefill_die_count",
+    "decode_die_count", "node_count", "visible_phy_ids",
+}
+TOPOLOGY_KEYS = {"host", "roles", "distinct_hosts"} | TOPOLOGY_GANG_KEYS
 ROLE_KEYS = {"name", "command", "preflight", "devices", "npu_count", "service_port", "allow_external_busy", "host", "env"}
 
 
@@ -107,7 +124,364 @@ def normalize_resources(resources: dict[str, Any] | None) -> dict[str, Any]:
     return resources
 
 
-def role_plan(topology: dict[str, Any] | None, resources: dict[str, Any], command: str) -> list[dict[str, Any]]:
+def extract_topology_spec(topology: dict[str, Any] | None) -> TopologySpec | None:
+    """Return the validated topology-gang contract, when one was requested.
+
+    Any of `scale`, `placement_policy`, or `die_count` opts a topology into
+    gang planning. `GangLeaseError` subclasses `ValueError`, so admission code
+    and gang-aware callers can catch either type for the same refusal.
+    """
+    if topology is None:
+        return None
+    if not isinstance(topology, dict):
+        raise ValueError("topology must be an object")
+    if not TOPOLOGY_GANG_KEYS & set(topology):
+        return None
+    if not {"scale", "die_count", "placement_policy"} & set(topology):
+        raise ValueError(
+            "topology gang fields require scale, die_count, or placement_policy"
+        )
+    payload = {key: topology[key] for key in TOPOLOGY_GANG_KEYS if key in topology}
+    return TopologySpec.from_mapping(payload)
+
+
+def _gang_role(
+    name: str,
+    command: str,
+    *,
+    devices: Sequence[int] | None = None,
+    npu_count: int | None = None,
+    host: str | None = None,
+    env: dict[str, str] | None = None,
+    service_port: int | None = None,
+    allow_external_busy: bool = False,
+) -> dict[str, Any]:
+    role: dict[str, Any] = {"name": name, "command": command}
+    if devices is not None:
+        role["devices"] = [int(device) for device in devices]
+    else:
+        role["npu_count"] = int(npu_count or 0)
+    if host is not None:
+        role["host"] = host
+    if env is not None:
+        role["env"] = dict(env)
+    if service_port is not None:
+        role["service_port"] = int(service_port)
+    if allow_external_busy:
+        role["allow_external_busy"] = True
+    return role
+
+
+def _require_sibling_pairs(
+    phy_ids: Sequence[int], *, code: str = "insufficient_dual_die_pairs"
+) -> None:
+    """A3 dual-Die cards expose siblings as `(2k, 2k+1)`; never straddle cards."""
+    if len(phy_ids) % 2:
+        raise GangLeaseError(
+            code,
+            f"same_npu_dual_die requires an even Phy-ID count, got {list(phy_ids)}",
+        )
+    for first, second in zip(phy_ids[::2], phy_ids[1::2]):
+        if first % 2 or second != first + 1:
+            raise GangLeaseError(
+                code,
+                f"same_npu_dual_die requires sibling Phy-ID pairs, got {list(phy_ids)}",
+            )
+
+
+def _apply_requested_resources(
+    roles: list[dict[str, Any]],
+    resources: dict[str, Any],
+    *,
+    host: str | None = None,
+) -> list[dict[str, Any]]:
+    """Carry supported resource bindings onto the generated role plan.
+
+    The host queue remains the single port/device authority. `service_port`
+    applies to the first/default service; a single port cannot be duplicated
+    across independent PD or S3 roles. `allow_external_busy` is only valid for
+    one explicit Die and is therefore generated for one role at most.
+    """
+    if not roles:
+        return roles
+    if host:
+        for role in roles:
+            role["host"] = host
+    if resources.get("service_port") is not None:
+        roles[0]["service_port"] = int(resources["service_port"])
+    if resources.get("allow_external_busy"):
+        roles[0]["allow_external_busy"] = True
+    return roles
+
+
+def _prepare_gang_request(
+    topology: dict[str, Any],
+    spec: TopologySpec,
+    resources: dict[str, Any] | None,
+    host_topologies: Sequence[Any] | None,
+    *,
+    require_observed: bool,
+) -> tuple[TopologySpec, dict[str, Any], str | None, Sequence[Any] | None]:
+    """Validate host/device/port bindings and merge them into the topology spec.
+
+    Explicit `resources.devices` become the requested physical Phy-IDs rather
+    than a count, so the host queue must grant exactly those IDs or wait. A
+    conflict between `topology.visible_phy_ids`, `resources.devices`, or
+    `topology.host` is rejected before any preparation or submission.
+    """
+    if not isinstance(topology, dict):
+        raise GangLeaseError("invalid_spec", "topology must be an object")
+    if "distinct_hosts" in topology and type(topology["distinct_hosts"]) is not bool:
+        raise GangLeaseError("invalid_spec", "topology.distinct_hosts must be a boolean")
+    host = topology.get("host")
+    if host is not None and (not isinstance(host, str) or not host.strip()):
+        raise GangLeaseError(
+            "invalid_spec", "topology.host must be a nonempty hostname or IP address"
+        )
+    if host and spec.scale == SCALE_S3:
+        raise GangLeaseError(
+            "conflicting_host",
+            "topology.host cannot bind a multi-node RoCE gang; use topology.roles "
+            "with one host per node",
+        )
+    if not isinstance(resources, dict) and resources is not None:
+        raise GangLeaseError("invalid_spec", "resources must be an object")
+    declared = dict(resources or {})
+    normalized = normalize_resources(declared)
+    devices = list(normalized.get("devices") or [])
+    if devices:
+        if spec.scale == SCALE_S3:
+            raise GangLeaseError(
+                "conflicting_devices",
+                "multi-node S3 cannot bind one flat resources.devices list across hosts",
+            )
+        if len(devices) != spec.die_count:
+            raise GangLeaseError(
+                "conflicting_devices",
+                f"resources.devices has {len(devices)} entries but topology.die_count is {spec.die_count}",
+            )
+        if spec.visible_phy_ids is not None and set(spec.visible_phy_ids) != set(devices):
+            raise GangLeaseError(
+                "conflicting_devices",
+                "topology.visible_phy_ids and resources.devices request different physical Dies",
+            )
+        spec = TopologySpec.from_mapping(
+            {**spec.to_dict(), "visible_phy_ids": devices}
+        )
+        if spec.placement_policy == POLICY_SAME_NPU_DUAL_DIE:
+            # An explicitly requested straddling pair is a request conflict,
+            # not a temporary capacity shortage that waiting could fix.
+            _require_sibling_pairs(
+                spec.visible_phy_ids or (), code="conflicting_devices"
+            )
+    elif (
+        "npu_count" in declared
+        and declared["npu_count"] not in (0, spec.die_count)
+    ):
+        raise GangLeaseError(
+            "conflicting_npu_count",
+            f"resources.npu_count={declared['npu_count']} conflicts with topology.die_count={spec.die_count}",
+        )
+    if normalized.get("allow_external_busy"):
+        if spec.die_count != 1 or len(devices) != 1:
+            raise GangLeaseError(
+                "conflicting_allow_external_busy",
+                "allow_external_busy is only valid for one explicit physical Die",
+            )
+
+    if host_topologies is not None and hasattr(host_topologies, "host"):
+        host_topologies = [host_topologies]
+    if host_topologies is not None:
+        host_topologies = list(host_topologies)
+    if require_observed and host_topologies is None:
+        raise GangLeaseError(
+            "host_observation_required",
+            "topology-gang placement requires live host/card observations; "
+            "a count-only plan is not executable",
+        )
+    if host and host_topologies is not None:
+        matching = [
+            item for item in host_topologies if str(getattr(item, "host", "")) == host
+        ]
+        if not matching:
+            raise GangLeaseError(
+                "requested_host_unobserved",
+                f"no topology observation for requested host {host!r}",
+                host=host,
+            )
+        host_topologies = matching
+    return spec, normalized, host, host_topologies
+
+
+def _structural_gang_roles(
+    spec: TopologySpec,
+    command: str,
+    *,
+    host: str | None = None,
+    resources: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Synthesize the role shape for client validation or a host probe.
+
+    A structural plan is never executed by `CoordinatorService`: gang
+    executions require observed `HostTopology` rows so physical devices and
+    sibling pairs are concrete before submission.
+    """
+    if spec.placement_policy == POLICY_DISAGGREGATED_PD_PAIR:
+        if spec.visible_phy_ids is not None:
+            prefill_count = int(spec.prefill_die_count or 0)
+            roles = [
+                _gang_role(
+                    "prefill", command,
+                    devices=spec.visible_phy_ids[:prefill_count],
+                ),
+                _gang_role(
+                    "decode", command,
+                    devices=spec.visible_phy_ids[prefill_count:],
+                ),
+            ]
+            return _apply_requested_resources(roles, resources or {}, host=host)
+        roles = [
+            _gang_role("prefill", command, npu_count=spec.prefill_die_count),
+            _gang_role("decode", command, npu_count=spec.decode_die_count),
+        ]
+        return _apply_requested_resources(roles, resources or {}, host=host)
+    if spec.placement_policy == POLICY_MULTI_NODE_ROCE:
+        node_count = int(spec.node_count or 2)
+        per_node = spec.die_count // node_count
+        roles = [
+            _gang_role(f"node-{index}", command, npu_count=per_node)
+            for index in range(node_count)
+        ]
+        return _apply_requested_resources(roles, resources or {}, host=host)
+    if spec.visible_phy_ids is not None:
+        if spec.placement_policy == POLICY_SAME_NPU_DUAL_DIE:
+            _require_sibling_pairs(spec.visible_phy_ids)
+        roles = [_gang_role("default", command, devices=spec.visible_phy_ids)]
+        return _apply_requested_resources(roles, resources or {}, host=host)
+    roles = [_gang_role("default", command, npu_count=spec.die_count)]
+    return _apply_requested_resources(roles, resources or {}, host=host)
+
+
+def _lease_gang_roles(
+    lease,
+    spec: TopologySpec,
+    command: str,
+    *,
+    host: str | None = None,
+    resources: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Materialize the gang lease's per-role physical device groups."""
+    if host and any(member.host != host for member in lease.members):
+        raise GangLeaseError(
+            "requested_host_mismatch",
+            f"selected host(s) {list(lease.hosts)} do not satisfy topology.host={host!r}",
+            host=host,
+        )
+    if spec.placement_policy == POLICY_DISAGGREGATED_PD_PAIR:
+        roles = [
+            _gang_role(
+                member.role, command,
+                devices=member.phy_ids,
+                host=member.host,
+                env={"MINDIE_GANG_ROLE": member.role},
+            )
+            for member in lease.members
+        ]
+        return _apply_requested_resources(roles, resources or {}, host=host)
+    if spec.placement_policy == POLICY_MULTI_NODE_ROCE:
+        roles = [
+            _gang_role(
+                member.role, command,
+                devices=member.phy_ids,
+                host=member.host,
+            )
+            for member in lease.members
+        ]
+        return _apply_requested_resources(roles, resources or {}, host=host)
+    member = lease.members[0]
+    roles = [
+        _gang_role(
+            "default", command,
+            devices=member.phy_ids,
+            host=member.host,
+        )
+    ]
+    return _apply_requested_resources(roles, resources or {}, host=host)
+
+
+def plan_gang_placement(
+    topology: dict[str, Any] | None,
+    resources: dict[str, Any],
+    command: str,
+    *,
+    host_topologies: Sequence[Any] | None = None,
+    require_observed: bool = False,
+):
+    """Validate one gang request and plan concrete roles.
+
+    Returns `(lease, roles)`. Without observations the lease is `None` and the
+    roles are a structural shape only. `require_observed=True` refuses that
+    shape, which is how production execution avoids a count-only fallback.
+    """
+    topology = checked_mapping(topology, "topology", TOPOLOGY_KEYS)
+    spec = extract_topology_spec(topology)
+    if spec is None:
+        raise GangLeaseError(
+            "invalid_spec",
+            "topology must specify scale, die_count, or placement_policy for gang planning",
+        )
+    if "roles" in topology:
+        raise GangLeaseError(
+            "conflicting_roles",
+            "topology.roles cannot be combined with topology-gang fields",
+        )
+    spec, normalized, host, hosts = _prepare_gang_request(
+        topology, spec, resources, host_topologies, require_observed=require_observed
+    )
+    if hosts is None:
+        return None, _structural_gang_roles(
+            spec, command, host=host, resources=normalized
+        )
+    lease = allocate_gang_lease(hosts, spec)
+    return lease, _lease_gang_roles(
+        lease, spec, command, host=host, resources=normalized
+    )
+
+
+def plan_gang_roles(
+    topology: dict[str, Any] | None,
+    resources: dict[str, Any],
+    command: str,
+    *,
+    host_topologies: Sequence[Any] | None = None,
+    require_observed: bool = False,
+) -> list[dict[str, Any]]:
+    """Turn a topology-gang spec into ordered role requirements.
+
+    With host observations, `allocate_gang_lease` selects the physical Dies and
+    each role carries its concrete disjoint device group plus the observed
+    host. Without observations, only the structural role shape is emitted so
+    clients can validate inputs; production `CoordinatorService` always calls
+    with `require_observed=True` and real fleet observations.
+    """
+    _lease, roles = plan_gang_placement(
+        topology,
+        resources,
+        command,
+        host_topologies=host_topologies,
+        require_observed=require_observed,
+    )
+    return roles
+
+
+def role_plan(
+    topology: dict[str, Any] | None,
+    resources: dict[str, Any],
+    command: str,
+    *,
+    host_topologies: Sequence[Any] | None = None,
+    require_observed: bool = False,
+) -> list[dict[str, Any]]:
     topology = checked_mapping(topology, "topology", TOPOLOGY_KEYS)
     if "distinct_hosts" in topology and type(topology["distinct_hosts"]) is not bool:
         raise ValueError("topology.distinct_hosts must be a boolean")
@@ -115,6 +489,18 @@ def role_plan(topology: dict[str, Any] | None, resources: dict[str, Any], comman
         raise ValueError("topology.host must be a nonempty hostname or IP address")
     if "host" in topology and "roles" in topology:
         raise ValueError("use topology.host for one default role, or topology.roles with host in each role; do not combine them")
+    if extract_topology_spec(topology) is not None:
+        if "roles" in topology:
+            raise ValueError(
+                "topology.roles cannot be combined with topology-gang fields"
+            )
+        return plan_gang_roles(
+            topology,
+            resources,
+            command,
+            host_topologies=host_topologies,
+            require_observed=require_observed,
+        )
     if "roles" not in topology:
         item = {"name": "default", "command": command}
         if "host" in topology:
@@ -164,8 +550,13 @@ def role_plan(topology: dict[str, Any] | None, resources: dict[str, Any], comman
 
 def distinct_hosts_required(roles: list[dict[str, Any]], topology: dict[str, Any] | None = None) -> bool:
     """Default allows same-host roles. Distinct hosts only when explicitly required."""
-    if topology and topology.get("distinct_hosts"):
-        return True
+    if topology:
+        if topology.get("distinct_hosts"):
+            return True
+        if topology.get("placement_policy") == POLICY_MULTI_NODE_ROCE:
+            return True
+        if topology.get("scale") == SCALE_S3:
+            return True
     named = [str(role["host"]) for role in roles if role.get("host")]
     return len(set(named)) > 1
 
