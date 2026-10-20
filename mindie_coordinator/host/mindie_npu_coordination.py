@@ -9,7 +9,10 @@ and peer coordination messages under `/tmp/mindie-npu-coordinator/v1`.
 
 [Invariants]
 - Physical NPU allocation identity is resolved from `npu-smi info` device/chip
-  tables (`Phy-ID` on A3/multi-Die, header NPU ID on single-chip A2).
+  tables (`Phy-ID` on A3/multi-Die, header NPU ID on single-chip A2, single-ID
+  NPU rows on A5 Ascend 950).
+- A5's static HBM reservation is not workload occupancy; its process rows
+  decide busy state while total HBM capacity remains visible.
 - Leases transition `queued -> granted -> starting -> active -> released`
   (or `orphaned_busy` if processes/hardware/ports remain busy at release/expiry).
 - Managed jobs with `process_guard` (`REMOTE_DEV_JOB_TOKEN`) cannot be released
@@ -362,15 +365,44 @@ def probe_listening_ports() -> dict[str, Any]:
     return {"status": "failed", "error": last_error, "ports": []}
 
 
+# A5 (`npu-smi` 26.2) renders one logical NPU as a four-cell header row plus a
+# four-cell metric row.  The metric row has no PCIe Bus-Id and carries
+# `AICore Memory-Usage HBM-Usage` in its final cell.
+_SINGLE_ID_TABLE_HEADER = re.compile(
+    r"\|\s*NPU(?:\s+ID)?\s*\|\s*Name\s*\|\s*Health\s*\|"
+)
+_SINGLE_ID_METRICS = re.compile(
+    r"(?P<aicore>\d+(?:\.\d+)?|NA|-)\s+"
+    r"(?P<memory_used>\d+)\s*/\s*(?P<memory_total>\d+)\s+"
+    r"(?P<hbm_used>\d+)\s*/\s*(?P<hbm_total>\d+)"
+)
+
+
+def _npu_smi_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _single_id_metric_row(cells: list[str]) -> re.Match[str] | None:
+    """Return A5 metric groups when the trailing cell is a full A5 row."""
+    if not cells:
+        return None
+    return _SINGLE_ID_METRICS.fullmatch(" ".join(cells[-1].split()))
+
+
 def _parse_npu_smi_device_table(
     output: str,
 ) -> tuple[set[int], dict[int, dict[str, int]], dict[tuple[int, int], int], str | None]:
-    """Visible devices, HBM, explicit chip mapping and any ambiguous layout."""
+    """Visible devices, HBM, explicit chip mapping and any ambiguous layout.
+
+    Handles A2/A3 rows with a PCIe Bus-Id and A5's four-cell single-ID rows.
+    """
     dev_ids: set[int] = set()
     header_ids: set[int] = set()
     hbm: dict[int, dict[str, int]] = {}
     chip_devices: dict[tuple[int, int], int] = {}
     implicit_chips: dict[int, list[int]] = {}
+    single_id_headers: set[int] = set()
+    single_id_details: set[int] = set()
     layout_error = None
     current_npu: int | None = None
     for line in output.splitlines():
@@ -397,12 +429,39 @@ def _parse_npu_smi_device_table(
                     "total_mb": int(pairs[-1][1]),
                 }
             continue
+        cells = _npu_smi_cells(line)
+        metrics = _single_id_metric_row(cells)
+        if metrics is not None and current_npu is not None:
+            # A5 has one Die per NPU and no explicit Chip/Phy-ID column.  The
+            # metric row follows its NPU header; a present first cell is the
+            # Chip ID, otherwise the sole Die is Chip 0.
+            chip_id = int(cells[0]) if cells[0].isdigit() else 0
+            dev_id = current_npu
+            chip_devices[(current_npu, chip_id)] = dev_id
+            dev_ids.add(dev_id)
+            single_id_details.add(dev_id)
+            # Every otherwise-idle A5 card reports a static ~4.7 GiB HBM
+            # reservation.  Counting that baseline as workload usage would
+            # mark all cards busy at HBM_BUSY_THRESHOLD_MB, so A5 occupancy
+            # comes from its process table while capacity is retained.
+            hbm[dev_id] = {"used_mb": 0, "total_mb": int(metrics.group("hbm_total"))}
+            continue
+        if (len(cells) >= 3 and cells[0].isdigit() and cells[1]
+                and not cells[1].isdigit() and ":" not in cells[1]):
+            # A5 logical-device header: | 0 | Ascend950DT | OK | ... |
+            current_npu = int(cells[0])
+            header_ids.add(current_npu)
+            single_id_headers.add(current_npu)
+            continue
         header = re.match(r"\|\s*(\d+)\s+\d*\w+\d+\w*\s+\|", line)
         if header:
             current_npu = int(header.group(1))
             header_ids.add(current_npu)
     if not dev_ids:
         dev_ids.update(header_ids)
+    if single_id_headers and single_id_details != single_id_headers:
+        # A truncated A5 table must not make unobserved cards look free.
+        layout_error = "npu-smi A5 device table is missing a metric row"
     explicit_mapping_present = bool(chip_devices)
     for npu, chips in implicit_chips.items():
         # A2 omits Phy-ID: one explicit chip row belongs to its NPU header.
@@ -418,6 +477,8 @@ def parse_npu_smi_hbm(output: str) -> dict[int, dict[str, int]]:
     """Physical-device HBM used/total from npu-smi info text.
 
     Does not require a process table; occupancy failure still returns HBM.
+    A5 reports a static firmware reservation rather than task usage, so its
+    ``used_mb`` is normalized to zero while total capacity is retained.
     """
     _dev_ids, hbm, _chip_devices, _layout_error = _parse_npu_smi_device_table(output)
     return dict(sorted(hbm.items()))
@@ -431,6 +492,7 @@ def parse_npu_smi_info(output: str) -> dict[str, Any]:
                 "devices": sorted(dev_ids), "busy": {}, "free": []}
     lines = output.splitlines()
 
+    single_id_layout = bool(_SINGLE_ID_TABLE_HEADER.search(output))
     process_busy: dict[int, list[dict[str, Any]]] = {}
     in_process_table = False
     process_error = None
@@ -446,6 +508,23 @@ def parse_npu_smi_info(output: str) -> dict[str, Any]:
             # allocation identity through the actual device-table layout.
             if len(columns) >= 3 and re.fullmatch(r"\d+(?:\s+\d+)?", columns[0]):
                 identity = [int(value) for value in columns[0].split()]
+                if len(identity) == 1 and single_id_layout and columns[1].isdigit():
+                    # A5: | NPU | Process id | Process name | Memory |.
+                    # There is no Chip/Phy-ID column, so the lone first cell
+                    # is already the logical NPU (and its sole Phy-ID).
+                    device = identity[0]
+                    reason: dict[str, Any] = {
+                        "kind": "process",
+                        "pid": int(columns[1]),
+                        "name": columns[2],
+                    }
+                    if len(columns) > 3 and columns[3].isdigit():
+                        reason["memory_mb"] = int(columns[3])
+                    if device not in dev_ids or not columns[2]:
+                        process_error = "npu-smi process row has an unknown device or invalid PID/name"
+                        break
+                    process_busy.setdefault(device, []).append(reason)
+                    continue
                 if len(identity) == 2:
                     device = chip_devices.get(tuple(identity))
                 elif chip_devices:
@@ -499,12 +578,22 @@ def parse_npu_smi_info(output: str) -> dict[str, Any]:
             )
         if reasons:
             busy[device] = reasons
+    free = sorted(device for device in dev_ids if device not in busy)
+    active_pids = sorted({
+        int(reason["pid"])
+        for reasons in process_busy.values()
+        for reason in reasons
+        if isinstance(reason.get("pid"), int)
+    })
     return {
         "status": "ok",
         "collected_at": utc_now_iso(),
         "devices": sorted(dev_ids),
         "busy": {str(key): value for key, value in sorted(busy.items())},
-        "free": sorted(device for device in dev_ids if device not in busy),
+        "busy_devices": sorted(busy),
+        "free": free,
+        "free_devices": free,
+        "active_pids": active_pids,
         "hbm": {str(key): value for key, value in sorted(hbm.items())},
         "hbm_busy_threshold_mb": HBM_BUSY_THRESHOLD_MB,
     }
