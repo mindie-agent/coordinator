@@ -185,6 +185,7 @@ def _run_remove_script(tmp_path, docker_body):
     import json
     from pathlib import Path
     import shlex
+    import shutil
     import subprocess
     import sys
     from mindie_coordinator.provision import host_ops
@@ -199,8 +200,10 @@ def _run_remove_script(tmp_path, docker_body):
         encoding="utf-8", newline="\n",
     )
     python.chmod(0o755)
+    bash = shutil.which("bash")
+    assert bash is not None, "Bash is required for the local Linux-peer fixture"
     completed = subprocess.run(
-        ["bash", "-c", 'export PATH="$PWD/bin:$PATH"\n'
+        [bash, "-c", 'export PATH="$PWD/bin:$PATH"\n'
          + host_ops.render_remove_container_host_script(), "remove", "mindie-alice"],
         capture_output=True, text=True, cwd=tmp_path, timeout=20,
     )
