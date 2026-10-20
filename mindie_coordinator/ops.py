@@ -244,7 +244,7 @@ def mindie_call(name, args, *, allow_native_context=True):
             outcome = "timeout"
         elif status == "cancelled":
             outcome = "cancelled"
-        elif status in {"uncertain", "waiting_for_runtime", "needs_runtime_update", "insufficient_capacity"}:
+        elif status in {"uncertain", "partial", "waiting_for_runtime", "needs_runtime_update", "insufficient_capacity"}:
             outcome = "blocked"
         elif status in {"queued", "preparing", "waiting"} and name not in ENV_TOOLS and not value.get("execution_id"):
             outcome = "blocked"

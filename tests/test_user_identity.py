@@ -163,11 +163,22 @@ def test_provision_uses_configured_user_with_shared_root_transport(tmp_path, mon
     monkeypatch.setattr(provision.host_ops, "find_public_key", lambda _: tmp_path / "key.pub")
     monkeypatch.setattr(provision.host_ops, "load_public_key", lambda _: "ssh-ed25519 test")
 
+    reserved = []
+
+    class AuthorityQueue:
+        def request(self, target, payload):
+            reserved.append((target, payload))
+            return {"status": "reserved", "port": 2222, "reused": False}
+
+    monkeypatch.setattr("mindie_coordinator.host_queue.HostQueue", lambda: AuthorityQueue())
     if via_cli:
         assert main(["provision", "--host", "shared-host", "--image", "stable"]) == 0
         result = json.loads(capsys.readouterr().out)
     else:
         result = provision.provision_user_container(host="shared-host", image="stable")
+    assert reserved == [({"host": "shared-host", "port": 22, "user": "root"},
+                         {"action": "container-ssh-reserve", "user": "alice",
+                          "container_name": "mindie-alice", "port": 0})]
     assert result["user"] == "alice"
     assert result["container_name"] == "mindie-alice"
     boot = calls.call_args_list[1]

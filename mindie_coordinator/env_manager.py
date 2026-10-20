@@ -10,6 +10,8 @@ Implements the four direct environment management handlers (`handle_hosts`,
   `<state_dir>/remote_dev_endpoints.json` synchronized atomically.
 - `handle_lease` delegates card allocation and fencing to `HostQueue` and caches
   lease metadata (`fence_token`, `coordination_epoch`, `devices`) in `leases.json`.
+- Container removal releases only that container owner's `container_ssh` row
+  after confirmed removal/absence; failed or unknown removal keeps it.
 
 [Timeouts & Locks]
 - Delegates remote execution to `fleet_probe`, `host_ops`, and `HostQueue`.
@@ -613,6 +615,8 @@ def handle_container(
         ssh_port = int(args.get("ssh_port") or bound.get("ssh_port") or 0)
         unbind_only = bool(args.get("unbind_only"))
 
+        removal = None
+        release = None
         if not unbind_only:
             if not container_name:
                 raise caller_error("mindie_container(action='remove') requires `container_name` or a bound container on the target machine")
@@ -625,9 +629,37 @@ def handle_container(
                 known_hosts=str(host_ops.DEFAULT_KNOWN_HOSTS),
                 clean_local_known_hosts=bool(ssh_port > 0),
             )
-            rc = host_ops.cmd_remove_container(ns)
-            if rc != 0:
-                raise RuntimeError(f"failed to remove container {container_name!r} on {host_spec['host']}")
+            removal = host_ops.remove_container_result(ns)
+            confirmed_absent = removal.get("removed") is False and removal.get("previous_state") is None
+            if removal.get("success") is not True or not (removal.get("removed") is True or confirmed_absent):
+                raise RuntimeError(f"failed to confirm removal of container {container_name!r} on {host_spec['host']}")
+            owner = str(args.get("container_user") or args.get("owner")
+                        or (rec or {}).get("user") or "").strip()
+            if not owner and container_name.startswith("mindie-"):
+                owner = container_name[len("mindie-"):]
+            if not owner:
+                return {
+                    "state": "partial", "action": "remove", "alias": alias,
+                    "container_name": container_name, "removal": removal,
+                    "reservation_release": {"status": "not_attempted",
+                                            "reason": "container owner is unknown; reservation not touched"},
+                    "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
+                }
+            host_queue = queue if queue is not None else HostQueue()
+            try:
+                release = host_queue.request(host_spec, {
+                    "action": "container-ssh-release",
+                    "user": owner,
+                    "container_name": container_name,
+                    "port": ssh_port if ssh_port > 0 else 0,
+                })
+            except Exception as exc:
+                return {
+                    "state": "partial", "action": "remove", "alias": alias,
+                    "container_name": container_name, "removal": removal,
+                    "reservation_release": {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:800]},
+                    "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
+                }
 
         if rec is not None:
             cleaned = {k: v for k, v in rec.items() if k != "container"}
@@ -639,6 +671,8 @@ def handle_container(
             "alias": alias,
             "container_name": container_name or None,
             "unbind_only": unbind_only,
+            "removal": removal,
+            "reservation_release": release,
             "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
 

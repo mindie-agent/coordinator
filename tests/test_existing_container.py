@@ -173,7 +173,8 @@ def test_uncertain_read_returns_to_original_non_replacing_provision(monkeypatch)
     monkeypatch.setattr(provision.host_ops, 'find_public_key', lambda _: 'unused')
     monkeypatch.setattr(provision.host_ops, 'load_public_key', lambda _: 'ssh-ed25519 test')
     result = provision.provision_user_container(host=TARGET.host, image=IMAGE, user='alice',
-                                               ssh_port=2201, machines=Mock())
+                                               ssh_port=2201, machines=Mock(),
+                                               reserve_port=Mock(return_value={'port': 2201}))
     assert result['state'] == 'ready' and 'image_verification' not in result
     assert remote.call_count == 3
     assert remote.call_args_list[1].kwargs['args'][1] == '2201'
