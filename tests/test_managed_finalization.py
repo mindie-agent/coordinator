@@ -11,7 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from mindie_coordinator import backend, parity, preparation_cache as cache, runtime_profile as profile
+from mindie_coordinator import backend, native_cache_pool, parity, preparation_cache as cache, runtime_profile as profile
 from mindie_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
 from test_native_compatibility_reuse import prepared
 from test_shared_preparation import bundle
@@ -116,6 +116,7 @@ def test_actual_managed_suffix_finishes_smoke_copy_and_atomic_ready(prepared, mo
     monkeypatch.setattr(subprocess, 'run', imports)
     outputs, errors = [], []
     namespace = {key: value for key, value in vars(profile).items() if not key.startswith('__')}
+    exec(compile(Path(native_cache_pool.__file__).read_text(), '<native-cache-pool>', 'exec'), namespace)
     exec(compile(Path(cache.__file__).read_text(), '<cache>', 'exec'), namespace)
     namespace.update(installed_dependency_identity=lambda: {}, installed_native_files=lambda root: prepared['files'],
                      print=lambda message, **kwargs: (errors if kwargs.get('file') else outputs).append(message),
