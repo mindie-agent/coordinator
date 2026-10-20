@@ -1,7 +1,7 @@
 """Local development-task identity and attachment registry.
 
 [Role]
-Maps native Harness sessions (`claude`, `codex`, `cursor`, `grok`, `kimi`) to
+Maps native Harness sessions (`claude`, `codex`, `cursor`, `grok`, `kimi`, `dsh`) to
 persistent local MindIE task identities, source worktree bindings, and execution
 records in `sessions.sqlite3`.
 
@@ -37,7 +37,7 @@ from pathlib import Path
 from mindie_coordinator.state_paths import agent_sessions_root
 from mindie_coordinator.client_paths import client_path
 
-CLIENTS = {"claude", "grok", "kimi", "codex", "cursor"}
+CLIENTS = {"claude", "grok", "kimi", "codex", "cursor", "dsh"}
 
 
 def git_common_directory(path: str | Path) -> Path:

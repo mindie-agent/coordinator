@@ -206,9 +206,13 @@ def test_backend_prepares_missing_root_before_real_owned_worker_launch_and_quiet
     saved, actions = [], []
     worker = worker_source()
     assert not root.exists()
-    # This is the real worker precondition that a direct bash-c test misses.
+    # remote-dev 0.10.3 safely reports an authoritatively absent root for
+    # observation, while launch/write must still reject it. Both are the real
+    # worker contract, not a substituted response.
+    absent = control_job({'root': str(root), 'job_id': 'absent-root', 'action': 'status'}, worker)
+    assert absent == {'state': 'absent', 'quiet': True}
     with pytest.raises(FileNotFoundError):
-        control_job({'root': str(root), 'job_id': 'absent-root', 'action': 'status'}, worker)
+        control_job({'root': str(root), 'job_id': 'absent-root', 'action': 'launch'}, worker)
 
     bootstrap = str(source.parent)
     monkeypatch.setattr('mindie_coordinator.provision.host_ops.DEFAULT_WORKDIR', bootstrap)
