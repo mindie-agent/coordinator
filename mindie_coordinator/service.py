@@ -4,12 +4,16 @@
 Owns the persistent local `CoordinatorService` daemon and `CoordinatorClient`
 IPC interface, orchestrating `RuntimePool`, `AgentSessions`, role placement,
 parallel role preparation/compilation, group lease start gates, and background
-tick supervision.
+tick supervision. Topology-gang placement additionally observes fleet
+`npu-smi` snapshots before selecting concrete physical Dies.
 
 [Invariants]
 - Group executions (`len(roles) > 1`) persist `group_start_authorized = True`
   only after all roles hold `active` leases and `prepared`/`running` jobs before
   releasing any role's start gate.
+- Topology-gang executions never execute a count-only role plan: admission
+  waits for a usable host/card observation, submits exact `devices`, and fails
+  if the host grant or binding differs from the observed plan.
 - `wait()` sleeps on `self._changed` condition variable without holding any
   execution lock; `refresh=False` status reads never block on remote SSH I/O.
 - `CoordinatorClient.call()` marks `submission_state="uncertain"` once `connect()`
@@ -21,10 +25,14 @@ tick supervision.
   on `wait`).
 - Startup lock (`coordinator.start.lock`, `6s` deadline) and daemon lock
   (`coordinator.lock`, non-blocking `flock`/`msvcrt`).
+- Gang observation retries at `GANG_PLAN_RETRY_SECONDS`; fleet probes are
+  bounded to `MAX_GANG_PROBE_HOSTS` candidates and serialized.
 
 [Side-Effect Policy]
 - Persists execution state via `AgentSessions`, runtime pool state via `RuntimePool`,
   and per-run logs under `<state_dir>/runs/<execution_id>/`.
+- Fleet topology probes are read-only remote `npu-smi`; the existing probe
+  cache may be refreshed under the coordinator state directory.
 """
 
 from __future__ import annotations
@@ -64,7 +72,9 @@ from mindie_coordinator.parity_support import RemoteCommandError
 from mindie_coordinator.placement import (
     can_prepare,
     distinct_hosts_required,
+    extract_topology_spec,
     host_key,
+    plan_gang_placement,
     provisionable_recipe,
     role_plan,
     runtime_matches,
@@ -77,6 +87,7 @@ from mindie_coordinator.preparation_process import (
 from mindie_coordinator.ready_runtime import RuntimePool, user_container_name
 from mindie_coordinator.state_paths import coordinator_state_dir
 from mindie_coordinator.task_messages import TaskMessages
+from mindie_coordinator.topology_gang_common import GangLeaseError
 
 LOCK_NAME = "coordinator.lock"
 IPC_NAME = "coordinator.ipc"
@@ -88,6 +99,22 @@ LIVE = {"running"}
 PERMANENT_ERRORS = (ValueError, PermissionError, ExecutionRequestError, TaskRootBusy)
 CLIENT_TIMEOUT_SECONDS = 60.0
 STOP_WAIT_SECONDS = 30.0
+# A gang refusal that can become satisfiable when another lease releases or a
+# host comes back is retried on the ordinary progress cadence, but not faster
+# than this window, so a waiting execution never becomes an SSH probe loop.
+GANG_PLAN_RETRY_SECONDS = 15.0
+GANG_RETRYABLE_CODES = frozenset({
+    "insufficient_free_dies",
+    "insufficient_dual_die_pairs",
+    "insufficient_nodes",
+    "requested_dies_unavailable",
+    "requested_host_unobserved",
+    "host_observation_required",
+    "host_observation_unavailable",
+    "observation_unavailable",
+    "observation_invalid",
+})
+MAX_GANG_PROBE_HOSTS = 8
 LOADED_RUNTIMES = [process_identity(name) for name in ("mindie-coordinator", "remote-dev")]
 
 
@@ -201,6 +228,7 @@ class CoordinatorService(TaskMessages):
         self._mail_stopped = threading.Event()
         self._mail_workers: set[threading.Thread] = set()
         self._lifecycle_lock = threading.Lock()
+        self._topology_probe_lock = threading.Lock()
         self._active_requests = 0
         self._async_progress = False
         self._ipc_token: str | None = None
@@ -650,14 +678,46 @@ class CoordinatorService(TaskMessages):
             row["sources"] = sources
             self._save_execution(store, row)
 
-        roles = spec.get("roles") or role_plan(spec.get("topology"), spec.get("resources") or {}, spec["command"])
         environment = spec.get("environment") or {}
+        topology = spec.get("topology") or {}
+        gang_requested = extract_topology_spec(topology) is not None
+        roles = list(row.get("roles") or [])
+        if roles and gang_requested and any(
+            not role.get("devices") or not role.get("host") for role in roles
+        ):
+            # A persisted count-only plan from an older execution can never be
+            # upgraded safely: the host may already have granted arbitrary
+            # devices. Stop visibly instead of pretending the gang constraint
+            # was observed.
+            row["phase"] = "failed"
+            row["error"] = (
+                "topology-gang execution has a count-only role plan; stop and "
+                "resubmit so observed host/device bindings are recorded"
+            )
+            row["error_details"] = {"code": "host_observation_required"}
+            self._save_execution(store, row)
+            return self._reply(row)
         if not row.get("roles"):
             if row.get("preparation_jobs"):
                 row["phase"] = "uncertain"
                 row["error"] = "retained preparation jobs require stop/quiet cleanup before a new execution"
                 self._save_execution(store, row)
                 return self._reply(row)
+            if gang_requested:
+                retry_at = row.get("topology_retry_at")
+                if isinstance(retry_at, (int, float)) and time.time() < retry_at:
+                    return self._reply(row)
+                planned = self._plan_gang_roles(store, user, row, spec)
+                if planned.get("status") == "waiting":
+                    return self._record_topology_wait(store, row, planned)
+                roles = planned["roles"]
+                row["topology_retry_at"] = None
+                row.pop("error", None)
+                row.pop("error_details", None)
+            else:
+                roles = spec.get("roles") or role_plan(
+                    topology, spec.get("resources") or {}, spec["command"]
+                )
             row["phase"] = "preparing"
             self._save_execution(store, row)
             placed = self._place_or_prepare(store, user, row, roles, environment)
@@ -705,6 +765,7 @@ class CoordinatorService(TaskMessages):
                                   "preflight": role.get("preflight") or spec.get("preflight"),
                                   "binding": binding, "npu_count": role.get("npu_count"),
                                   "devices": role.get("devices") or [],
+                                  "host": role.get("host"),
                                   "service_port": role.get("service_port"),
                                   **({"allow_external_busy": True} if role.get("allow_external_busy") else {}),
                                   "env": dict(role.get("env") or {})})
@@ -816,6 +877,17 @@ class CoordinatorService(TaskMessages):
                 row["phase"] = "failed"
                 self._save_execution(store, row)
                 return self._reply(row)
+            problem = self._gang_grant_problem(row, jobs) if gang_requested else None
+            if problem:
+                # The queue must grant exactly the observed physical Dies on
+                # the observed host. A substitution is a failed constraint,
+                # never an acceptable count-only placement.
+                self._stop_jobs(user, row, False)
+                row["phase"] = "failed"
+                row["error"] = "host grant/binding does not match the observed gang plan"
+                row["error_details"] = problem
+                self._save_execution(store, row)
+                return self._reply(row)
             if not row.get("group_start_authorized") and all(
                     job.get("lease_state") == "active" and job.get("remote", {}).get("state") in {"prepared", "running"}
                     for job in jobs):
@@ -840,6 +912,17 @@ class CoordinatorService(TaskMessages):
                 row["observation"] = jobs[0]
                 self._save_execution(store, row)
                 return self._reply(row)
+        elif gang_requested:
+            # A single-role gang is launched by its own managed_start call.
+            # Observe the real grant before recording a running assignment.
+            problem = self._gang_grant_problem(row, jobs)
+            if problem:
+                self._stop_jobs(user, row, False)
+                row["phase"] = "failed"
+                row["error"] = "host grant/binding does not match the observed gang plan"
+                row["error_details"] = problem
+                self._save_execution(store, row)
+                return self._reply(row)
 
         row["managed_job"] = jobs[0]["id"]
         row["observation"] = jobs[0]
@@ -850,6 +933,239 @@ class CoordinatorService(TaskMessages):
             self._save_progress(store, row, None, {"step": "running"})
         self._save_execution(store, row)
         return self._reply(row)
+
+    def _probe_host_record(self, record):
+        """Return one fleet-probe snapshot; tests replace this exact seam."""
+        from mindie_coordinator.fleet_probe import probe_machine_record
+        return probe_machine_record(record, mode="auto", state_dir=self.state_dir)
+
+    def _topology_host_records(self, user, topology):
+        """Order candidate hosts: user roots, configured machines, explicit host.
+
+        The planner prefers earlier rows when capacity ties, so a ready user
+        root is considered before a configured machine that still needs a
+        container. Configured records carry the real host SSH port/user.
+        """
+        wanted = str((topology or {}).get("host") or "").strip()
+        configured: dict[str, dict[str, Any]] = {}
+        for record in self._configured_machines():
+            host = str((record.get("host") or {}).get("ip") or "").strip()
+            if host and (not wanted or host == wanted):
+                configured.setdefault(host, record)
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add(record):
+            host = str((record.get("host") or {}).get("ip") or "").strip()
+            if not host or host in seen or (wanted and host != wanted):
+                return
+            seen.add(host)
+            records.append(record)
+
+        for item in self.pool.catalog():
+            if item.get("user") != user:
+                continue
+            host = str(item.get("host") or "").strip()
+            if not host:
+                continue
+            record = configured.get(host)
+            if record is None:
+                endpoint = item.get("host_endpoint") or {}
+                record = {
+                    "alias": item.get("runtime_id") or host,
+                    "host": {
+                        "ip": host,
+                        "port": int(endpoint.get("port") or 22),
+                        "user": str(endpoint.get("user") or "root"),
+                    },
+                }
+            add(record)
+        for record in configured.values():
+            add(record)
+        if wanted and wanted not in seen:
+            # Explicit hosts are probed even before they are configured; the
+            # observation failure remains visible if SSH cannot reach them.
+            add({"alias": wanted, "host": {"ip": wanted, "port": 22, "user": "root"}})
+        return records
+
+    def _observe_host_topologies(self, user, topology):
+        """Probe real fleet snapshots for the bounded gang candidate set.
+
+        Fleet probe output is the production schema; its `npus` rows are
+        adapted by `topology_from_fleet_snapshot`. Probe failures are reported
+        per host and never replaced with an assumed topology.
+        """
+        from mindie_coordinator.topology_gang_observation import (
+            topology_from_fleet_snapshot,
+        )
+
+        records = self._topology_host_records(user, topology)
+        wanted = str((topology or {}).get("host") or "").strip()
+        limit = len(records) if wanted else MAX_GANG_PROBE_HOSTS
+        observations = []
+        reports: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            host = str((record.get("host") or {}).get("ip") or "").strip()
+            if index >= limit:
+                reports.append({
+                    "host": host, "state": "skipped",
+                    "error": f"not probed: bounded observation window of {limit} hosts",
+                })
+                continue
+            try:
+                with self._topology_probe_lock:
+                    snapshot = self._probe_host_record(record)
+            except Exception as exc:
+                reports.append({
+                    "host": host, "state": "unavailable",
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                })
+                continue
+            try:
+                observation = topology_from_fleet_snapshot(snapshot, host=host)
+            except GangLeaseError as exc:
+                reports.append({
+                    "host": host, "state": "unavailable",
+                    "code": exc.code, "error": exc.message[:500],
+                })
+                continue
+            observations.append(observation)
+            reports.append({
+                "host": host,
+                "state": "observed",
+                **({"cache_hit": bool(snapshot.get("cache_hit"))}
+                   if isinstance(snapshot, dict) else {}),
+                **({"cache_age_seconds": snapshot.get("cache_age_seconds")}
+                   if isinstance(snapshot, dict) else {}),
+                "free_phy_ids": list(observation.free_phy_ids),
+                "free_dual_die_pairs": [list(pair) for pair in observation.free_dual_die_pairs],
+            })
+        return observations, reports
+
+    def _record_topology_wait(self, store, row, planned):
+        row["phase"] = "waiting"
+        row["error"] = str(planned.get("error") or "topology-gang placement is waiting")[:500]
+        details = planned.get("details") or {}
+        row["error_details"] = {
+            "code": planned.get("code"),
+            "retryable": True,
+            **({key: value for key, value in details.items() if key not in {"hosts"}}
+               if isinstance(details, dict) else {}),
+        }
+        row["topology_retry_at"] = time.time() + GANG_PLAN_RETRY_SECONDS
+        self._save_execution(store, row)
+        return self._reply(row)
+
+    def _plan_gang_roles(self, store, user, row, spec):
+        """Observe hosts, then plan concrete sibling/pair/group device bindings."""
+        topology = spec.get("topology") or {}
+        resources = spec.get("resources") or {}
+        observations, reports = self._observe_host_topologies(user, topology)
+        plan = {
+            "source": "fleet_probe",
+            "observed_at": time.time(),
+            "requested": {"topology": dict(topology), "resources": dict(resources)},
+            "hosts": reports,
+            "lease": None,
+        }
+        row["topology_plan"] = plan
+        if not observations:
+            errors = [item["error"] for item in reports if item.get("error")]
+            detail = ("; ".join(errors[:3]) if errors else "no candidate host")
+            return {
+                "status": "waiting",
+                "code": "host_observation_unavailable",
+                "error": f"topology-gang placement has no usable host observation: {detail}"[:500],
+            }
+        try:
+            lease, roles = plan_gang_placement(
+                topology,
+                resources,
+                spec["command"],
+                host_topologies=observations,
+                require_observed=True,
+            )
+        except GangLeaseError as exc:
+            if exc.code in GANG_RETRYABLE_CODES:
+                return {
+                    "status": "waiting",
+                    "code": exc.code,
+                    "error": f"topology-gang placement refused: {exc.message}"[:500],
+                    "details": dict(exc.details),
+                }
+            raise
+        if lease is None or not roles or any(
+            not role.get("devices") or not role.get("host") for role in roles
+        ):
+            raise GangLeaseError(
+                "host_observation_required",
+                "topology-gang placement did not produce concrete host/device bindings",
+            )
+        plan.update({
+            "spec": lease.spec.to_dict(),
+            "lease": lease.to_dict(),
+            "roles": [
+                {
+                    "name": role["name"],
+                    "host": role["host"],
+                    "devices": list(role["devices"]),
+                    **({"service_port": role["service_port"]}
+                       if role.get("service_port") is not None else {}),
+                }
+                for role in roles
+            ],
+        })
+        return {"status": "ready", "roles": roles, "lease": lease}
+
+    @staticmethod
+    def _gang_device_mismatches(roles, jobs):
+        """Compare host-granted devices with the observed plan, never count-only."""
+        mismatches = []
+        for role, job in zip(roles, jobs):
+            planned = sorted(int(device) for device in (role.get("devices") or []))
+            if not planned:
+                continue
+            raw = (job.get("environment") or {}).get("ASCEND_RT_VISIBLE_DEVICES")
+            if not raw:
+                # The host has not granted devices yet. A running command with
+                # no visible-device binding is broken; a queued/granted job is
+                # simply still waiting for its exact requested set.
+                if job.get("state") == "running":
+                    mismatches.append({
+                        "role": role.get("name"), "planned": planned, "granted": None,
+                    })
+                continue
+            try:
+                granted = sorted(
+                    int(part) for part in str(raw).split(",") if part.strip()
+                )
+            except ValueError:
+                granted = []
+            if granted != planned:
+                mismatches.append({
+                    "role": role.get("name"), "planned": planned, "granted": granted,
+                })
+        return mismatches
+
+    def _gang_grant_problem(self, row, jobs):
+        binding_mismatches = [
+            {
+                "role": role["name"],
+                "planned": role.get("host"),
+                "bound": ((role.get("binding") or {}).get("endpoint") or {}).get("host"),
+            }
+            for role in row["roles"]
+            if role.get("host")
+            and ((role.get("binding") or {}).get("endpoint") or {}).get("host") != role["host"]
+        ]
+        device_mismatches = self._gang_device_mismatches(row["roles"], jobs)
+        if not binding_mismatches and not device_mismatches:
+            return None
+        return {
+            "code": "granted_devices_mismatch",
+            "binding_mismatches": binding_mismatches,
+            "device_mismatches": device_mismatches,
+        }
 
     def _place_or_prepare(self, store, user, row, roles, environment) -> dict[str, Any]:
         if row.get("preparation_jobs"):
@@ -1271,7 +1587,13 @@ class CoordinatorService(TaskMessages):
         except OSError as log_exc:
             get_recorder("mindie-coordinator").event("WARNING", "diagnostics.persistence_failed", error_type=type(log_exc).__name__)
         row["error"] = f"{type(exc).__name__}: {exc}"[:500]
-        row["error_details"] = error_details(exc)
+        details = error_details(exc)
+        if isinstance(exc, GangLeaseError):
+            details.setdefault("code", exc.code)
+            for key, value in exc.details.items():
+                if key not in details:
+                    details[key] = value
+        row["error_details"] = details
         row["phase"] = "failed" if permanent else "uncertain"
         self._save_execution(store, row)
         return self._reply(row)
@@ -1349,6 +1671,8 @@ class CoordinatorService(TaskMessages):
         if row.get("error_details"):
             payload["error_details"] = row["error_details"]
             payload["error_ref"] = row.get("error_ref")
+        if row.get("topology_plan"):
+            payload["topology"] = row["topology_plan"]
         if row.get("placement") and state == "waiting_for_runtime":
             payload.update({k: row["placement"].get(k) for k in ("reason", "provisioning_started") if k in (row["placement"] or {})})
         roles = row.get("roles") or []

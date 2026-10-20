@@ -21,11 +21,14 @@ from mindie_coordinator.host.mindie_npu_coordination import (
     JOB_TOKEN_ENV,
     NpuCoordinator,
     _confirmed_free_probe,
+    _parse_npu_smi_device_table,
     parse_npu_smi_hbm,
     parse_npu_smi_info,
     parse_port_range,
     process_guard_busy,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class FakeClock:
@@ -623,6 +626,62 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(parsed['status'], 'ok')
         self.assertEqual(parsed['busy']['1'][0]['pid'], 4321)
         self.assertEqual(parsed['free'], [0])
+
+    def test_a5_idle_golden_capture_parses_all_eight_devices(self) -> None:
+        output = (FIXTURES / "a5-13.txt").read_text(encoding="utf-8")
+        parsed = parse_npu_smi_info(output)
+        self.assertEqual(parsed["status"], "ok")
+        self.assertEqual(parsed["devices"], list(range(8)))
+        self.assertEqual(parsed["free"], list(range(8)))
+        self.assertEqual(parsed["free_devices"], list(range(8)))
+        self.assertEqual(parsed["busy"], {})
+        self.assertEqual(parsed["busy_devices"], [])
+        self.assertEqual(parsed["active_pids"], [])
+        # A5's static ~4.7 GiB HBM reservation is not workload occupancy.
+        self.assertEqual(parse_npu_smi_hbm(output), {
+            device: {"used_mb": 0, "total_mb": 98304} for device in range(8)
+        })
+        dev_ids, _hbm, chip_devices, layout_error = _parse_npu_smi_device_table(output)
+        self.assertEqual(dev_ids, set(range(8)))
+        self.assertEqual(chip_devices, {(device, 0): device for device in range(8)})
+        self.assertIsNone(layout_error)
+        # A header without its metric row must not report the card free.
+        truncated = output[:output.index("|        |                  | NA")]
+        self.assertEqual(parse_npu_smi_info(truncated)["status"], "failed")
+
+    def test_a5_busy_golden_capture_attributes_chipless_process(self) -> None:
+        output = (FIXTURES / "a5-23.txt").read_text(encoding="utf-8")
+        parsed = parse_npu_smi_info(output)
+        self.assertEqual(parsed["status"], "ok")
+        self.assertEqual(parsed["devices"], list(range(8)))
+        self.assertEqual(parsed["busy_devices"], [0])
+        self.assertEqual(parsed["free"], list(range(1, 8)))
+        self.assertEqual(parsed["free_devices"], list(range(1, 8)))
+        self.assertEqual(sorted(parsed["busy"]), ["0"])
+        reason = parsed["busy"]["0"][0]
+        self.assertEqual(reason["pid"], 3252331)
+        self.assertEqual(reason["name"], "udma_d2h_demo")
+        self.assertEqual(reason["memory_mb"], 341)
+        self.assertIn(3252331, parsed["active_pids"])
+
+    def test_a2_a3_golden_capture_keeps_existing_device_mapping(self) -> None:
+        a2 = (FIXTURES / "a2-173-125-1-2.txt").read_text(encoding="utf-8")
+        a3 = (FIXTURES / "a3-192-168-13-165-idle.txt").read_text(encoding="utf-8")
+        a2_ids, a2_hbm, a2_chips, a2_error = _parse_npu_smi_device_table(a2)
+        self.assertEqual(a2_ids, set(range(8)))
+        self.assertEqual(a2_chips, {(device, 0): device for device in range(8)})
+        self.assertEqual(a2_hbm[0]["total_mb"], 32768)
+        self.assertIsNone(a2_error)
+        a3_ids, a3_hbm, a3_chips, a3_error = _parse_npu_smi_device_table(a3)
+        self.assertEqual(a3_ids, set(range(16)))
+        self.assertEqual(a3_chips, {
+            (npu, chip): npu * 2 + chip
+            for npu in range(8)
+            for chip in range(2)
+        })
+        self.assertEqual(a3_hbm[0]["total_mb"], 65536)
+        self.assertIsNone(a3_error)
+        self.assertEqual(parse_npu_smi_info(a3)["free"], list(range(16)))
 
 
 class ContainerPortOwnershipTests(unittest.TestCase):
