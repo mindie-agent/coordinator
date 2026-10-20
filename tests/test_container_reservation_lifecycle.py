@@ -183,21 +183,33 @@ def test_public_container_remove_partial_is_non_success(monkeypatch, capsys):
 
 def _run_remove_script(tmp_path, docker_body):
     import json
-    import os
+    from pathlib import Path
+    import shlex
+    import shutil
     import subprocess
+    import sys
     from mindie_coordinator.provision import host_ops
     bindir = tmp_path / "bin"
     bindir.mkdir()
     docker = bindir / "docker"
-    docker.write_text("#!/bin/sh\n" + docker_body)
+    docker.write_text("#!/bin/sh\n" + docker_body, encoding="utf-8", newline="\n")
     docker.chmod(0o755)
-    env = {**os.environ, "PATH": str(bindir) + ":" + os.environ.get("PATH", "")}
-    completed = subprocess.run(
-        ["bash", "-c", host_ops.render_remove_container_host_script(), "remove", "mindie-alice"],
-        capture_output=True, text=True, env=env, timeout=20,
+    python = bindir / "python3"
+    python.write_text(
+        "#!/bin/sh\nexec " + shlex.quote(Path(sys.executable).as_posix()) + ' "$@"\n',
+        encoding="utf-8", newline="\n",
     )
-    sentinel = next(line for line in completed.stdout.splitlines()
-                    if line.startswith(host_ops.SENTINEL))
+    python.chmod(0o755)
+    bash = shutil.which("bash")
+    assert bash is not None, "Bash is required for the local Linux-peer fixture"
+    completed = subprocess.run(
+        [bash, "-c", 'export PATH="$PWD/bin:$PATH"\n'
+         + host_ops.render_remove_container_host_script(), "remove", "mindie-alice"],
+        capture_output=True, text=True, cwd=tmp_path, timeout=20,
+    )
+    sentinel = next((line for line in completed.stdout.splitlines()
+                     if line.startswith(host_ops.SENTINEL)), None)
+    assert sentinel is not None, (completed.returncode, completed.stdout, completed.stderr)
     return completed.returncode, json.loads(sentinel[len(host_ops.SENTINEL):])
 
 
