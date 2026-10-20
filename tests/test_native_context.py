@@ -190,6 +190,35 @@ def test_kimi_nested_agent_hooks_keep_exact_parent(native_env, tmp_path):
     assert grandchild["attachment"]["parent_id"] == child["attachment"]["id"]
 
 
+def test_dsh_attach_resume_preserves_native_identity_and_distinguishes_two_sessions(native_env, tmp_path):
+    from mindie_coordinator.agent_session import load_context
+    from mindie_coordinator.task_client import TaskClient
+
+    store = AgentSessions(native_env)
+    first_id = "session-40ec6883-90d4-43d7-8e19-9a9fe3dc188c"
+    second_id = "session-fda30fb5-ab48-4c56-944a-018bf1e92bba"
+    first = store.attach("dsh", first_id, str(tmp_path / "first"))
+    second = store.attach("dsh", second_id, str(tmp_path / "second"))
+    assert first["attachment"]["client"] == "dsh"
+    assert first["attachment"]["native_session_id"] == first_id
+    assert second["attachment"]["native_session_id"] == second_id
+    assert first["session"]["id"] != second["session"]["id"]
+    assert first["attachment"]["id"] != second["attachment"]["id"]
+
+    context = TaskClient(first["context_file"], service=Mock()).context
+    assert context["attachment"]["native_session_id"] == first_id
+    assert context["session"]["id"] == first["session"]["id"]
+    assert load_context(first["context_file"])["attachment"]["id"] == first["attachment"]["id"]
+
+    resumed = store.attach("dsh", first_id, str(tmp_path / "first"))
+    assert resumed["context_file"] == first["context_file"]
+    assert resumed["attachment"]["id"] == first["attachment"]["id"]
+    assert resumed["session"]["id"] == first["session"]["id"]
+    assert resumed["attachment"]["native_session_id"] == first_id
+    assert resumed["attachment"]["cwd"] == str(tmp_path / "first")
+    assert len(store.sessions()) == 2
+
+
 def test_native_status_preserves_a_finished_task(native_env):
     context = load_context()
     store = AgentSessions(native_env)
