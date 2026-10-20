@@ -17,6 +17,8 @@ and peer coordination messages under `/tmp/mindie-npu-coordinator/v1`.
   `completion_confirmed=True` (when `retain_until_release=True`).
 - Confirmed owned completion releases the lease even if unrelated work is busy;
   the next exclusive admission still requires idle devices.
+- Container SSH release removes only the exact owner/container reservation; an
+  absent row is idempotent and task NPU/service leases are never touched.
 
 [Timeouts & Locks]
 - SQLite connection uses `WAL`, `synchronous=FULL`, `busy_timeout=5000`, and
@@ -1528,6 +1530,48 @@ class NpuCoordinator:
                 "coordination_epoch": self._coordination_epoch(connection),
             }
 
+    def release_container_ssh(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Release only this container owner's persistent SSH reservation."""
+        user = require_safe_id(request.get("user"), label="user")
+        container_name = require_safe_id(request.get("container_name"), label="container name")
+        expected = user_container_name(user)
+        if container_name != expected:
+            raise CoordinationError(f"container name must be {expected}")
+        port = int(request.get("port") or 0)
+        if not 0 <= port < 65536:
+            raise CoordinationError(f"invalid TCP port: {port}")
+        task_id = container_ssh_task_id(user)
+        now = self.clock()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM ports WHERE task_id=? AND kind='container_ssh'",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                self._event(connection, "container-ssh-release-absent", task_id=task_id,
+                            data={"user": user, "container_name": container_name, "port": port}, now=now)
+                return {"status": "released", "released": False, "reason": "absent",
+                        "user": user, "container_name": container_name, "port": 0, "task_id": task_id}
+            actual_port = int(row["port"])
+            if row["owner"] != user:
+                raise CoordinationError(
+                    f"container SSH reservation for {user} is owned by another principal",
+                    error_code="container_ssh_port_mismatch", port=actual_port,
+                )
+            if port and port != actual_port:
+                raise CoordinationError(
+                    f"user {user} has SSH port {actual_port} reserved, not {port}",
+                    error_code="container_ssh_port_mismatch", port=actual_port,
+                )
+            connection.execute(
+                "DELETE FROM ports WHERE port=? AND kind='container_ssh' AND task_id=? AND owner=?",
+                (actual_port, task_id, user),
+            )
+            self._event(connection, "container-ssh-released", task_id=task_id,
+                        data={"user": user, "container_name": container_name, "port": actual_port}, now=now)
+            return {"status": "released", "released": True, "user": user,
+                    "container_name": container_name, "port": actual_port, "task_id": task_id}
+
     def acquire(
         self,
         task_id: str,
@@ -2246,4 +2290,6 @@ def _handle_request(
         return coordinator.reserve_container_ssh(
             request, listening=listening_ports() if int(request["port"]) == 0 else None,
         )
+    if action == "container-ssh-release":
+        return coordinator.release_container_ssh(request)
     raise CoordinationError(f"unsupported action: {action!r}")

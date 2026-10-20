@@ -11,6 +11,8 @@ smoke readiness.
   or concrete image reference); rejects `auto` or bare `:latest`.
 - Records ready container endpoints in `MachineDirectory` only after metadata
   smoke verification succeeds.
+- Container SSH ports come from the supplied HostQueue/authority reservation,
+  never a local fallback or parallel port allocator.
 
 [Timeouts & Locks]
 - Delegates bounded timeouts to `host_ops` (`60s` probe, `1800s` bootstrap,
@@ -107,6 +109,19 @@ def provision_user_container(
             "or a full image reference"
         )
     host_target = host_ops.SshTarget(host=host, user=host_user, port=host_port)
+    if reserve_port is None:
+        from mindie_coordinator.host_queue import HostQueue
+
+        authority = HostQueue()
+        host_endpoint = {"host": host, "port": host_port, "user": host_user}
+
+        def reserve_port(*, user, container_name, port):
+            return authority.request(host_endpoint, {
+                "action": "container-ssh-reserve",
+                "user": user,
+                "container_name": container_name,
+                "port": port,
+            })
     if password_env:
         args = _namespace(
             host=host, user=host_user, host_port=host_port, public_key_file=None,

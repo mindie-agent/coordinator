@@ -33,6 +33,10 @@ def setup(monkeypatch, *, match=False, failure=None):
     monkeypatch.setattr(provision.host_ops, 'run_remote_script', calls)
     monkeypatch.setattr(provision.host_ops, 'find_public_key', lambda _: 'fixture-key')
     monkeypatch.setattr(provision.host_ops, 'load_public_key', lambda _: 'ssh-ed25519 SECRET')
+    class AuthorityQueue:
+        def request(self, target, payload):
+            return {'status': 'reserved', 'port': 2201, 'reused': False}
+    monkeypatch.setattr('mindie_coordinator.host_queue.HostQueue', lambda: AuthorityQueue())
     return observation, calls
 
 
@@ -45,9 +49,15 @@ def test_progress_retains_initial_observation_and_actual_fallback_phases(monkeyp
     assert result['state'] == 'ready'
     assert calls.call_count == (0 if match else 3) and observe.call_count == 1
     completed = [event for event in events if event['status'] == 'complete']
-    phases = ['existing-container'] + ([] if match else ['host-probe', 'container-bootstrap', 'metadata-readiness'])
+    phases = ['existing-container'] + (['ssh-port-reservation'] if match else ['host-probe', 'ssh-port-reservation', 'container-bootstrap', 'metadata-readiness'])
     assert [event['phase'] for event in completed] == phases
-    assert completed[-1]['phase_seconds'] == dict(zip(phases, [10.0, 2.0, 3.0, 4.0]))
+    timings = completed[-1]['phase_seconds']
+    assert timings['existing-container'] == 10.0
+    assert timings['ssh-port-reservation'] >= 0
+    if not match:
+        assert timings['host-probe'] == 2.0
+        assert timings['container-bootstrap'] == 3.0
+        assert timings['metadata-readiness'] == 4.0
     assert completed[-1]['existing_observation'] == {'status': 'match' if match else 'unknown',
         'reason': 'observation timed out', 'elapsed_seconds': 10.0}
     assert 'SECRET' not in json.dumps(events) and 'PRIVATE FULL PAYLOAD' not in json.dumps(events)

@@ -2637,34 +2637,52 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "__SENTINEL__{\"success\": false, \"error\": \"docker not found on host\"}"
   exit 10
 fi
-if docker inspect "$container" >/dev/null 2>&1; then
-  state="$(docker inspect -f '{{.State.Status}}' "$container")"
-  docker rm -f "$container" >/dev/null
-  python3 - <<'PY' "$container" "$state"
+
+emit_success() {
+  python3 - "$@" <<'PY'
 import json
 import sys
 print("__SENTINEL__" + json.dumps({
     "success": True,
     "container": sys.argv[1],
-    "removed": True,
-    "previous_state": sys.argv[2],
+    "removed": sys.argv[2] == "true",
+    "previous_state": None if sys.argv[3] == "" else sys.argv[3],
 }, ensure_ascii=False))
 PY
+}
+
+emit_failure() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+print("__SENTINEL__" + json.dumps({
+    "success": False,
+    "error": sys.argv[2],
+    "detail": sys.argv[3] if len(sys.argv) > 3 else "",
+}, ensure_ascii=False))
+PY
+}
+
+if inspect_output="$(docker inspect "$container" 2>&1)"; then
+  state="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null)" || state=""
+  if ! docker rm -f "$container" >/dev/null 2>&1; then
+    emit_failure "$container" "docker removal failed" ""
+    exit 13
+  fi
+  emit_success "$container" true "$state"
 else
-  python3 - <<'PY' "$container"
-import json
-import sys
-print("__SENTINEL__" + json.dumps({
-    "success": True,
-    "container": sys.argv[1],
-    "removed": False,
-    "previous_state": None,
-}, ensure_ascii=False))
-PY
+  case "$inspect_output" in
+    *"No such object"*|*"No such container"*)
+      emit_success "$container" false ""
+      ;;
+    *)
+      emit_failure "$container" "docker inspect failed" "$inspect_output"
+      exit 12
+      ;;
+  esac
 fi
 """
     return template.replace("__SENTINEL__", SENTINEL)
-
 
 def host_target(args: argparse.Namespace) -> SshTarget:
     return SshTarget(host=args.host, user=args.user, port=args.host_port)
@@ -2810,7 +2828,8 @@ def remove_known_host_entry(
     }
 
 
-def cmd_remove_container(args: argparse.Namespace) -> int:
+def remove_container_result(args: argparse.Namespace) -> dict[str, Any]:
+    """Remove the named container and return the confirmed host payload."""
     target = host_target(args)
     result = run_remote_script(
         target,
@@ -2824,11 +2843,31 @@ def cmd_remove_container(args: argparse.Namespace) -> int:
         "user": target.user,
         "host_port": target.port,
     }
-    if args.clean_local_known_hosts and args.container_ssh_port:
-        payload["local_known_hosts_cleanup"] = remove_known_host_entry(
-            args.host,
-            args.container_ssh_port,
-            pathlib.Path(args.known_hosts).expanduser().resolve(),
-        )
+    if (payload.get("removed") is True and args.clean_local_known_hosts
+            and args.container_ssh_port):
+        try:
+            payload["local_known_hosts_cleanup"] = remove_known_host_entry(
+                args.host,
+                args.container_ssh_port,
+                pathlib.Path(args.known_hosts).expanduser().resolve(),
+            )
+        except Exception as exc:
+            # Remote removal is already confirmed; a local key cleanup failure
+            # is represented beside it, never converted into remote failure.
+            payload["local_known_hosts_cleanup"] = {
+                "success": False,
+                "error": f"{type(exc).__name__}: {exc}"[:800],
+            }
+    elif args.clean_local_known_hosts and args.container_ssh_port:
+        payload["local_known_hosts_cleanup"] = {
+            "success": False,
+            "skipped": True,
+            "reason": "container was already absent; no host key belongs to this removal",
+        }
+    return payload
+
+
+def cmd_remove_container(args: argparse.Namespace) -> int:
+    payload = remove_container_result(args)
     print_json(payload)
     return 0

@@ -1,4 +1,16 @@
-"""Console entry for the local MindIE coordinator."""
+"""Console entry for the local MindIE coordinator.
+
+[Role]
+Dispatches daemon, task-server, provisioning, runtime-registration, and
+environment-management commands through the existing public modules.
+[Invariants]
+- Provisioning must reserve its SSH port through the same HostQueue authority
+  used by service and environment-manager provisioning.
+[Timeouts & Locks]
+- Delegates all bounded waits and remote locks to the invoked module.
+[Side-Effect Policy]
+- CLI commands only perform the side effects explicitly requested by the caller.
+"""
 
 from __future__ import annotations
 
@@ -88,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if payload["result"].get("outcome") == "success" else 1
     if args.command == "provision":
         from mindie_coordinator.provision import provision_user_container
+
         row = provision_user_container(
             host=args.host, image=args.image, user=args.user,
             host_user=args.host_user, host_port=args.host_port,
