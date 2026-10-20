@@ -43,7 +43,7 @@ def test_ascend_env_bootstrap_sources_unbound_var_script_safely_under_set_eu(tmp
     )
     bootstrap = ASCEND_ENV_BOOTSTRAP_SH.replace(
         "/usr/local/Ascend/ascend-toolkit/set_env.sh",
-        str(fake_cann),
+        shlex.quote(fake_cann.as_posix()),
     )
     script = (
         "set -eu\n"
@@ -108,10 +108,10 @@ def test_slot_guards_block_unleased_device_override_and_preserve_worktree_under_
     (task_root / "vllm-ascend" / "vllm_ascend" / "__init__.py").write_text("ORIGIN = 'active-worktree'\n", encoding="utf-8")
 
     binding = {
-        "python": sys.executable,
-        "endpoint": {"cwd": str(task_root)},
+        "python": Path(sys.executable).as_posix(),
+        "endpoint": {"cwd": task_root.as_posix()},
         "source_names": ["vllm-ascend"],
-        "launch_preamble": f"export PYTHONPATH={shlex.quote(str(base_pkg_root))}",
+        "launch_preamble": f"export PYTHONPATH={shlex.quote(base_pkg_root.as_posix())}",
     }
     preamble = task_preamble(binding, slot_id=slot_id)
     try:
@@ -130,7 +130,7 @@ def test_slot_guards_block_unleased_device_override_and_preserve_worktree_under_
         payload = json.loads(res.stdout.strip().splitlines()[-1])
         assert payload["devices"] == "0,1"
         assert payload["origin"] == "active-worktree"
-        assert str(task_root / "vllm-ascend") in payload["file"]
+        assert Path(payload["file"]).resolve() == (task_root / "vllm-ascend" / "vllm_ascend" / "__init__.py").resolve()
         assert "[mindie-slot-guard] restored ASCEND_RT_VISIBLE_DEVICES='0,1'" in res.stderr
 
         # 2. Valid single-rank subset or relative index on lease 10,11 is mapped/preserved,

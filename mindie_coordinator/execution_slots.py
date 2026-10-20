@@ -65,6 +65,7 @@ unset _mindie_saved_opts"""
 SLOT_SITECUSTOMIZE_PY = r"""import importlib.machinery
 import importlib.util
 import os
+import re
 import sys
 
 def _enforce_mindie_slot_guards():
@@ -101,7 +102,11 @@ def _enforce_mindie_slot_guards():
 
     sources_raw = os.environ.get("MINDIE_WORKTREE_SOURCES", "")
     if sources_raw:
-        worktree_dirs = [ os.path.abspath(p) for p in sources_raw.split(":") if p.strip() ]
+        if os.name == "nt":
+            raw_parts = [ p for chunk in sources_raw.split(";") for p in re.split(r":(?=[A-Za-z]:[\\/])", chunk) ]
+        else:
+            raw_parts = sources_raw.split(":")
+        worktree_dirs = [ os.path.abspath(p) for p in raw_parts if p.strip() ]
         repo_basenames = {
             os.path.basename(p): p
             for p in worktree_dirs
@@ -133,11 +138,22 @@ _enforce_mindie_slot_guards()
 
 SLOT_PYTHON_WRAPPER_SH = r"""#!/bin/sh
 _slot_bin="$(cd "$(dirname "$0")" && pwd)"
-_slot_site="$(dirname "$_slot_bin")/site"
-if [ -n "${MINDIE_WORKTREE_SOURCES:-}" ]; then
-  export PYTHONPATH="$_slot_site:$MINDIE_WORKTREE_SOURCES${PYTHONPATH:+:$PYTHONPATH}"
+_slot_site="$(cd "$(dirname "$_slot_bin")/site" && (pwd -W 2>/dev/null || pwd))"
+_py_sep=":"
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    _py_sep=";"
+    PYTHONPATH="$(printf '%s' "${PYTHONPATH:-}" | sed -E 's/:([A-Za-z]:[\\/])/;\1/g')"
+    _wt_sources="$(printf '%s' "${MINDIE_WORKTREE_SOURCES:-}" | sed -E 's/:([A-Za-z]:[\\/])/;\1/g')"
+    ;;
+  *)
+    _wt_sources="${MINDIE_WORKTREE_SOURCES:-}"
+    ;;
+esac
+if [ -n "$_wt_sources" ]; then
+  export PYTHONPATH="${_slot_site}${_py_sep}${_wt_sources}${PYTHONPATH:+${_py_sep}${PYTHONPATH}}"
 else
-  export PYTHONPATH="$_slot_site${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONPATH="${_slot_site}${PYTHONPATH:+${_py_sep}${PYTHONPATH}}"
 fi
 _real_py=""
 if [ -n "${MINDIE_PYTHON:-}" ] && [ -x "$MINDIE_PYTHON" ] && [ "$(dirname "$MINDIE_PYTHON")" != "$_slot_bin" ]; then
