@@ -54,12 +54,15 @@ def _remember(record, observation, save):
 def stop_preparation_process(record, save, *, force=False, drain_seconds=10, lease_request=None, cleanup=None):
     """Stop only the persisted owned job; uncertainty never means completion."""
     try:
-        observation = control(record["endpoint"], record["job_id"], "stop", force=force)
-        _remember(record, observation, save)
         deadline = time.monotonic() + drain_seconds
+        observation = control(record["endpoint"], record["job_id"], "stop", force=force,
+                              timeout_ms=min(30000, max(1000, int(drain_seconds * 1000))))
+        _remember(record, observation, save)
         while not observation.get("quiet") and not observation.get("unknown") and time.monotonic() < deadline:
             time.sleep(0.1)
-            observation = control(record["endpoint"], record["job_id"], "status")
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            observation = control(record["endpoint"], record["job_id"], "status",
+                                  timeout_ms=min(5000, remaining_ms))
             _remember(record, observation, save)
         from mindie_coordinator.compile_lease import finish_compile_lease
         return bool(observation.get("quiet")) and finish_compile_lease(record, save, request=lease_request, cleanup=cleanup)

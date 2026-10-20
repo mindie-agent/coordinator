@@ -162,6 +162,10 @@ def test_provision_uses_configured_user_with_shared_root_transport(tmp_path, mon
                         Mock(side_effect=[{"free_port": 2222}, {}, {}]))
     monkeypatch.setattr(provision.host_ops, "find_public_key", lambda _: tmp_path / "key.pub")
     monkeypatch.setattr(provision.host_ops, "load_public_key", lambda _: "ssh-ed25519 test")
+    # Keep release selection and image payload construction real, without public HTTP.
+    monkeypatch.setattr(provision.host_ops, "fetch_release_catalog", lambda **_: [
+        {"tag_name": "v0.13.0", "draft": False, "prerelease": False},
+    ])
 
     reserved = []
 
@@ -186,6 +190,10 @@ def test_provision_uses_configured_user_with_shared_root_transport(tmp_path, mon
     assert boot.kwargs["args"][0] == "mindie-alice"
     assert boot.kwargs["args"][5] == "alice"
     assert boot.kwargs["args"][1] == '2222'
+    image_request = json.loads(boot.kwargs["args"][2])
+    assert image_request["policy"] == "latest-official-release"
+    assert image_request["resolved_tag"] == "v0.13.0"
+    assert image_request == json.loads(calls.call_args_list[0].kwargs["args"][0])
     assert [call.kwargs.get('reuse_connection', False) for call in calls.call_args_list] == [True, False, True]
     assert 'if not False:' in calls.call_args_list[2].args[1]
     assert calls.call_args_list[2].args[0].user == "root"

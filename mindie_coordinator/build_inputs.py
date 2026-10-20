@@ -44,10 +44,10 @@ BUILD_INPUT_ENV_KEYS = (
 
 def submodule_content(repo: Path, commit: str) -> str:
     """Hash nested source content, not task-specific synthetic commit metadata."""
-    top = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', '--show-toplevel'], stdin=subprocess.DEVNULL, text=True, encoding="utf-8").strip()
+    top = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', '--show-toplevel'], stdin=subprocess.DEVNULL, text=True, encoding="utf-8", timeout=30).strip()
     if Path(top).resolve() != repo.resolve():
         raise ValueError(f'native submodule is not populated: {repo}')
-    tree = subprocess.check_output(['git', '-C', str(repo), 'ls-tree', '-r', '-z', commit], stdin=subprocess.DEVNULL, text=True, encoding="utf-8")
+    tree = subprocess.check_output(['git', '-C', str(repo), 'ls-tree', '-r', '-z', commit], stdin=subprocess.DEVNULL, text=True, encoding="utf-8", timeout=60)
     tokens = []
     for entry in filter(None, tree.split('\0')):
         metadata, path = entry.split('\t', 1)
@@ -60,7 +60,7 @@ def submodule_content(repo: Path, commit: str) -> str:
 
 def build_input_fingerprints(repo: Path, commit: str, patterns: tuple[str, ...], *, build_env=None) -> dict[str, str]:
     native, dependencies, imports = [], [], []
-    tree = subprocess.check_output(['git', '-C', str(repo), 'ls-tree', '-r', '-z', commit], stdin=subprocess.DEVNULL, text=True, encoding="utf-8")
+    tree = subprocess.check_output(['git', '-C', str(repo), 'ls-tree', '-r', '-z', commit], stdin=subprocess.DEVNULL, text=True, encoding="utf-8", timeout=60)
     for entry in filter(None, tree.split('\0')):
         metadata, path = entry.split('\t', 1)
         mode, kind, oid = metadata.split()
