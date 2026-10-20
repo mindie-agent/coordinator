@@ -85,7 +85,9 @@ def test_source_deployment_proof_reads_actual_git_heads_and_files(tmp_path):
         subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
     environment = {**os.environ, "MINDIE_PYTHON": sys.executable,
                    "MINDIE_RUN_ID": "debug-source-deploy"}
-    result = subprocess.run(["bash", "-c", driver._source_command(None)], cwd=root, env=environment,
+    bash = (str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe")
+            if os.name == "nt" else "bash")
+    result = subprocess.run([bash, "-c", driver._source_command(None)], cwd=root, env=environment,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     line = next(line for line in result.stdout.splitlines()
