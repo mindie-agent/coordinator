@@ -52,17 +52,18 @@ def task_preamble(binding, *, slot_id=None):
     """Use the bound interpreter and sources for both preflight and launch."""
     command = binding.get("launch_preamble", "")
     slot_id = slot_id or binding.get("slot_id")
-    if slot_id:
-        command += "\n" + slot_preamble(slot_id)
     if binding.get("python"):
         command += "\nexport MINDIE_PYTHON=" + shlex.quote(binding["python"])
     # Repository directories under the task root otherwise shadow editable packages.
     source_names = binding.get("source_names", ())
-    if not source_names:
-        return command
-    root = PurePosixPath(binding["endpoint"]["cwd"])
-    sources = ":".join(str(root / name) for name in (".mindie-runtime/metadata", *source_names))
-    return command + "\nexport PYTHONPATH=" + shlex.quote(sources) + '"${PYTHONPATH:+:$PYTHONPATH}"'
+    if source_names:
+        root = PurePosixPath(binding["endpoint"]["cwd"])
+        sources = ":".join(str(root / name) for name in (".mindie-runtime/metadata", *source_names))
+        command += "\nexport MINDIE_WORKTREE_SOURCES=" + shlex.quote(sources)
+        command += "\nexport PYTHONPATH=" + shlex.quote(sources) + '"${PYTHONPATH:+:$PYTHONPATH}"'
+    if slot_id:
+        command += "\n" + slot_preamble(slot_id)
+    return command
 
 
 class ManagedExecution:
@@ -75,7 +76,7 @@ class ManagedExecution:
             raise ValueError("a bounded nonempty shell command is required")
         if not isinstance(env, dict) or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
                                            or key.startswith("REMOTE_DEV_JOB_")
-                                           or key in {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", ENV_NAME}
+                                           or key in {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_LEASED_DEVICES", "MINDIE_WORKTREE_SOURCES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", ENV_NAME}
                                            or key in SLOT_ENVIRONMENT
                                            or not isinstance(value, str) for key, value in env.items()):
             raise ValueError("invalid environment or attempted override of managed device or service-port ownership")
@@ -200,7 +201,9 @@ class ManagedExecution:
                     job["preflight_error"] = run["preflight_error"]
                 job["lease_state"] = run["state"]
                 if run.get("environment"):
-                    job["environment"] = {**run["environment"], **slot_environment(job.get("slot_id") or key),
+                    job["environment"] = {**run["environment"],
+                                          "MINDIE_LEASED_DEVICES": run["environment"].get("ASCEND_RT_VISIBLE_DEVICES", ""),
+                                          **slot_environment(job.get("slot_id") or key),
                                           "MINDIE_RUN_ID": job.get("execution_id") or key}
                 if run.get("service_port") is not None:
                     job["service_port"] = run["service_port"]
@@ -273,6 +276,8 @@ class ManagedExecution:
                     receipt = launch_observation(binding, job["request"], job["spec"], run["environment"])
                     job["launch_observation"] = receipt
                     command = task_preamble(binding, slot_id=job.get("slot_id") or key)
+                    command += ("\nexport MINDIE_LEASED_DEVICES="
+                                + shlex.quote(run["environment"]["ASCEND_RT_VISIBLE_DEVICES"]))
                     command += ("\nexport ASCEND_RT_VISIBLE_DEVICES="
                                 + shlex.quote(run["environment"]["ASCEND_RT_VISIBLE_DEVICES"]))
                     if run["environment"].get("MINDIE_SERVICE_PORT"):

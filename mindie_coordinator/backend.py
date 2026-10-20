@@ -174,6 +174,11 @@ class RemoteBackend:
 
     def preflight(self, binding, command, env):
         from mindie_coordinator.managed_execution import ExecutionRequestError, task_preamble
+        if (env or {}).get("MINDIE_SKIP_OP_PREFLIGHT") != "1" and binding.get("source_snapshot"):
+            from mindie_coordinator.op_preflight import check_snapshot_op_contracts, format_op_violations
+            violations = check_snapshot_op_contracts(binding["source_snapshot"])
+            if violations:
+                raise ExecutionRequestError(format_op_violations(violations))
         script = "set -e\n" + "\n".join(f"export {key}={shlex.quote(value)}" for key, value in env.items())
         script += "\n" + task_preamble(binding) + "\nexport MINDIE_SERVICE_PORT=0\n" + command
         result = self.shell.run(binding["endpoint"], script, timeout_ms=120000)
@@ -856,10 +861,14 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
             preamble_lines.extend(['export MINDIE_RUNTIME_ROOT=' + shlex.quote(root), *DEFAULT_ENV_PREAMBLE, *task_python_exports(python),
                 'export PYTHONPATH=' + shlex.quote(':'.join([root + '/.mindie-runtime/metadata', root + '/vllm', root + '/vllm-ascend'])) + '"${PYTHONPATH:+:$PYTHONPATH}"'])
         else:
-            # The image's recorded launch settings can be reused without
-            # sourcing CANN/toolchain installers for an ordinary command.
+            # The image's recorded launch settings can be reused, falling back
+            # to safe Ascend set_env.sh bootstrap when no donor launch_env was captured.
+            from mindie_coordinator.execution_slots import ASCEND_ENV_BOOTSTRAP_SH
             preamble_lines.append('unset PYTHONPATH ASCEND_CUSTOM_OPP_PATH')
-            for key, value in spec.get('donor_launch_env', {}).items():
+            donor_env = spec.get('donor_launch_env') or {}
+            if not donor_env.get('ASCEND_HOME_PATH'):
+                preamble_lines.append(ASCEND_ENV_BOOTSTRAP_SH)
+            for key, value in donor_env.items():
                 preamble_lines.append('export ' + key + '=' + shlex.quote(value))
             preamble_lines.append('export PATH=' + shlex.quote(str(__import__('pathlib').PurePosixPath(python).parent)) + '"${PATH:+:$PATH}"')
         preamble = '\n'.join(preamble_lines)

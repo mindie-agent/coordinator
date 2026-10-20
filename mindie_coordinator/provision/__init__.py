@@ -207,7 +207,13 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
     record = {
         "alias": alias or host,
         "host": {"ip": host, "port": host_port, "user": host_user, "machine_type": machine_type},
-        "container": {"name": container, "ssh_port": chosen_port, "user": "root", "workdir": DEFAULT_WORKDIR},
+        "container": {
+            "name": container,
+            "ssh_port": chosen_port,
+            "user": "root",
+            "workdir": DEFAULT_WORKDIR,
+            "runtime_env_file": "/etc/profile.d/mindie-ascend-env.sh",
+        },
         "image": {"requested": image},
         "user": user,
     }

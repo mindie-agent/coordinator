@@ -522,6 +522,10 @@ def handle_container(
             container_entry["ssh_port"] = int(ssh_port)
         if args.get("python"):
             container_entry["python"] = str(args["python"]).strip()
+        if args.get("runtime_env_file") or args.get("env_file"):
+            container_entry["runtime_env_file"] = str(args.get("runtime_env_file") or args.get("env_file")).strip()
+        if args.get("runtime_env") is not None:
+            container_entry["runtime_env"] = bool(args["runtime_env"])
 
         base_rec = rec if rec is not None else {"alias": alias, "host": {"ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]}}
         updated_rec = {
@@ -802,6 +806,7 @@ def handle_lease(
         env_vars: dict[str, str] = {}
         if visible_str:
             env_vars["ASCEND_RT_VISIBLE_DEVICES"] = visible_str
+            env_vars["MINDIE_LEASED_DEVICES"] = visible_str
         if fence_token is not None:
             env_vars["MINDIE_FENCE_TOKEN"] = str(fence_token)
         if task.get("job_token"):

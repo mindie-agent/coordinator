@@ -45,7 +45,19 @@ def _host_endpoint_spec(row: Mapping[str, Any]) -> dict[str, Any] | None:
         spec["identity_file"] = str(host["identity_file"])
     if host.get("python"):
         spec["python"] = str(host["python"])
+    if host.get("runtime_env") is not None:
+        spec["runtime_env"] = bool(host["runtime_env"])
+    if host.get("runtime_env_file") or host.get("env_file"):
+        spec["runtime_env_file"] = str(host.get("runtime_env_file") or host.get("env_file"))
     return spec
+
+
+def _apply_container_runtime_env(spec: dict[str, Any], container: Mapping[str, Any]) -> None:
+    if container.get("runtime_env") is not None:
+        spec["runtime_env"] = bool(container["runtime_env"])
+    env_file = container.get("runtime_env_file") or container.get("env_file")
+    if env_file:
+        spec["runtime_env_file"] = str(env_file)
 
 
 def _primary_endpoint_spec(row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -76,6 +88,7 @@ def _primary_endpoint_spec(row: Mapping[str, Any]) -> dict[str, Any] | None:
             spec["identity_file"] = host_spec["identity_file"]
         if container.get("python"):
             spec["python"] = str(container["python"])
+        _apply_container_runtime_env(spec, container)
         return spec
 
     # Mode 2: Host SSH + `docker exec -i <container>` (remote-dev container endpoint)
@@ -93,6 +106,7 @@ def _primary_endpoint_spec(row: Mapping[str, Any]) -> dict[str, Any] | None:
         }
         if container.get("python"):
             spec["python"] = str(container["python"])
+        _apply_container_runtime_env(spec, container)
         return spec
 
     return dict(host_spec)
@@ -124,6 +138,7 @@ def _docker_exec_endpoint_spec(row: Mapping[str, Any]) -> dict[str, Any] | None:
     }
     if container.get("python"):
         spec["python"] = str(container["python"])
+    _apply_container_runtime_env(spec, container)
     return spec
 
 
@@ -256,6 +271,7 @@ def _merge_overrides(base: Mapping[str, Any], overrides: Mapping[str, Any]) -> d
         "ssh_options",
         "ssh_mux",
         "runtime_env",
+        "runtime_env_file",
         "container",
     ):
         if key in overrides and overrides[key] is not None:

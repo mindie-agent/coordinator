@@ -807,6 +807,13 @@ class CoordinatorService(TaskMessages):
         halted = self._halt_if_cancelled(store, user, row)
         if halted is not None:
             return halted
+        if not row.get("op_preflight_passed") and (spec.get("env") or {}).get("MINDIE_SKIP_OP_PREFLIGHT") != "1":
+            from mindie_coordinator.op_preflight import check_snapshot_op_contracts, format_op_violations
+            violations = check_snapshot_op_contracts(source_snapshot)
+            if violations:
+                raise ExecutionRequestError(format_op_violations(violations))
+            row["op_preflight_passed"] = True
+            self._save_execution(store, row)
         for role in row["roles"]:
             if role.get("preflight") and not role.get("preflight_passed"):
                 self._save_progress(store, row, role["name"], {"step": "preflight"})
