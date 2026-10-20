@@ -29,6 +29,7 @@ from mindie_coordinator.op_preflight import (
 )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="executes Linux container imports and launch payload locally")
 def test_ascend_env_bootstrap_sources_unbound_var_script_safely_under_set_eu(tmp_path):
     """Huawei CANN set_env.sh references unbound variables; bootstrap must succeed and preserve set -eu."""
     fake_cann = tmp_path / "set_env.sh"
@@ -95,6 +96,7 @@ def test_endpoint_bridge_propagates_runtime_env_file_for_container_endpoints(tmp
     assert "runtime_env_file" not in doc["endpoints"]["atlas-a3-host"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="executes Linux container imports and launch payload locally")
 def test_slot_guards_block_unleased_device_override_and_preserve_worktree_under_python_isolated_flag(tmp_path):
     slot_id = f"test-guard-{os.getpid()}"
     # Create two competing vllm_ascend packages: base image vs active task worktree

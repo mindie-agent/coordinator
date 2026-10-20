@@ -1553,13 +1553,17 @@ class CoordinatorService(TaskMessages):
         return reply
 
     def _stop_jobs(self, user, row, force):
+        failures = []
         def stop_role(role):
             if role.get("managed_job"):
                 try:
                     role["observation"] = self.pool.managed_control(user, role["managed_job"], "stop", force)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    failures.append({"role": role.get("name"), "error": f"{type(exc).__name__}: {exc}"[:500]})
         _map_roles(stop_role, row.get("roles") or [])
+        if failures:
+            row["stop_errors"] = failures
+        return failures
 
     def _record_assignment(self, row, jobs):
         assignment = row.get("assignment") or {"roles": []}

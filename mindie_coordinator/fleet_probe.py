@@ -18,7 +18,7 @@ large model-weight mounts.
 
 [Timeouts & Locks]
 - Remote script bounds: `npu-smi info` `10s`, `docker ps` `5s`, `df` `3s`;
-  outer `remote_bash` timeout is `20000ms` (`20s`).
+  outer `remote_bash` timeout is `30000ms` (`30s`).
 - Local snapshot cache (`probe_cache.json`) has default TTL `30.0s`.
 - `npu-top` capacity reads are bounded by the bridge (`2.0s` default).
 
@@ -299,10 +299,8 @@ def parse_npu_smi_info(
                 hbm_used_mb = int(last.group(1))
                 hbm_total_mb = int(last.group(2))
 
-        if hbm_total_mb == 0 and mem_total_mb > 0:
-            hbm_used_mb = mem_used_mb
-            hbm_total_mb = mem_total_mb
-
+        # Host memory is not device HBM; leave hbm_total_mb=0 when absent so
+        # `npu-smi info -t usages` enrichment can populate true device HBM.
         die_records.setdefault(npu_id, []).append(
             {
                 "chip_id": chip_id,
@@ -654,7 +652,7 @@ def parse_fleet_probe_output(
     }
 
 
-def _default_ssh_runner(host_spec: Mapping[str, Any], script: str, timeout_ms: int = 20000) -> str:
+def _default_ssh_runner(host_spec: Mapping[str, Any], script: str, timeout_ms: int = 30000) -> str:
     from remote_dev.core.endpoint import resolve_endpoint
     from remote_dev.core.shell_ops import remote_bash
 
@@ -792,8 +790,8 @@ def probe_machine_record(
         zero_hbm_ids = [c["npu_id"] for c in snapshot["npus"] if int(c.get("hbm_total_mb") or 0) == 0]
         if zero_hbm_ids and runner is None:
             usages_cmd = " ; ".join(
-                f"echo '===NPU_USAGE:{nid}==='; npu-smi info -t usages -i {nid} 2>/dev/null || true"
-                for nid in zero_hbm_ids[:16]
+                f"echo '===NPU_USAGE:{nid}==='; timeout 3 npu-smi info -t usages -i {nid} 2>/dev/null || true"
+                for nid in zero_hbm_ids[:8]
             )
             try:
                 usages_raw = exec_runner(host_spec, usages_cmd)
@@ -815,8 +813,8 @@ def probe_machine_record(
                 snapshot["busy_npu_ids"] = [c["npu_id"] for c in updated_npus if c.get("busy")]
                 snapshot["free_npus"] = len(snapshot["free_npu_ids"])
                 snapshot["busy_npus"] = len(snapshot["busy_npu_ids"])
-            except Exception:
-                pass
+            except Exception as exc:
+                snapshot["usage_parse_error"] = f"{type(exc).__name__}: {exc}"[:500]
         cache[alias] = snapshot
         save_probe_cache(cache, state_dir=state_dir)
         return {**snapshot, "cache_hit": False, "cache_age_seconds": 0.0}

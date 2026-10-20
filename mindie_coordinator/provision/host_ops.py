@@ -610,6 +610,7 @@ def run_local(
     check: bool = False,
     env: dict[str, str] | None = None,
     stdin_source: int | None = None,
+    timeout_seconds: float = 120.0,
 ) -> subprocess.CompletedProcess[str]:
     try:
         proc = subprocess.run(
@@ -622,6 +623,7 @@ def run_local(
             errors="replace",
             env=env,
             stdin=stdin_source,
+            timeout=timeout_seconds,
         )
     except FileNotFoundError as exc:
         raise MachineManagementError(

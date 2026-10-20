@@ -1,12 +1,13 @@
 """Populated-worktree and nested-submodule discovery for attestation.
 
-Behaviour-preserving port of the three helpers `prepare_runtime.py` used to
-import from the scaffold's remote-code-parity script
-(`ensure_populated_worktree`, `list_submodules`, `discover_repo_tree`,
-`iter_postorder`). Attestation runs inside a prepared container where only
-this repository is deployed, so it cannot import a scaffold skill script.
-The messages and traversal order are kept identical, because the attestation
-tests assert on them.
+[Role] Discovers Git worktrees and nested submodules in postorder (`git_sources.py`).
+[Invariants]
+- Runs inside a prepared container where only this repository is deployed without scaffold skill scripts.
+- Preserves traversal order and error messages required by runtime attestation.
+[Timeouts & Locks]
+- Local `git` metadata calls use an explicit `30s` subprocess timeout with `stdin=DEVNULL`.
+[Side-Effect Policy]
+- Read-only local Git inspection (`rev-parse`, `config --file .gitmodules`, `status`).
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ class RepoNode:
 
 def git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(repo), *args], check=check,
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8")
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=30)
 
 
 def is_git_worktree(path: Path) -> bool:
