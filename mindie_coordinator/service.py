@@ -67,6 +67,7 @@ from mindie_coordinator.build_inputs import BUILD_INPUT_ENV_KEYS
 from mindie_coordinator.client_paths import client_path
 from mindie_coordinator.execution_sources import source_paths, validate_source_snapshot
 from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERMINAL
+from mindie_coordinator.machine_directory import MachineDirectoryUnavailable
 from mindie_coordinator.parity import materialize_command
 from mindie_coordinator.parity_support import RemoteCommandError
 from mindie_coordinator.placement import (
@@ -1273,8 +1274,13 @@ class CoordinatorService(TaskMessages):
             return []
         try:
             return list(machines.machines())
-        except Exception:
-            return []
+        except (OSError, ValueError) as exc:
+            # Configured inventory failures are recoverable external state,
+            # not an empty fleet or a permanently invalid execution request.
+            raise MachineDirectoryUnavailable(
+                f"cannot read configured machine inventory at {machines.path()}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     def _ensure_user_container(self, user, environment, role, used_hosts, require_distinct=False, *, on_progress=None):
         recipe = environment.get("recipe") or environment.get("image")
