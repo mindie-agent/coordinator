@@ -11,6 +11,10 @@ CMake configure/build tree.
   directly without falling back or replaying.
 - Guards the generated dynamic compiler wrapper so `get_kernel_source` and
   `compile_op` prove they received the exact fixed `.cpp` SHA-256.
+- A supplied content cache is only an optimization over the already-validated
+  recipe: entries are keyed by native tree + CANN + SoC + Python ABI + flags and
+  are re-hashed before use. A cache failure never turns a compiler success into
+  a failed build, and a corrupt entry is never selected by name.
 
 [Timeouts & Locks]
 - Parameter generation subprocess (`ascendc_bin_param_build.py`) has `timeout=60`s.
@@ -25,6 +29,7 @@ from __future__ import annotations
 
 import ast
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import hashlib
 import json
 import os
@@ -40,6 +45,15 @@ import tempfile
 RECIPE_FILE = '.mindie-runtime/kernel-compile-recipe.json'
 RECIPE_TOOLS = ('ascendc_bin_param_build.py', 'ascendc_ops_config.py',
                 'ascendc_impl_build.py', 'opdesc_parser.py', 'const_var.py')
+KERNEL_CONTENT_SCHEMA = 'mindie-native-kernel-content/1'
+NATIVE_CONTENT_KEY_SCHEMA = 'mindie-native-content/1'
+KERNEL_CONTENT_MANIFEST = 'manifest.json'
+KERNEL_COMPILE_FLAG_KEYS = (
+    'CMAKE_BUILD_TYPE', 'SOC_VERSION', 'MINDIE_SOC_VERSION',
+    'COMPILE_CUSTOM_KERNELS', 'MINDIE_COMPILE_CUSTOM_KERNELS', 'MINDIE_USE_CLANG15',
+    'C_COMPILER', 'CXX_COMPILER', 'CFLAGS', 'CXXFLAGS', 'ASCEND_HOME_PATH',
+    'MINDIE_ENVIRONMENT_FINGERPRINT', 'CMAKE_ARGS', 'LDFLAGS', 'CC', 'CXX',
+    'VLLM_TARGET_DEVICE')
 
 
 class RecipeUnavailable(ValueError):
@@ -55,6 +69,147 @@ def _recipe_child(root: Path, name: str) -> Path:
 
 def _recipe_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def kernel_content_key(plan: dict, environment: dict, *, cann_version: str, soc_version: str,
+                       python_abi: str) -> str:
+    """Same native content token set used by `preparation_cache`.
+
+    `plan['native_to']` is the verified Git-native tree digest of the target
+    source. The key never contains a task id, execution root, or donor path.
+    """
+    csrc_tree_sha = str(plan.get('native_to') or plan.get('source_sha256') or '')
+    if not csrc_tree_sha:
+        raise ValueError('kernel content key requires a fixed native source tree')
+    if not all((cann_version, soc_version, python_abi)):
+        raise ValueError('kernel content key requires CANN, SoC and Python ABI')
+    flags = {key: environment[key] for key in KERNEL_COMPILE_FLAG_KEYS if key in environment}
+    tokens = [NATIVE_CONTENT_KEY_SCHEMA, csrc_tree_sha, str(cann_version), str(soc_version),
+              str(python_abi), json.dumps(flags, sort_keys=True, separators=(',', ':'))]
+    return hashlib.sha256('\x00'.join(tokens).encode()).hexdigest()
+
+
+def _kernel_cache_files(entry: Path) -> dict[str, str]:
+    files = {}
+    for name in ('bin', 'gen'):
+        base = entry / name
+        if not base.is_dir():
+            raise ValueError('kernel content entry is missing ' + name)
+        for path in sorted(base.rglob('*')):
+            if path.is_file():
+                files[path.relative_to(entry).as_posix()] = _recipe_digest(path)
+    return files
+
+
+def _kernel_cache_manifest(plan: dict, key: str, recipes: list, files: dict[str, str]) -> dict:
+    return {
+        'schema_version': KERNEL_CONTENT_SCHEMA,
+        'cache_key': key,
+        'operator': plan['operator'],
+        'unit': plan['unit'],
+        'source': plan.get('source'),
+        'source_sha256': plan.get('source_sha256'),
+        'native_from': plan.get('native_from'),
+        'native_to': plan.get('native_to'),
+        'generated_recipes': recipes,
+        'files': files,
+    }
+
+
+def _drop_kernel_content(cache: Path, key: str) -> None:
+    entry = cache / key
+    if entry.parent.resolve() != cache.resolve():
+        return
+    if entry.is_dir() and not entry.is_symlink():
+        shutil.rmtree(entry)
+    elif entry.exists() or entry.is_symlink():
+        entry.unlink()
+
+
+def restore_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str, *, read_recipe) -> bool:
+    """Map a previously verified kernel entry; False only when no entry exists."""
+    entry = cache / key
+    if not entry.is_dir():
+        return False
+    manifest = json.loads((entry / KERNEL_CONTENT_MANIFEST).read_text())
+    if (manifest.get('schema_version') != KERNEL_CONTENT_SCHEMA or manifest.get('cache_key') != key
+            or manifest.get('operator') != plan['operator'] or manifest.get('unit') != plan['unit']
+            or manifest.get('native_to') != plan.get('native_to')):
+        raise ValueError('kernel content entry does not describe this build')
+    expected = manifest.get('files')
+    if not isinstance(expected, dict) or not expected:
+        raise ValueError('kernel content entry has no file proof')
+    if _kernel_cache_files(entry) != expected:
+        raise ValueError('kernel content entry bytes changed')
+    generated = sorted((entry / 'gen').glob('*.sh'))
+    if [read_recipe(path) for path in generated] != manifest.get('generated_recipes'):
+        raise ValueError('kernel content entry recipe changed')
+    destination = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
+    if destination.exists():
+        raise ValueError('kernel content restore requires a fresh build directory')
+    destination.mkdir(parents=True)
+    for relative in expected:
+        target = _recipe_child(destination, relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = _recipe_child(entry, relative)
+        try:
+            os.link(source, target)
+        except OSError as exc:
+            fallback = {getattr(errno, name, None) for name in
+                        ('EXDEV', 'EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP', 'EMLINK', 'EINVAL')}
+            if exc.errno not in fallback:
+                raise
+            shutil.copy2(source, target)
+    if _kernel_cache_files(destination) != expected:
+        raise ValueError('kernel content restore produced different bytes')
+    return True
+
+
+def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str, recipes: list) -> dict:
+    """Atomically publish this compile's validated `bin`/`gen` output."""
+    destination = cache / key
+    binary = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
+    files = _kernel_cache_files(binary)
+    candidate = _kernel_cache_manifest(plan, key, recipes, files)
+
+    def check_existing(existing, observed_files):
+        if any(existing.get(field) != value for field, value in candidate.items() if field != 'files'):
+            raise ValueError('same kernel content key describes a different compile')
+        if observed_files != existing.get('files') or observed_files != files:
+            raise ValueError('same kernel content key produced different artifacts')
+
+    if destination.exists():
+        try:
+            existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text())
+            observed_files = _kernel_cache_files(destination)
+        except (OSError, ValueError):
+            # The entry is incomplete/corrupt; rebuild it from this compile.
+            _drop_kernel_content(cache, key)
+        else:
+            check_existing(existing, observed_files)
+            return {'status': 'present', 'cache_key': key}
+    cache.mkdir(parents=True, exist_ok=True)
+    temp = Path(tempfile.mkdtemp(prefix='.kernel-content-', dir=cache))
+    try:
+        for relative in files:
+            target = _recipe_child(temp, relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(_recipe_child(binary, relative), target)
+        if _kernel_cache_files(temp) != files:
+            raise ValueError('kernel content publication copied different bytes')
+        (temp / KERNEL_CONTENT_MANIFEST).write_text(json.dumps(candidate, sort_keys=True, indent=2) + '\n')
+        try:
+            os.rename(temp, destination)
+        except OSError as exc:
+            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
+                raise
+            check_existing(json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text()),
+                           _kernel_cache_files(destination))
+            return {'status': 'present', 'cache_key': key}
+    finally:
+        if temp.exists():
+            shutil.rmtree(temp)
+    return {'status': 'published', 'cache_key': key}
 
 
 def _ops_ini(op_type: str, description: dict) -> str:
@@ -187,13 +342,33 @@ def _recipe_inputs(root: Path, plan: dict, environment: dict) -> tuple[list, str
     return variants, dynamics[0], _ops_ini(*selected[0])
 
 
-def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_recipe) -> bool:
+def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_recipe,
+                          content_cache: Path | None = None,
+                          content_metadata: dict | None = None) -> bool:
     """Return False only before OPC starts; compiler failures never replay."""
     try:
         variants, dynamic, ini = _recipe_inputs(root, plan, environment)
     except (RecipeUnavailable, FileNotFoundError) as exc:
         print('native-incremental: recipe fallback: ' + str(exc), flush=True)
         return False
+    cache_key = None
+    if content_cache is not None:
+        metadata = dict(content_metadata or {})
+        measured = ('cann_version', 'soc_version', 'python_abi')
+        if all(isinstance(metadata.get(name), str) and metadata[name].strip() for name in measured):
+            cache_key = kernel_content_key(plan, environment, **metadata)
+            try:
+                if restore_kernel_recipe_content(root, plan, content_cache, cache_key, read_recipe=read_recipe):
+                    print('native-incremental: kernel content cache hit ' + cache_key, flush=True)
+                    return True
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                # Cache lookup is optional; a miss/corrupt entry never becomes
+                # a compiler result, and the actual compiler still runs.
+                print('native-incremental: kernel content cache unavailable: ' + str(exc), flush=True)
+        else:
+            missing = [name for name in measured if not metadata.get(name)]
+            print('native-incremental: kernel content cache skipped; measured metadata missing: '
+                  + ', '.join(missing), flush=True)
     stage = Path(tempfile.mkdtemp(prefix='kernel-recipe-', dir=root / '.mindie-runtime'))
     started = False
     completed = False
@@ -289,6 +464,14 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
         if [read_recipe(path) for path in sorted(final_gen.glob('*.sh'))] != generated_recipes:
             raise ValueError('relocated compiler evidence changed its effective recipe')
         completed = True
+        if cache_key is not None:
+            try:
+                publish_kernel_recipe_content(root, plan, content_cache, cache_key, generated_recipes)
+                print('native-incremental: kernel content cache stored ' + cache_key, flush=True)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                # Compilation already succeeded; an optional cache write must
+                # not turn a complete owned build into a failure.
+                print('native-incremental: kernel content cache store failed: ' + str(exc), flush=True)
         return True
     except RecipeUnavailable as exc:
         if started:

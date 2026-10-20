@@ -33,9 +33,11 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
+import sqlite3
 import sys
 import threading
 import time
@@ -218,7 +220,15 @@ class CoordinatorService(TaskMessages):
         phase = row.get("phase")
         if phase:
             row.setdefault("phase_observed_at", {}).setdefault(phase, time.time())
-        store.save_execution(row)
+        try:
+            store.save_execution(row)
+        except (OSError, sqlite3.Error) as exc:
+            if phase not in DONE or not row.get("roles") or any(
+                    not (role.get("observation", {}).get("remote") or {}).get("quiet")
+                    for role in row["roles"]):
+                raise
+            row["recording_error"] = {"artifact": "execution-state", "error": str(exc)[:500],
+                                      "timeout": isinstance(exc, TimeoutError)}
         with self._changed:
             self._changed.notify_all()
 
@@ -739,7 +749,10 @@ class CoordinatorService(TaskMessages):
         for role in row["roles"]:
             if role.get("preflight") and not role.get("preflight_passed"):
                 self._save_progress(store, row, role["name"], {"step": "preflight"})
-                self.backend.preflight(role["binding"], role["preflight"],
+                request_id = row["id"] + "-" + role["name"] if len(row["roles"]) > 1 else row["id"]
+                from mindie_coordinator.runtime_profile import digest
+                slot_id = digest([user, role["binding"]["id"], request_id])
+                self.backend.preflight({**role["binding"], "slot_id": slot_id}, role["preflight"],
                                        {**(spec.get("env") or {}), **(role.get("env") or {})})
                 role["preflight_passed"] = True
                 self._save_execution(store, row)
@@ -767,7 +780,10 @@ class CoordinatorService(TaskMessages):
                 role["snapshots"], role["binding"]["build_key"],
                 role.get("devices") or [], role.get("npu_count") or 0,
                 role["command"], merged_env, spec.get("timeout_seconds"),
-                service_port=role.get("service_port"), hold_go=hold_go,
+                service_port=role.get("service_port"), hold_go=hold_go, execution_id=row["id"],
+                native_cache_receipt=(row.get("native_cache_receipts") or {}).get(role["name"]),
+                proof_path=(role.get("proof_path") or (row.get("spec") or {}).get("proof_path")),
+                source_snapshot=spec.get("source_snapshot"),
                 **({"allow_external_busy": True} if role.get("allow_external_busy") else {}),
             )
             with self._lock_for("progress", row["id"]):
@@ -1037,6 +1053,9 @@ class CoordinatorService(TaskMessages):
             except OSError as exc:
                 get_recorder("mindie-coordinator").event("WARNING", "diagnostics.persistence_failed", error_type=type(exc).__name__)
         with self._lock_for("progress", row["id"]):
+            if role and event.get("step") == "shared-native-cache":
+                from mindie_coordinator.preparation_cache import native_cache_receipt
+                row.setdefault("native_cache_receipts", {})[role] = native_cache_receipt(event)
             previous = (row.get("role_progress") or {}).get(role, {}) if role else row.get("progress") or {}
             same_step = (previous.get("step"), previous.get("role")) == (event.get("step"), role)
             if previous.get("started_at") and not same_step:
@@ -1060,24 +1079,6 @@ class CoordinatorService(TaskMessages):
 
     def _prepare_role(self, store, user, row, role, environment, donor):
         from mindie_coordinator.provision import prepare_task_environment
-        from contextlib import contextmanager
-        @contextmanager
-        def compile_scope(step):
-            # Each compiler already bounds its internal parallel variants. One
-            # compiler per host avoids multiplying that whole-machine budget.
-            lock = self._lock_for('compile-host', host_key(donor))
-            started = time.monotonic()
-            while not lock.acquire(timeout=0.1):
-                if self._adopt_cancel(store, row):
-                    raise PreparationCancelled('cancelled while waiting for the host compiler')
-            try:
-                if self._adopt_cancel(store, row):
-                    raise PreparationCancelled('cancelled before compilation')
-                self._save_progress(store, row, role['name'], {'step': step,
-                    'compile_wait_seconds': round(time.monotonic() - started, 6)})
-                yield
-            finally:
-                lock.release()
         prepared = prepare_task_environment(
             self.pool, user=user, session_id=row["id"], role_name=role["name"],
             environment=environment, donor=donor, sources=row.get("sources") or {},
@@ -1087,7 +1088,6 @@ class CoordinatorService(TaskMessages):
             on_preparation_job=lambda job: self._save_preparation_job(store, row, role["name"], job),
             cancel_requested=lambda: self._adopt_cancel(store, row),
             checkout_session=row["remote_session"]["id"],
-            compile_scope=compile_scope,
         )
         # Each finished role remains recoverable while its siblings prepare.
         # A crash before this save is also covered by the pool's durable
@@ -1096,7 +1096,11 @@ class CoordinatorService(TaskMessages):
             with self._lock_for("progress", row["id"]):
                 row.setdefault("prepared_bindings", {})[role["name"]] = prepared["binding"]
                 if prepared.get("attestation"):
-                    row.setdefault("preparation_results", {})[role["name"]] = self._manifest_summary(prepared["attestation"])
+                    attestation = prepared["attestation"]
+                    row.setdefault("preparation_results", {})[role["name"]] = self._manifest_summary(attestation)
+                    receipt = prepared.get("native_cache_receipt") or attestation.get("native_cache_receipt")
+                    if isinstance(receipt, dict) and receipt.get("cache_key"):
+                        row.setdefault("native_cache_receipts", {})[role["name"]] = receipt
                 self._save_execution(store, row)
         return prepared
 
@@ -1115,6 +1119,9 @@ class CoordinatorService(TaskMessages):
         for role, records in (row.get("preparation_jobs") or {}).items():
             for record in records.values():
                 if record.get("quiet"):
+                    from mindie_coordinator.compile_lease import finish_compile_lease
+                    finish_compile_lease(record,
+                        lambda value: self._save_preparation_job(store, row, role, value))
                     continue
                 try:
                     observed = preparation_control(record["endpoint"], record["job_id"], "status")
@@ -1197,7 +1204,8 @@ class CoordinatorService(TaskMessages):
         def stop_job(item):
             role, job = item
             if job.get("quiet"):
-                return True
+                from mindie_coordinator.compile_lease import finish_compile_lease
+                return finish_compile_lease(job, lambda value: self._save_preparation_job(store, row, role, value))
             return stop_preparation_process(job,
                 lambda value: self._save_preparation_job(store, row, role, value), force=force)
         if len(jobs) > 1:
@@ -1298,6 +1306,9 @@ class CoordinatorService(TaskMessages):
             "descendants_drained": (job.get("remote") or {}).get("descendants_drained"),
             "status_observed_at": role.get("status_observed_at"),
             "command_timings": ((job.get("remote") or {}).get("result") or {}).get("timings"),
+            "slot_id": job.get("slot_id"),
+            "slot_cleanup": job.get("slot_cleanup"),
+            "recording_error": job.get("recording_error"),
         }
         if binding.get("endpoint"):
             target = self._target(row, binding, job)
@@ -1320,7 +1331,7 @@ class CoordinatorService(TaskMessages):
     def _reply(self, row, role=None) -> dict[str, Any]:
         job = row.get("observation") or {}
         state = row.get("phase") or job.get("state")
-        payload = {"execution_id": row["id"], "state": state, "service": (row.get("spec") or {}).get("service"),
+        payload = {"execution_id": row["id"], "run_id": row["id"], "state": state, "service": (row.get("spec") or {}).get("service"),
                    "assignment": row.get("assignment"), "observed_at": time.time(),
                    "progress": row.get("progress"), "observation_freshness": self._observation_freshness(row)}
         if row.get("role_progress"):
@@ -1333,6 +1344,8 @@ class CoordinatorService(TaskMessages):
             payload["cancel_requested"] = True
         if row.get("error"):
             payload["error"] = str(row["error"])[:500]
+        if row.get("recording_error"):
+            payload["recording_error"] = row["recording_error"]
         if row.get("error_details"):
             payload["error_details"] = row["error_details"]
             payload["error_ref"] = row.get("error_ref")
@@ -1342,8 +1355,9 @@ class CoordinatorService(TaskMessages):
         from mindie_coordinator.ready_runtime import TERMINAL
         payload["resources_released"] = state in DONE and all(
             not item.get("managed_job") or (item.get("observation") or {}).get("lease_state") in TERMINAL
-            for item in roles) and all(job.get("quiet") for records in (row.get("preparation_jobs") or {}).values()
-                                      for job in records.values())
+            for item in roles) and all(job.get("quiet") and (not job.get("compile_lease")
+                or job["compile_lease"].get("state") in {"released", "cancelled", "expired", "not_started"})
+                for records in (row.get("preparation_jobs") or {}).values() for job in records.values())
         role_views = [self._role_view(row, item) for item in roles]
         if role:
             role_views = [item for item in role_views if item.get("name") == role]
@@ -1459,6 +1473,13 @@ class CoordinatorService(TaskMessages):
         if not directory.is_relative_to(run_root):
             raise ValueError("invalid recorded role log directory")
         result = {"name": name, "logs": []}
+        observed = next((role.get("observation") or {} for role in row.get("roles", [])
+                         if role.get("name") == name), {})
+        for field in ("hardware_telemetry", "native_cache_receipt", "recording_error"):
+            if field in observed:
+                result[field] = observed[field]
+        if name in row.get("native_cache_receipts", {}):
+            result["native_cache_receipt"] = row["native_cache_receipts"][name]
         summary = row.get("preparation_results", {}).get(name)
         if summary:
             result["build"] = summary
@@ -1494,18 +1515,28 @@ class CoordinatorService(TaskMessages):
                     stream.seek(max(0, size - limit))
                     text = stream.read(limit).decode("utf-8", errors="replace")
                 captured = None
-                for receipt in reversed(text.splitlines()):
-                    if not receipt.startswith('{'):
+                for line in reversed(text.splitlines()):
+                    if not line.startswith('{'):
                         continue
                     try:
-                        value = json.loads(receipt)
+                        value = json.loads(line)
                     except ValueError:
                         continue
                     for key in ('preparation_timings', 'native_cache', 'native_smoke_executed'):
                         if key in value:
                             entry.setdefault(key, value[key])
+                    store = value.get('native_cache')
+                    if isinstance(store, dict):
+                        from mindie_coordinator.preparation_cache import native_cache_receipt
+                        receipt = native_cache_receipt(store)
+                        if re.fullmatch(r'[0-9a-f]{64}', str(receipt.get('cache_key') or '')):
+                            current = result.get('native_cache_receipt')
+                            if current is None or (not current.get('hit') and not receipt.get('hit')):
+                                result['native_cache_receipt'] = receipt
+                            elif current != receipt:
+                                result['native_cache_receipt_conflict'] = True
                     if "manifest_zlib_base64" in value:
-                        captured = _captured_manifest(receipt)
+                        captured = _captured_manifest(line)
                     elif value.get("profile_key") and value.get("build_key") and "files" in value:
                         captured = value
                     if captured is not None:

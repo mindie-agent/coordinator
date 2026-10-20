@@ -2,6 +2,9 @@
 
 [Role] Pure constraint solver mapping environment/resource/topology requirements to attested host candidates.
 [Invariants] Never relaxes topology, recipe, ABI, or hardware constraints, and never starts a partial multi-role group.
+- Optional `npu-top` observations may only reorder matching ready roots. An
+  explicit role/topology host still filters by identity and is never rewritten;
+  the host queue remains the allocation authority.
 [Timeouts & Locks] Pure in-memory evaluation; zero I/O or locks.
 [Side-Effect Policy] Side-effect free.
 """
@@ -12,7 +15,7 @@ import math
 from typing import Any
 
 SUPPORTED_RECIPES = {"rc", "main", "stable", "local-latest"}
-RESERVED_ENV = {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_EXECUTION_OBSERVATION"}
+RESERVED_ENV = {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", "MINDIE_EXECUTION_OBSERVATION"}
 ENVIRONMENT_KEYS = {"recipe", "image", "python_abi", "cann", "soc", "machine_type"}
 RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy"}
 TOPOLOGY_KEYS = {"host", "roles", "distinct_hosts"}
@@ -195,6 +198,14 @@ def runtime_matches(row: dict[str, Any], environment: dict[str, Any] | None, rol
     return True
 
 
+def _runtime_observation_rank(row: dict[str, Any], order: dict[str, int]) -> int:
+    identities = [host_key(row), row.get("alias"), row.get("name"),
+                  (row.get("endpoint") or {}).get("host") if isinstance(row.get("endpoint"), dict) else None]
+    ranks = [order[str(value).strip().casefold()] for value in identities
+             if value and str(value).strip().casefold() in order]
+    return min(ranks) if ranks else len(order) + 1
+
+
 def select_runtimes(
     catalog: list[dict[str, Any]],
     *,
@@ -203,11 +214,14 @@ def select_runtimes(
     environment: dict[str, Any] | None = None,
     busy_runtime_ids: set[str] | None = None,
     topology: dict[str, Any] | None = None,
+    observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pick one matching ready root per role.
 
     Same-host multi-role is allowed unless topology.distinct_hosts or the roles
-    name different hosts. Distinct mutable roots are still required.
+    name different hosts. Distinct mutable roots are still required. An
+    `npu-top` observation only reorders already-matching roots; explicit hosts
+    keep their exact identity constraint.
     """
     busy_runtime_ids = busy_runtime_ids or set()
     ready = [
@@ -215,6 +229,11 @@ def select_runtimes(
         if row.get("state") == "ready" and row.get("user") == user and not row.get("draining")
         and row.get("runtime_id") not in busy_runtime_ids
     ]
+    if observation:
+        from mindie_coordinator.npu_top_bridge import observation_host_order
+        order = observation_host_order(observation)
+        if order:
+            ready.sort(key=lambda row: _runtime_observation_rank(row, order))
     chosen: list[str] = []
     seen_hosts: set[str] = set()
     require_distinct_hosts = distinct_hosts_required(roles, topology)

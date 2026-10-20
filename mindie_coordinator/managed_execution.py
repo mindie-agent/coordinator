@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 import json
 import shlex
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import PurePosixPath
@@ -37,6 +38,7 @@ from mindie_coordinator.runtime_profile import digest
 from remote_dev.core.errors import error_details
 from remote_dev.observability import detached_tool
 from mindie_coordinator.launch_observation import ENV_NAME, launch_observation
+from mindie_coordinator.execution_slots import SLOT_ENVIRONMENT, slot_environment, slot_preamble
 
 JOB_TERMINAL = {"succeeded", "failed", "timeout", "cancelled", "inconclusive"}
 LEASE_TERMINAL = {"released", "cancelled", "expired"}
@@ -46,9 +48,12 @@ class ExecutionRequestError(ValueError):
     """A permanent request-validation failure that cannot succeed on retry."""
 
 
-def task_preamble(binding):
+def task_preamble(binding, *, slot_id=None):
     """Use the bound interpreter and sources for both preflight and launch."""
     command = binding.get("launch_preamble", "")
+    slot_id = slot_id or binding.get("slot_id")
+    if slot_id:
+        command += "\n" + slot_preamble(slot_id)
     if binding.get("python"):
         command += "\nexport MINDIE_PYTHON=" + shlex.quote(binding["python"])
     # Repository directories under the task root otherwise shadow editable packages.
@@ -64,12 +69,14 @@ class ManagedExecution:
     def managed_start(self, owner, binding_id, request_id, snapshots, expected_build_key,
                       devices, npu_count, command, env, timeout_seconds=1800,
                       priority=0, queue_seconds=1800, service_port=None, hold_go=False,
-                      allow_external_busy=False):
+                      allow_external_busy=False, execution_id=None, native_cache_receipt=None,
+                      proof_path=None, source_snapshot=None):
         if not isinstance(command, str) or not command.strip() or len(command) > 200000:
             raise ValueError("a bounded nonempty shell command is required")
         if not isinstance(env, dict) or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
                                            or key.startswith("REMOTE_DEV_JOB_")
-                                           or key in {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", ENV_NAME}
+                                           or key in {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", ENV_NAME}
+                                           or key in SLOT_ENVIRONMENT
                                            or not isinstance(value, str) for key, value in env.items()):
             raise ValueError("invalid environment or attempted override of managed device or service-port ownership")
         if timeout_seconds is not None and (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400):
@@ -78,6 +85,9 @@ class ManagedExecution:
             raise ValueError("queue_seconds must be 1..86400")
         if service_port is not None and (type(service_port) is not int or service_port < 0):
             raise ValueError("service_port must be None, 0, or a positive declared runtime service port")
+        if proof_path is not None:
+            if not isinstance(proof_path, str) or not proof_path.startswith("/") or ".." in PurePosixPath(proof_path).parts:
+                raise ValueError("proof_path must be an absolute POSIX path without traversal")
         if type(allow_external_busy) is not bool or (allow_external_busy and (
                 not isinstance(devices, list) or len(devices) != 1 or npu_count
                 or any(type(device) is not int or device < 0 for device in devices))):
@@ -89,7 +99,9 @@ class ManagedExecution:
         if allow_external_busy:
             request["allow_external_busy"] = True
         specification = {"command": command, "env": env, "timeout_seconds": timeout_seconds,
-                         "requested_service_port": service_port}
+                         "requested_service_port": service_port,
+                         **({"source_snapshot": source_snapshot} if source_snapshot is not None else {}),
+                         **({"proof_path": proof_path} if proof_path else {})}
         with self.lock, self.transaction() as db:
             binding = self.owned(db, "binding", binding_id, owner)
             existing = [row for row in self.rows(db, "job") if row["id"] == key]
@@ -99,14 +111,20 @@ class ManagedExecution:
                     raise ValueError("managed execution request id reused with different arguments")
                 if bool(job.get("hold_go")) != bool(hold_go):
                     raise ValueError("managed execution request id reused with different arguments")
+                if job.get("execution_id") != execution_id:
+                    raise ValueError("managed execution request id belongs to another execution")
                 return job
             if binding["state"] != "bound":
                 raise ValueError("cannot start a managed job on a returned runtime")
-            job = {"id": key, "owner": owner, "binding_id": binding_id,
+            job = {"id": key, "slot_id": key, "owner": owner, "binding_id": binding_id,
+                   "execution_id": execution_id,
                    "diagnostics_context": current_context(),
                    "session": binding["intent"]["session"], "request": request, "spec": specification,
                    "job_id": "mindie-" + key, "state": "pending", "last_poll": 0,
-                   "cancel_requested": False, "force": False, "hold_go": bool(hold_go)}
+                   "cancel_requested": False, "force": False, "hold_go": bool(hold_go),
+                   **({"proof_path": proof_path} if proof_path else {})}
+            if native_cache_receipt is not None:
+                job["native_cache_receipt"] = dict(native_cache_receipt)
             self.put(db, "job", job)  # intent survives a crash before lease creation
             self.event(db, owner, "managed-job-created", run=key, job_id=job["job_id"])
         return self.managed_advance(key)
@@ -182,7 +200,8 @@ class ManagedExecution:
                     job["preflight_error"] = run["preflight_error"]
                 job["lease_state"] = run["state"]
                 if run.get("environment"):
-                    job["environment"] = run["environment"]
+                    job["environment"] = {**run["environment"], **slot_environment(job.get("slot_id") or key),
+                                          "MINDIE_RUN_ID": job.get("execution_id") or key}
                 if run.get("service_port") is not None:
                     job["service_port"] = run["service_port"]
                 # This owner persists a run before its only prepare path. With
@@ -253,14 +272,14 @@ class ManagedExecution:
                         return self._cancel_managed_launch(job, run, binding, runtime, observed)
                     receipt = launch_observation(binding, job["request"], job["spec"], run["environment"])
                     job["launch_observation"] = receipt
-                    command = task_preamble(binding)
+                    command = task_preamble(binding, slot_id=job.get("slot_id") or key)
                     command += ("\nexport ASCEND_RT_VISIBLE_DEVICES="
                                 + shlex.quote(run["environment"]["ASCEND_RT_VISIBLE_DEVICES"]))
                     if run["environment"].get("MINDIE_SERVICE_PORT"):
                         command += "\nexport MINDIE_SERVICE_PORT=" + shlex.quote(run["environment"]["MINDIE_SERVICE_PORT"])
                     command += "\n" + job["spec"]["command"]
                     specification = {**job["spec"], "command": command, "cwd": binding["endpoint"]["cwd"],
-                                     "env": {**job["spec"]["env"], **run["environment"],
+                                     "env": {**job["spec"]["env"], **job["environment"],
                                              ENV_NAME: json.dumps(receipt, sort_keys=True)},
                                      "prepared_timeout_seconds": max(120, job["request"]["queue_seconds"])
                                      if job.get("hold_go") else 120}
@@ -381,21 +400,39 @@ class ManagedExecution:
 
     def _save_managed(self, job):
         job["last_poll"] = self.clock()
-        with self.transaction() as db:
-            # Stop intent is monotonic. A concurrent control request may have
-            # persisted cancellation while this advancement was doing remote
-            # work from an older snapshot; never overwrite it on save.
-            current = self.get(db, "job", job["id"])
-            if current.get("cancel_requested"):
-                job["cancel_requested"] = True
-                job["force"] = bool(job.get("force") or current.get("force"))
-            if not current.get("hold_go"):
-                job["hold_go"] = False
-            self.put(db, "job", job)
-            runs = [row for row in self.rows(db, "run") if row["id"] == job["id"]]
-            binding = self.get(db, "binding", job["binding_id"])
+        try:
+            with self.transaction() as db:
+                # Stop intent is monotonic. A concurrent control request may have
+                # persisted cancellation while this advancement was doing remote
+                # work from an older snapshot; never overwrite it on save.
+                current = self.get(db, "job", job["id"])
+                if current.get("cancel_requested"):
+                    job["cancel_requested"] = True
+                    job["force"] = bool(job.get("force") or current.get("force"))
+                if not current.get("hold_go"):
+                    job["hold_go"] = False
+                self.put(db, "job", job)
+                runs = [row for row in self.rows(db, "run") if row["id"] == job["id"]]
+                binding = self.get(db, "binding", job["binding_id"])
+        except (OSError, sqlite3.Error) as exc:
+            if job.get("state") not in JOB_TERMINAL or not (job.get("remote") or {}).get("quiet"):
+                raise
+            # The persisted launch identity still locates the same remote job.
+            # Retain its observed completion even when the final local update
+            # times out; reconstruction re-observes it without another launch.
+            job["recording_error"] = {"artifact": "job-state", "error": str(exc)[:500],
+                                      "timeout": isinstance(exc, TimeoutError)}
+            return job
         if runs:
-            self.export_execution_record(runs[0], binding, job=job)
+            try:
+                self.export_execution_record(runs[0], binding, job=job)
+            except TimeoutError as exc:
+                job["recording_error"] = {"artifact": "managed-run", "error": str(exc)[:500], "timeout": True}
+            except (OSError, sqlite3.Error) as exc:
+                # The durable job row and remote outcome are already known.
+                # A secondary JSON export cannot turn success into uncertainty
+                # or authorize another submission of the same command.
+                job["recording_error"] = {"artifact": "managed-run", "error": str(exc)[:500]}
         return job
 
     def _finish_managed(self, job, run, binding, runtime, observed):
@@ -407,6 +444,8 @@ class ManagedExecution:
             action = "cancel" if run["state"] in {"pending", "queued", "granted"} else "release"
             run = self.control(job["owner"], job["id"], action, _managed=True, completion_confirmed=True)
         job["lease_state"] = run["state"]
+        if run.get("recording_error"):
+            job["recording_error"] = run["recording_error"]
         if run["state"] not in LEASE_TERMINAL:
             job.update(state="releasing", error=run.get("error"))
             return self._save_managed(job)
@@ -423,6 +462,29 @@ class ManagedExecution:
             job["error"] = "lease expired before the command started: " + (run.get("task", {}).get("message") or "activation deadline elapsed")
         else:
             job.pop("error", None)
+        if job.get("proof_path") and not isinstance(job.get("active_execution_proof"), dict):
+            try:
+                text = self.backend.bash(runtime["endpoint"], "cat -- " + shlex.quote(job["proof_path"]))
+                proof = json.loads(text)
+                if not isinstance(proof, dict) or proof.get("run_id") != (job.get("execution_id") or job["id"]):
+                    raise ValueError("declared proof has no matching run_id")
+                job["active_execution_proof"] = proof
+            except TimeoutError as exc:
+                job["proof_error"] = {"artifact": "active-execution-proof", "error": str(exc)[:500], "timeout": True}
+            except Exception as exc:
+                job["proof_error"] = {"artifact": "active-execution-proof", "error": str(exc)[:500]}
+        if "hardware_telemetry" not in job and callable(getattr(self.backend, "run_evidence", None)):
+            # Observation happens after the process and lease finish. Monitor
+            # gaps belong to evidence and cannot replace the remote outcome.
+            job.update(self.backend.run_evidence(runtime, job, run))
+        if job.get("slot_id") and not job.get("slot_cleanup"):
+            try:
+                self.backend.cleanup_slot(runtime, job["slot_id"])
+                job["slot_cleanup"] = {"status": "completed"}
+            except Exception as exc:
+                # Cleanup is a separate effect: a completed command and drained
+                # lease keep their result even if the cache directory is retained.
+                job["slot_cleanup"] = {"status": "failed", "error": str(exc)[:500]}
         return self._save_managed(job)
 
     def managed_tick(self, limit=4, *, exclude=()):

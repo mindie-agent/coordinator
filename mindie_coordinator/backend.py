@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import shlex
+import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +44,7 @@ from mindie_coordinator.runtime_profile import build_key, digest, launch_preambl
 class PreparedNativeView:
     """Internal completed native proof, never a registration argument."""
     attestation: dict
+    native_cache_receipt: dict | None = None
 
 
 def _captured_manifest(output: str) -> dict:
@@ -108,6 +109,55 @@ class RemoteBackend:
         """Wait inside the existing remote supervisor; no launch or lease change."""
         return self.job(runtime, job_id, 'exchange', wait_for_exit=True,
                         yield_time_ms=int(timeout_seconds * 1000), max_bytes=1)
+
+    def cleanup_slot(self, runtime, slot_id):
+        from mindie_coordinator.execution_slots import slot_cleanup_command
+        result = self.shell.run(runtime["endpoint"], slot_cleanup_command(slot_id), timeout_ms=15000)
+        if result["outcome"] != "success":
+            raise RuntimeError("slot cache cleanup did not complete: " + str(result))
+
+    def run_evidence(self, runtime, job, run):
+        """Read one completed NPU window without changing execution state."""
+        devices = run.get("task", {}).get("granted_devices") or []
+        if not devices:
+            return {}
+        from mindie_coordinator.npu_top_bridge import NpuTopObservationClient
+        result = (job.get("remote") or {}).get("result") or {}
+        start, end = result.get("started_at"), result.get("finished_at")
+        evidence = {"source": "npu-top", "status": "unavailable",
+            "run_id": job.get("execution_id") or job["id"],
+            "host": runtime["host_endpoint"]["host"], "devices": devices,
+            "coverage_ratio": 0.0, "throttling_detected": None,
+            "resource_interference_detected": None, "measurement_limitations": []}
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or end <= start:
+            evidence["measurement_limitations"] = ["remote command timestamps are unavailable; telemetry was not inferred from client wall time"]
+        else:
+            try:
+                # npu-top timestamps its samples on the collector, while the
+                # supervisor reports the remote wall clock. Measure an offset
+                # interval; never query a different 250s-old window as though
+                # the two machines had synchronized clocks.
+                before = time.time()
+                clock = self.shell.run(runtime["endpoint"], shlex.quote(runtime["python"]) +
+                    " -c 'import time; print(time.time())'", timeout_ms=2000)
+                after = time.time()
+                if clock["outcome"] != "success":
+                    raise RuntimeError("remote clock sample unavailable")
+                remote_now = float(Path(clock["refs"]["stdout"]).read_text().strip())
+                offset_min, offset_max = before - remote_now, after - remote_now
+                evidence.update(NpuTopObservationClient().telemetry_window(
+                    evidence["host"], devices, start + offset_min, end + offset_max))
+                evidence["command_window"] = {"started_at": start, "finished_at": end,
+                                              "basis": "remote_supervisor"}
+                evidence["clock_alignment"] = {"offset_min_seconds": offset_min,
+                    "offset_max_seconds": offset_max, "basis": "bounded remote clock sample"}
+                evidence["measurement_limitations"].append(
+                    "command window is a bounded clock-offset projection; offset stability across the command is unverified")
+                if evidence["status"] == "observed":
+                    evidence["status"] = "partial"
+            except Exception as exc:
+                evidence["measurement_limitations"] = [f"telemetry read failed: {type(exc).__name__}: {exc}"[:500]]
+        return {"hardware_telemetry": evidence}
 
     def submit_and_acquire(self, runtime, request):
         """Use the already persisted epoch for one host admission exchange."""
@@ -405,17 +455,23 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
                 else:
                     from mindie_coordinator.native_publication import NativeViewPublication
                     publication = NativeViewPublication(spec, reuse['runtime'], versions)
-        container = SshEndpoint(host=endpoint["host"], port=int(endpoint["port"]), user=endpoint["user"])
+        container = SshEndpoint(host=endpoint["host"], port=int(endpoint["port"]), user=endpoint["user"],
+                                container=endpoint.get("container"))
         pending_setup = []
         def owned_process(step):
             nonlocal pending_setup
             if on_preparation_job is None:
                 return None
             from mindie_coordinator.preparation_process import PreparationProcess
+            from mindie_coordinator.compile_lease import COMPILE_STEPS, CompileLease
             from mindie_coordinator.provision.host_ops import DEFAULT_WORKDIR
             setup, pending_setup = pending_setup, []
             return PreparationProcess(endpoint, step, on_preparation_job, cancel_requested or (lambda: False),
-                                      setup=setup, bootstrap_root=DEFAULT_WORKDIR)
+                                      setup=setup, bootstrap_root=DEFAULT_WORKDIR,
+                                      compile_lease=CompileLease(spec["host_endpoint"], spec["container_name"],
+                                          self.host_queue.request,
+                                          cleanup=lambda endpoint, slot: self.cleanup_slot({"endpoint": endpoint}, slot))
+                                      if step in COMPILE_STEPS else None)
 
         def check_cancel():
             if cancel_requested is not None and cancel_requested():
@@ -632,7 +688,8 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
                                                 managed_finalize=True, publish_native_cache=compiled_native)
         check_cancel()
         if native_recipe and captured is not None:
-            return PreparedNativeView(captured)
+            receipt = captured.pop('native_cache_receipt', None)
+            return PreparedNativeView(captured, receipt)
         # Legacy adapters and command roots retain their registration probe.
 
     def _shared_native(self, spec, action, versions, *, process=None, candidate=None):
@@ -651,6 +708,7 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
             module = _package_file('runtime_profile.py').read_text()
             build_source = _package_file('build_inputs.py').read_text()
             incremental = _package_file('native_incremental.py').read_text()
+            pool = _package_file('native_cache_pool.py').read_text()
             cache = _package_file('preparation_cache.py').read_text()
             preamble = '\n'.join(['set -euo pipefail', 'export MINDIE_RUNTIME_ROOT=' + shlex.quote(root),
                                    *PYTHON_METADATA_PREAMBLE, *task_python_exports(python),
@@ -658,7 +716,8 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
                                                                             root + '/vllm', root + '/vllm-ascend']))])
             command = (preamble + '\n' + shlex.quote(python) + ' - ' + shlex.quote(json.dumps(request))
                        + " <<'MINDIE_SHARED_NATIVE'\n" + module + '\nexec(' + repr(build_source) + ', globals())\n'
-                       + 'exec(' + repr(incremental) + ', globals())\nexec(' + repr(cache) + ', globals())\n'
+                       + 'exec(' + repr(incremental) + ', globals())\nexec(' + repr(pool) + ', globals())\n'
+                       + 'exec(' + repr(cache) + ', globals())\n'
                        + REMOTE_SHARED_SUFFIX + '\nMINDIE_SHARED_NATIVE\n')
             if process is None:
                 return json.loads(self.bash(spec['endpoint'], command))
@@ -681,7 +740,7 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
         source = '\n'.join(_package_file(name).read_text(encoding='utf-8')
                            for name in ('runtime_profile.py',))
         # Separate compile units preserve module-level future imports.
-        for name in ('build_inputs.py', 'native_incremental.py', 'preparation_cache.py'):
+        for name in ('build_inputs.py', 'native_incremental.py', 'native_cache_pool.py', 'preparation_cache.py'):
             source += '\nexec(' + repr(_package_file(name).read_text(encoding='utf-8')) + ', globals())\n'
         source += "\nimport signal\nsignal.alarm(45)\nargs=json.loads(sys.argv[1])\nprint(json.dumps(store_shared_native(Path(args['root']),Path(SHARED_NATIVE_CACHE))))\n"
         module = _package_file('shared_native_discovery.py').read_text(encoding='utf-8')
@@ -789,6 +848,7 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
         suffix = REMOTE_CAPTURE_SUFFIX if native_recipe else REMOTE_COMMAND_CAPTURE_SUFFIX
         runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n"
         if publish_native_cache:
+            runner += 'exec(' + repr(_package_file('native_cache_pool.py').read_text()) + ', globals())\n'
             runner += 'exec(' + repr(_package_file('preparation_cache.py').read_text()) + ', globals())\n'
         runner += suffix
         preamble_lines = ["set -euo pipefail"]
@@ -830,5 +890,12 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
                     or manifest.get('runtime_root') != root
                     or manifest.get('profile', {}).get('image_digest') != info['Image']):
                 raise ValueError('capture did not return this fixed execution view')
+            reply = json.loads(output)
+            store = reply.get('native_cache')
+            if isinstance(store, dict):
+                from mindie_coordinator.native_cache_pool import native_cache_receipt
+                receipt = native_cache_receipt(store)
+                if re.fullmatch(r'[0-9a-f]{64}', str(receipt.get('cache_key') or '')):
+                    manifest['native_cache_receipt'] = receipt
             return {**manifest, 'container_id': info['Id'],
                     'launch_preamble': launch_preamble(manifest['profile'], python=python)}

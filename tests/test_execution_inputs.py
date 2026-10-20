@@ -1,7 +1,5 @@
-import json
 import subprocess
 import threading
-import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -254,8 +252,7 @@ def test_four_allowed_hosts_prepare_concurrently_and_preserve_role_progress(clie
     assert set(persisted["role_progress"]) == {role["name"] for role in roles}
 
 
-@pytest.mark.parametrize("phase", ["private", "compile"])
-def test_cancelled_group_stops_before_launch_and_skips_waiting_compiler(client, phase):
+def test_cancelled_group_finishes_private_preparation_without_launching(client):
     roles = [{"name": name, "host": "same-host", "command": "true", "npu_count": 0} for name in ("one", "two")]
     client.run("true", sources={}, topology={"roles": roles})
     row = client.store.executions(client.context["session"]["id"])[0]
@@ -264,8 +261,8 @@ def test_cancelled_group_stops_before_launch_and_skips_waiting_compiler(client, 
     barrier = threading.Barrier(2)
 
     def prepare_environment(*args, **kwargs):
-        # Both private preparations are in flight before cancellation. Only
-        # the actual compile_scope serializes same-host compiler work.
+        # Both private preparations are in flight before cancellation. CPU
+        # compiler admission is separately covered by the real host queue.
         barrier.wait(timeout=5)
 
         def complete_then_cancel():
@@ -275,9 +272,6 @@ def test_cancelled_group_stops_before_launch_and_skips_waiting_compiler(client, 
             client.store.save_execution(stored)
             return {"id": kwargs["role_name"]}
 
-        if phase == "compile":
-            with kwargs["compile_scope"]("install-vllm-ascend"):
-                return complete_then_cancel()
         return complete_then_cancel()
 
     with patch.object(client.pool, "catalog", return_value=catalog), \
@@ -287,6 +281,6 @@ def test_cancelled_group_stops_before_launch_and_skips_waiting_compiler(client, 
          patch.object(client.pool, "managed_start", side_effect=AssertionError("cancelled preparation must not launch")) as launch:
         result = client.coordinator._progress(client.store, "alice", row)
     assert result["state"] == "cancelled" and result["resources_released"] is True
-    assert len(prepared) == (1 if phase == "compile" else 2)
+    assert len(prepared) == 2
     checkout.assert_not_called()
     launch.assert_not_called()

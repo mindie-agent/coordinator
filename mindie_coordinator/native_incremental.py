@@ -10,6 +10,10 @@ on top of a restored shared-native bundle.
   installed kernel source blob reproduces the donor's exact native tree digest.
 - Preserves all host `.so` libraries and unrelated operators' dispatch entries;
   replaces only the target operator's `.o`/`.json` outputs and config entries.
+- The incremental plan carries only measured donor-profile facts
+  (`cann_version`, `soc_version`, `python_abi`) for the optional kernel content
+  cache. Missing facts stay absent; the compiler is never skipped on a guessed
+  key, and a cache lookup/store failure never becomes a compiler outcome.
 
 [Timeouts & Locks]
 - Runs inside the owned preparation container before worker launch; no locks needed.
@@ -99,6 +103,16 @@ def kernel_rebuild_plan(root: Path, bundle: Path, manifest: dict, preparation: d
         plan = {'operator': op, 'source': name, 'installed_source': installed,
                 'kernel_root': kernel, 'unit': unit, 'source_sha256': hashlib.sha256(current).hexdigest(),
                 'native_from': old_native['vllm-ascend'], 'native_to': current_native['vllm-ascend']}
+        # Carry the donor bundle's measured profile facts into the plan so the
+        # incremental compiler can use the content cache without guessing from
+        # environment variables. Missing facts stay absent (no cache reuse).
+        profile = manifest.get('profile') or {}
+        for field, source_field in (('cann_version', 'cann'),
+                                    ('soc_version', 'soc'),
+                                    ('python_abi', 'python_abi')):
+            value = profile.get(source_field) if isinstance(profile, dict) else None
+            if isinstance(value, str) and value.strip():
+                plan[field] = value
         recipe_file = '.mindie-runtime/kernel-compile-recipe.json'
         if recipe_file in manifest['files']:
             tbe = kernel.removesuffix('/kernel')
@@ -133,6 +147,19 @@ def _validate_operator(plan: dict) -> tuple[str, str]:
     if not re.fullmatch(r'[a-z][a-z0-9_]*', op) or not re.fullmatch(r'ascend[a-z0-9_]+', unit):
         raise ValueError('invalid incremental operator or compute unit')
     return op, unit
+
+
+def incremental_content_metadata(plan: dict) -> dict | None:
+    """Measured CANN/SoC/Python ABI for kernel content cache, or None.
+
+    Only values captured by the donor profile/plan qualify. Never fill a gap
+    from process environment, the host, the compute-unit name, or sysconfig.
+    """
+    metadata = {field: plan.get(field) for field in
+                ('cann_version', 'soc_version', 'python_abi')}
+    if any(not isinstance(value, str) or not value.strip() for value in metadata.values()):
+        return None
+    return metadata
 
 
 def merge_kernel_outputs(root: Path, plan: dict) -> list[str]:

@@ -9,7 +9,21 @@
       "required": true,
       "repetitions": 5,
       "timeout_seconds": 20,
-      "command": ["{python}", "benchmarks/release.py"]
+      "command": [
+        "{python}",
+        "benchmarks/release.py"
+      ]
+    },
+    {
+      "id": "canonical-run-manifest",
+      "kind": "microbenchmark",
+      "required": true,
+      "repetitions": 5,
+      "timeout_seconds": 20,
+      "command": [
+        "{python}",
+        "benchmarks/run_manifest.py"
+      ]
     }
   ]
 }

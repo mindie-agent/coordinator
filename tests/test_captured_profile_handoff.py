@@ -223,3 +223,14 @@ def test_fresh_handoff_waits_for_store_and_cancellation_checks(receipt, monkeypa
         result = run()
         assert isinstance(result, adapters.PreparedNativeView) and result.attestation is manifest
         assert steps == ['restore', 'capture']
+
+
+def test_cold_native_store_receipt_is_attached_to_completed_capture(receipt, monkeypatch):
+    manifest, info, spec = receipt
+    reply = json.loads(encode(manifest))
+    reply['native_cache'] = {'status': 'stored', 'cache_key': '7' * 64, 'linked_files': 0}
+    backend = adapters.RemoteBackend()
+    monkeypatch.setattr(backend, 'bash', Mock(side_effect=[json.dumps(info), json.dumps(reply)]))
+    result = backend._write_ready_profile(spec, {})
+    assert result['native_cache_receipt'] == {'hit': False, 'cache_key': '7' * 64, 'linked_files': 0}
+    assert result['build_key'] == manifest['build_key']

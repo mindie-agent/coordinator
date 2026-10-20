@@ -1,16 +1,25 @@
-"""Small task-facing observations; full operation records remain locally readable."""
+"""Small task-facing observations; full operation records remain locally readable.
+
+[Role] Project execution and task records into bounded client-facing summaries.
+[Invariants] Preserve run identity, remote outcome, and unfinished cleanup;
+truncated summaries never replace the authoritative operation records.
+[Timeouts & Locks] In-memory formatting and a local result-file write; no
+network, subprocesses, or lifecycle locks.
+[Side-Effect Policy] Save the full response before projecting it. A local write
+failure becomes a warning and never changes the completed remote operation.
+"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-EXECUTION_KEYS = ("execution_id", "state", "service", "error", "error_ref", "error_details", "reason", "progress",
+EXECUTION_KEYS = ("execution_id", "run_id", "state", "service", "error", "error_ref", "error_details", "recording_error", "reason", "progress",
                   "source_snapshot_id", "sources", "role_progress",
                   "observed_at", "cancel_requested", "service_port", "provisioning_started",
                   "worktrees_preserved", "resources_released", "stdout", "stderr", "tail", "preparation_logs", "observation_freshness",
                   "runtime_update", "active_executions", "wait_until", "wait_timed_out", "wait_error", "logs_pending", "tail_error", "evidence")
 ROLE_KEYS = ("name", "state", "runtime_id", "host", "root", "service_port", "error", "error_details", "lease_state",
-             "quiet", "descendants_drained", "stdout", "stderr", "status_observed_at", "command_timings")
+             "quiet", "descendants_drained", "stdout", "stderr", "status_observed_at", "command_timings", "slot_id", "slot_cleanup", "recording_error")
 TEXT_KEYS = {"stdout", "stderr", "tail", "tail_error", "wait_error", "error", "reason", "summary", "warnings"}
 MAX_COMPACT_BYTES = 16000
 
@@ -26,6 +35,7 @@ def execution_summary(value: dict, *, target=False) -> dict:
     result = {key: value[key] for key in EXECUTION_KEYS if value.get(key) is not None}
     if "id" in value and "execution_id" not in result:
         result["execution_id"] = value["id"]
+        result["run_id"] = value["id"]
         result["state"] = value.get("phase")
     roles = value.get("roles") or []
     if roles:

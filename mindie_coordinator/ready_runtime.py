@@ -38,7 +38,9 @@ from typing import Any
 
 from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERMINAL, ManagedExecution
 from mindie_coordinator.runtime_profile import digest
-from mindie_coordinator.run_manifest import utc_now
+from mindie_coordinator.run_manifest import (
+    bench_execution_evidence, project_run_manifest, utc_from_epoch, utc_now, write_manifest,
+)
 
 TERMINAL = {"released", "cancelled", "expired"}
 _PROCESS_INSTANCE = uuid.uuid4().hex
@@ -70,6 +72,8 @@ def endpoint(value: dict[str, Any], *, container: bool = False) -> dict[str, Any
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.:-]*", host) or not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", user) or not 0 < port < 65536:
         raise ValueError("invalid endpoint")
     result = {"host": host, "port": port, "user": user}
+    if value.get("container"):
+        result["container"] = str(value["container"])
     if container:
         root = value.get("root") or value.get("cwd") or ""
         if not root.startswith("/") or root == "/" or ".." in PurePosixPath(root).parts:
@@ -184,7 +188,7 @@ class RuntimePool(ManagedExecution):
             raise PermissionError("managed preparation must bind the owner's execution root")
         return self._register(runtime_id, spec, checkout=(owner, session, request_id))
 
-    def _bind_prepared(self, runtime_id, spec, owner, session, request_id, attestation):
+    def _bind_prepared(self, runtime_id, spec, owner, session, request_id, attestation, *, native_cache_receipt=None):
         """Commit the backend's completed native publication, without adoption.
 
         This is an internal handoff from prepare_task_environment, never a
@@ -199,7 +203,10 @@ class RuntimePool(ManagedExecution):
                 or attestation.get('runtime_root') != spec['endpoint']['root']
                 or attestation.get('execution_view', {}).get('source_id') != spec['source_snapshot']['id']):
             raise ValueError('prepared result does not describe this fixed execution view')
-        return self._register(runtime_id, spec, checkout=(owner, session, request_id), prepared=attestation)
+        registered = self._register(runtime_id, spec, checkout=(owner, session, request_id), prepared=attestation)
+        if native_cache_receipt is not None:
+            registered = {**registered, "native_cache_receipt": dict(native_cache_receipt)}
+        return registered
 
     def _register(self, runtime_id, spec, *, checkout=None, prepared=None):
         safe_id(runtime_id)
@@ -261,7 +268,7 @@ class RuntimePool(ManagedExecution):
             # against fresh state before committing. Sibling roots in the same
             # user container are allowed; overlapping mutable roots are not.
             observed = prepared if prepared is not None else self.backend.inspect(spec, idle=True)
-            if not reuse_only and prepared is None:
+            if not reuse_only and prepared is None and not spec["endpoint"].get("container"):
                 self.backend.host(spec, {"action": "container-ssh-reserve", "user": user,
                                           "container_name": container_name, "port": spec["endpoint"]["port"]})
             row = {"id": runtime_id, **spec, "state": "ready", "attestation": observed, "draining": False}
@@ -517,7 +524,8 @@ class RuntimePool(ManagedExecution):
                 job = next((row for row in self.rows(db, "job") if row["id"] == run["id"]), None)
         record = {
             "schema_version": "mindie.managed-run.v2",
-            "run_id": run["id"],
+            "run_id": (job or {}).get("execution_id") or run["id"],
+            "managed_run_id": run["id"],
             "created_at": run["created_at"],
             "updated_at": utc_now(),
             "snapshots": dict(run["intent"]["snapshots"]),
@@ -536,11 +544,115 @@ class RuntimePool(ManagedExecution):
                                  "command": (job.get("spec") or {}).get("command"),
                                  "remote_dir": job.get("remote", {}).get("remote_dir"),
                                  "result": job.get("remote", {}).get("result")}
+            record["slot_id"] = job.get("slot_id")
+            record["slot_cleanup"] = job.get("slot_cleanup")
+            for field in ("hardware_telemetry", "native_cache_receipt", "recording_error", "proof_error"):
+                if field in job:
+                    record[field] = job[field]
+        self._attach_run_manifest(record, run, binding, job)
         path = self.state_dir / "runs" / (run["id"] + ".json")
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix("." + uuid.uuid4().hex + ".tmp")
         temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(path)
+
+    def _native_cache_receipt_from_logs(self, run, job):
+        receipt = (job or {}).get("native_cache_receipt")
+        if isinstance(receipt, dict) and receipt.get("hit") is True and receipt.get("cache_key"):
+            return receipt, None
+        execution_id = (job or {}).get("execution_id") or run["id"]
+        root = self.state_dir / "runs" / execution_id
+        found = {}
+        try:
+            logs = sorted(root.glob("*/*.log"))[:64]
+        except OSError as exc:
+            return None, f"role log scan failed: {exc}"
+        for log in logs:
+            try:
+                lines = log.read_text(encoding="utf-8", errors="replace").splitlines()[-2048:]
+            except OSError as exc:
+                return None, f"role log read failed: {exc}"
+            for line in reversed(lines):
+                if not line.startswith("{"):
+                    continue
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                store = value.get("native_cache") if isinstance(value, dict) else None
+                if not isinstance(store, dict):
+                    continue
+                from mindie_coordinator.preparation_cache import native_cache_receipt
+                candidate = native_cache_receipt(store)
+                if re.fullmatch(r"[0-9a-f]{64}", str(candidate.get("cache_key") or "")):
+                    found[json.dumps(candidate, sort_keys=True)] = candidate
+        if len(found) > 1:
+            return None, "conflicting cold native-cache receipts in role logs"
+        if found:
+            return next(iter(found.values())), None
+        return (receipt, None) if isinstance(receipt, dict) and receipt.get("cache_key") else (None, None)
+
+    def _attach_run_manifest(self, record, run, binding, job):
+        """Project actual terminal facts; local evidence failure is isolated."""
+        if not job or job.get("state") not in JOB_TERMINAL:
+            return
+        status = {"succeeded": "passed", "failed": "failed", "cancelled": "cancelled",
+                  "inconclusive": "inconclusive", "timeout": "inconclusive"}.get(job["state"])
+        snapshots = run["intent"].get("snapshots") or {}
+        if status is None or not snapshots:
+            record["run_manifest_unavailable"] = "terminal state or fixed Git source identity is unavailable"
+            return
+        result = (job.get("remote") or {}).get("result") or {}
+        start, end = result.get("started_at"), result.get("finished_at")
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or end <= start:
+            record["run_manifest_unavailable"] = "remote command start/end timestamps are unavailable"
+            return
+        source_name = "vllm-ascend" if "vllm-ascend" in snapshots else next(iter(snapshots))
+        source_snapshot = (job.get("spec") or {}).get("source_snapshot") or {}
+        source_record = next((item for item in source_snapshot.get("records", [])
+                              if item.get("relpath") == source_name
+                              and item.get("commit") == snapshots[source_name]), None)
+        if source_record is None or not source_record.get("source_head"):
+            record["run_manifest_unavailable"] = "accepted original Git identity is unavailable; fixed snapshot SHA alone does not prove source_head or dirty state"
+            return
+        receipt, receipt_error = self._native_cache_receipt_from_logs(run, job)
+        if receipt_error:
+            record["run_manifest_error"] = {"artifact": "native-cache-receipt", "error": receipt_error}
+        proof = job.get("active_execution_proof") if isinstance(job.get("active_execution_proof"), dict) else None
+        root = (binding.get("endpoint") or {}).get("root", "")
+        profile_ref = root + "/.mindie-runtime/ready-profile.json" if root else None
+        try:
+            manifest = project_run_manifest(
+                run_id=job.get("execution_id") or run["id"],
+                code={"source_head": source_record["source_head"],
+                      "snapshot_commit": source_record["commit"],
+                      "dirty": bool(source_record["changed_paths"])},
+                created_at=run["created_at"], started_at=utc_from_epoch(start),
+                ended_at=utc_from_epoch(end), terminal_status=status,
+                environment=record["environment"],
+                workspace_snapshot={"snapshots": snapshots, "source_snapshot": source_snapshot},
+                command=[(job.get("spec") or {}).get("command") or ""],
+                topology={"host": (binding.get("endpoint") or {}).get("host"),
+                          "devices": record["resources"].get("devices") or []},
+                hardware_telemetry=job.get("hardware_telemetry"),
+                native_cache_receipt=receipt,
+                active_execution_proof=proof,
+                profile_summary_ref=profile_ref,
+            )
+            path = self.state_dir / "runs" / (run["id"] + ".run-manifest.json")
+            write_manifest(path, manifest)
+            record["run_manifest"] = {"path": str(path), "status": manifest["status"],
+                                      "run_id": manifest["run_id"]}
+            if proof is not None:
+                bench = bench_execution_evidence(manifest["active_execution_proof"],
+                                                 manifest_run_id=manifest["run_id"])
+                bench_path = self.state_dir / "runs" / (run["id"] + ".bench-execution-evidence.json")
+                bench_path.write_text(json.dumps(bench, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                record["bench_execution_evidence"] = str(bench_path)
+        except TimeoutError as exc:
+            record["run_manifest_error"] = {"artifact": "run-manifest", "error": str(exc)[:500], "timeout": True}
+        except (OSError, ValueError) as exc:
+            record["run_manifest_error"] = {"artifact": "run-manifest", "error": str(exc)[:500]}
 
     @contextlib.contextmanager
     def _run_operation(self, run, operation):
@@ -760,12 +872,24 @@ class RuntimePool(ManagedExecution):
                     run["state"] = "uncertain" if run["epoch"] is not None else "pending"
                 run["error"] = str(exc)[:500]
             run["last_poll"] = self.clock()
-            with self.lock, self.transaction() as db:
-                previous = self.get(db, "run", run_id)
-                self.put(db, "run", run)
-                if (previous["state"], previous.get("error")) != (run["state"], run.get("error")):
-                    self.event(db, owner, "run-state", run=run_id, state=run["state"], error=run.get("error"))
-            self.export_execution_record(run, binding)
+            try:
+                with self.lock, self.transaction() as db:
+                    previous = self.get(db, "run", run_id)
+                    self.put(db, "run", run)
+                    if (previous["state"], previous.get("error")) != (run["state"], run.get("error")):
+                        self.event(db, owner, "run-state", run=run_id, state=run["state"], error=run.get("error"))
+            except (OSError, sqlite3.Error) as exc:
+                if run["state"] not in TERMINAL:
+                    raise
+                run["recording_error"] = {"artifact": "lease-state", "error": str(exc)[:500],
+                                          "timeout": isinstance(exc, TimeoutError)}
+                return run
+            try:
+                self.export_execution_record(run, binding)
+            except TimeoutError as exc:
+                run["recording_error"] = {"artifact": "managed-run", "error": str(exc)[:500], "timeout": True}
+            except (OSError, sqlite3.Error) as exc:
+                run["recording_error"] = {"artifact": "managed-run", "error": str(exc)[:500]}
             return run
 
     def reconcile(self, owner: str, run_id: str, reason: str, *, evidence: str = "", force_release: bool = False):

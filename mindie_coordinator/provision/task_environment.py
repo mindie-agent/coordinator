@@ -207,6 +207,8 @@ def prepare_task_environment(
         "user": (donor.get("endpoint") or {}).get("user") or "root",
         "root": root,
         "cwd": root,
+        **({"container": (donor.get("endpoint") or {})["container"]}
+           if (donor.get("endpoint") or {}).get("container") else {}),
     }
     spec = {
         "user": user,
@@ -288,7 +290,8 @@ def prepare_task_environment(
     if checkout_session:
         from mindie_coordinator.backend import PreparedNativeView
         if isinstance(prepared, PreparedNativeView):
-            return pool._bind_prepared(runtime_id, spec, user, checkout_session, checkout_request, prepared.attestation)
+            return pool._bind_prepared(runtime_id, spec, user, checkout_session, checkout_request,
+                                       prepared.attestation, native_cache_receipt=prepared.native_cache_receipt)
         return pool._register_checkout(runtime_id, spec, user, checkout_session, checkout_request)
     return pool.register(runtime_id, spec)
 

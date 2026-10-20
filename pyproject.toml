@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mindie-coordinator"
-version = "0.5.3"
+version = "0.6.0"
 description = "Local MindIE coordinator: task stdio MCP and host NPU allocation"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@1b5a0eeb79d498c39002fc1853271c17e0f26e66",
-    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@a6649222aae4851deec5774513f8319aece09051",
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@6460cde3a50a7f91c9ded38557a7f921654f0c6a",
+    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@c3af104c36582c675a6dcd368637db7c60b28afd",
     "setuptools-scm>=8",
 ]
 
@@ -27,6 +27,9 @@ Homepage = "https://github.com/mindie-agent/coordinator"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mindie_coordinator"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/mindie_coordinator", "/tests", "/benchmarks", "/docs", "/README.md", "/README.en.md", "/AGENTS.md", "/LICENSE", "/pyproject.toml"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
