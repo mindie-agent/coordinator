@@ -1,0 +1,19 @@
+mindie_coordinator/managed_execution.py
+  s_d737ad21458d6c::t_2b9bd7ce09ca98 356
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cc883330a2dfcaebd91c768b86f124833cf96940",
+  "prompts": {},
+  "sessions": {
+    "s_d737ad21458d6c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15708-c6bc-7b41-a0c4-4c573d98441e",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "fan2956 <zhoufan53@huawei.com>"
+    }
+  }
+}
