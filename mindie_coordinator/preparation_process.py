@@ -1,4 +1,10 @@
-"""Durable remote-dev ownership for coordinator preparation commands."""
+"""Durable remote-dev ownership for coordinator preparation commands.
+
+[Role] Own preparation supervisors, output cursors and optional host CPU leases.
+[Invariants] Persist identities before dispatch; no uncertain command is replayed.
+[Timeouts & Locks] Bounded remote exchanges and stop drain; no lock spans output waits.
+[Side-Effect Policy] Retain receipts and release CPU capacity only after process quiet.
+"""
 from __future__ import annotations
 
 import json
@@ -45,7 +51,7 @@ def _remember(record, observation, save):
     save(record)
 
 
-def stop_preparation_process(record, save, *, force=False, drain_seconds=10):
+def stop_preparation_process(record, save, *, force=False, drain_seconds=10, lease_request=None, cleanup=None):
     """Stop only the persisted owned job; uncertainty never means completion."""
     try:
         observation = control(record["endpoint"], record["job_id"], "stop", force=force)
@@ -55,7 +61,8 @@ def stop_preparation_process(record, save, *, force=False, drain_seconds=10):
             time.sleep(0.1)
             observation = control(record["endpoint"], record["job_id"], "status")
             _remember(record, observation, save)
-        return bool(observation.get("quiet"))
+        from mindie_coordinator.compile_lease import finish_compile_lease
+        return bool(observation.get("quiet")) and finish_compile_lease(record, save, request=lease_request, cleanup=cleanup)
     except Exception as exc:
         _remember(record, {"state": "uncertain", "quiet": False, "error": str(exc)[:500]}, save)
         return False
@@ -63,7 +70,7 @@ def stop_preparation_process(record, save, *, force=False, drain_seconds=10):
 
 class PreparationProcess:
     def __init__(self, endpoint, step, save, cancel_requested, *, timeout_seconds=7200,
-                 setup=(), bootstrap_root=None):
+                 setup=(), bootstrap_root=None, compile_lease=None):
         self.endpoint = dict(endpoint)
         self.step = step
         self.save = save
@@ -71,6 +78,7 @@ class PreparationProcess:
         self.timeout_seconds = timeout_seconds
         self.setup = list(setup)
         self.bootstrap_root = bootstrap_root
+        self.compile_lease = compile_lease
 
     @observed_operation("preparation.command", component="mindie-coordinator")
     def run(self, script, *, on_output):
@@ -95,6 +103,8 @@ class PreparationProcess:
         save_record(record)
         # A lost reply retains this exact job, never a second bootstrap/reset.
         self.setup = []
+        if self.compile_lease:
+            self.compile_lease.acquire(record, save_record, self.cancel_requested)
         pending = {"stdout": "", "stderr": ""}
 
         def emit(observation, final=False):
@@ -123,20 +133,39 @@ class PreparationProcess:
                                   max_bytes=32768, yield_time_ms=wait, wait_for_exit=True)
             emit(observation)
             _remember(record, observation, save_record)
+            if self.compile_lease and not observation.get("quiet"):
+                self.compile_lease.heartbeat(record, save_record)
             return observation
 
         try:
-            observation = control(endpoint, record["job_id"], "launch", spec={
+            specification = {
                 "command": command, "cwd": endpoint["cwd"], "env": {},
                 "timeout_seconds": self.timeout_seconds, "interactive": False,
-            }, authorization={}, stdout_offset=record["stdout_offset"],
-                stderr_offset=record["stderr_offset"], max_bytes=32768, yield_time_ms=1000,
-                wait_for_exit=True)
+            }
+            if self.compile_lease:
+                from mindie_coordinator.execution_slots import slot_environment, slot_preamble
+                record["slot_id"] = record["job_id"]
+                save_record(record)
+                specification["command"] = slot_preamble(record["job_id"]) + "\n" + command
+                specification["env"] = {**slot_environment(record["job_id"]), "ASCEND_RT_VISIBLE_DEVICES": ""}
+                observation = control(endpoint, record["job_id"], "prepare", spec=specification)
+                _remember(record, observation, save_record)
+                if observation.get("state") != "prepared":
+                    raise PreparationUncertain("compile supervisor was not prepared; start gate stays closed")
+                authorization = self.compile_lease.activate(record, observation, save_record)
+                observation = control(endpoint, record["job_id"], "go", authorization=authorization)
+            else:
+                observation = control(endpoint, record["job_id"], "launch", spec=specification,
+                    authorization={}, stdout_offset=record["stdout_offset"],
+                    stderr_offset=record["stderr_offset"], max_bytes=32768, yield_time_ms=1000,
+                    wait_for_exit=True)
             emit(observation)
             _remember(record, observation, save_record)
             while True:
                 if self.cancel_requested():
-                    if not stop_preparation_process(record, save_record):
+                    if not stop_preparation_process(record, save_record,
+                            lease_request=self.compile_lease.request if self.compile_lease else None,
+                            cleanup=self.compile_lease.cleanup if self.compile_lease else None):
                         raise PreparationUncertain("preparation stop has not verified quiet; retained job can be stopped again")
                     while True:
                         observation = exchange(0)
@@ -152,6 +181,10 @@ class PreparationProcess:
                     code = result.get("exit_code")
                     if code is None:
                         raise PreparationUncertain("quiet preparation process has no command exit receipt")
+                    if self.compile_lease:
+                        from mindie_coordinator.compile_lease import finish_compile_lease
+                        finish_compile_lease(record, save_record, request=self.compile_lease.request,
+                                             cleanup=self.compile_lease.cleanup)
                     return RemoteCompleted(int(code), "", "", timed_out=False)
                 observation = exchange()
         except (PreparationCancelled, PreparationUncertain):

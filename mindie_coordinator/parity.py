@@ -131,7 +131,10 @@ def materialize_command(
 
 def _write_materialized_build_source(root, data):
     """Publish fixed SCM/build metadata only after complete source materialization."""
-    import json, os, tempfile, time
+    import json
+    import os
+    import tempfile
+    import time
     from pathlib import Path
     started = time.monotonic()
     directory = Path(root) / '.mindie-runtime'
@@ -193,7 +196,8 @@ def materialize_fixed_sources(*, workspace_id: str, endpoint: dict, source_snaps
             child_path = validate_relative_posix_path(child['path'], label='fixed submodule path')
             if str(PurePosixPath(record.relpath) / child_path) not in seen:
                 raise ValueError('fixed source descriptor is missing a submodule')
-    container = SshEndpoint(host=endpoint['host'], port=int(endpoint['port']), user=endpoint['user'])
+    container = SshEndpoint(host=endpoint['host'], port=int(endpoint['port']), user=endpoint['user'],
+                            container=endpoint.get('container'))
     request = {'root': root, 'source_id': source_snapshot['id'],
                'carrier_ref': f'refs/parity/{workspace_id}/transport-carrier',
                'records': [{'relpath': row.relpath, 'commit': row.commit, 'tree': row.tree,
@@ -299,7 +303,8 @@ def materialize_fixed_sources(*, workspace_id: str, endpoint: dict, source_snaps
             # Git owns its receive process/atomic refs; never kill or delete a
             # shared mirror to recover a failed transfer.
             started = time.monotonic()
-            git(repo, ['push', '--porcelain', '--atomic', git_remote_url(container, mirror),
+            transport_options = ['-c', 'protocol.ext.allow=always'] if container.container else []
+            git(repo, [*transport_options, 'push', '--porcelain', '--atomic', git_push_url(container, mirror),
                        f'{record.commit}:refs/mindie/snapshots/{record.commit}',
                        f'+{carrier}:{request["carrier_ref"]}'],
                 env=git_ssh_environment(container), timeout=DEFAULT_GIT_TRANSPORT_TIMEOUT_SECONDS)
@@ -1001,6 +1006,23 @@ def git_remote_url(container: SshEndpoint, mirror_path: str) -> str:
     return f'ssh://{user}@{host}:{container.port}{path}'
 
 
+def git_push_url(container: SshEndpoint, mirror_path: str) -> str:
+    """Push cold objects through the existing container selector, not host SSH.
+
+    A pinned existing container may have no published SSH port. The normal
+    remote URL remains the authority for ls-remote/fetch; this ext transport
+    only supplies Git's receive-pack path for a cold push.
+    """
+    if not container.container:
+        return git_remote_url(container, mirror_path)
+    path = validate_absolute_posix_path(mirror_path, label='mirror path')
+    prefix = ["ssh", "-T", "-p", str(container.port), "-o", "BatchMode=yes",
+              "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+              f"{container.user}@{container.host}", "docker", "exec", "-i",
+              container.container, "git", "receive-pack", path]
+    return 'ext::' + shlex.join(prefix)
+
+
 def git_ssh_environment(container: SshEndpoint) -> dict[str, str]:
     from remote_dev.core.endpoint import Endpoint
     from remote_dev.core.ssh_transport import ssh_base_cmd
@@ -1657,7 +1679,9 @@ def runtime_install_step_script(
             inspect.getsource(runtime_profile.compiled_opc_recipe),
             'import sys',
             'build_incremental_kernel(Path(sys.argv[1]), compile_recipe=lambda root, plan, env: '
-            'compile_kernel_recipe(root, plan, env, read_recipe=compiled_opc_recipe))',
+            'compile_kernel_recipe(root, plan, env, read_recipe=compiled_opc_recipe, '
+            'content_metadata=(metadata := incremental_content_metadata(plan)), '
+            'content_cache=(Path("/tmp/mindie-native-cache/kernel") if metadata else None)))',
             'MINDIE_NATIVE_INCREMENTAL',
         ])
     elif step == 'install-vllm-ascend':

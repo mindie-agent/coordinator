@@ -201,6 +201,12 @@ run = client.run(
 | `mindie_finish` | `TaskClient.finish()` | 结束当前任务，把名下还在跑的受管进程全部停掉，并归还所有运行环境绑定与 NPU 租约 |
 | `mindie_message` | `TaskClient.message()` | 当排队等卡看到队友也在用机器时（`coordination_peers`），直接给对方的任务发一条离线协调留言或回复消息 |
 
+### 3. 编译槽（`compile slots`）、原生构建缓存池与 `RunManifest` 边界
+
+- **两阶段租约与 CPU 编译槽（`compile slots`）**：宿主机 `HostQueue` 将 CPU 编译槽与物理 NPU 计时租约分离管理——不同任务可并行准备和编译，同一物理 NPU 的受管执行仍按独占租约仲裁。
+- **内容寻址原生构建缓存池（`native_cache_pool` / `preparation_cache` / `native_kernel_recipe`）**：按 `sha256(csrc 源码树 + CANN 版本 + SoC 型号 + Python ABI + 编译参数)` 对原生扩展产物进行跨工位内容寻址复用并记录 `native_cache_receipt`。**当前已完成实机并行验收的范围为 CPU C++ 扩展（`torch.utils.cpp_extension`），不声称已完成完整 `AscendC` 算子工程的端到端编译池验收**。
+- **已接受源码身份与 `RunManifest` 边界（`accepted-source RunManifest`）**：[`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) 强制校验每个源码项同时具备非空的 `source_head` 与 `snapshot_commit` 已接受源码身份，并在保持 Run Manifest v1 向后兼容的前提下按需记录 `hardware_telemetry`、`native_cache_receipt`、`active_execution_proof` 与 `profile_summary_ref` 扩展证据。
+
 ---
 
 ## 文档导航
@@ -225,10 +231,12 @@ run = client.run(
 | `mindie_coordinator/fleet_probe.py` | 面向 Agent 的单趟无代理 SSH 昇腾 NPU、容器与共享权重盘探测及容量排序引擎 |
 | `mindie_coordinator/task_client.py` | Python `TaskClient` SDK |
 | `mindie_coordinator/host_queue.py` | 宿主机 NPU 排队分配器的公共 Python API |
-| `mindie_coordinator/host/` | 零第三方依赖的宿主机 NPU 与端口仲裁模块（通过 SSH 下发到物理机执行） |
+| `mindie_coordinator/host/` | 零第三方依赖的宿主机 NPU、端口与编译槽仲裁模块（通过 SSH 下发到物理机执行） |
 | `mindie_coordinator/prepare_runtime.py` | 容器内运行环境校验、算子构建缓存复用与发布 |
+| `mindie_coordinator/preparation_cache.py` | 内容寻址原生构建缓存池（`native_cache_pool`）与跨工位产物复用 |
+| `mindie_coordinator/native_kernel_recipe.py` | 原生扩展构建与执行存在性探测配方（当前实机并行验收范围为 CPU C++ 扩展） |
 | `mindie_coordinator/parity.py` | 本地 Git 工作树快照打包与远端容器增量同步 |
-| `mindie_coordinator/run_manifest.py` | 执行清单（Run Manifest v1）与代码版本身份记录 |
+| `mindie_coordinator/run_manifest.py` | 执行清单（Run Manifest v1）、已接受源码版本身份（`source_head`/`snapshot_commit`）与扩展证据记录 |
 | `docs/` | 中英双语生命周期与工具配置文档 |
 | `tests/` | 单元测试套件（本地即可运行，无需物理 NPU 或 Docker） |
 

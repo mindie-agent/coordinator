@@ -19,7 +19,7 @@ and peer coordination messages under `/tmp/mindie-npu-coordinator/v1`.
   the next exclusive admission still requires idle devices.
 
 [Timeouts & Locks]
-- SQLite connection uses `WAL`, `synchronous=FULL`, `busy_timeout=30000`, and
+- SQLite connection uses `WAL`, `synchronous=FULL`, `busy_timeout=5000`, and
   `BEGIN IMMEDIATE` transactions.
 - Subprocess probes (`docker inspect`, `docker top`, `ss`, `npu-smi`) use
   bounded timeouts (`5s`–`15s`).
@@ -74,6 +74,7 @@ DEFAULT_GRANT_TTL_SECONDS = 180
 DEFAULT_START_TTL_SECONDS = 180
 DEFAULT_HEARTBEAT_TTL_SECONDS = 120
 DEFAULT_ESTIMATED_DURATION_SECONDS = 3600
+DEFAULT_MAX_COMPILE_SLOTS = 4
 HBM_BUSY_THRESHOLD_MB = 4096
 JOB_TOKEN_ENV = "REMOTE_DEV_JOB_TOKEN"
 
@@ -579,18 +580,23 @@ class NpuCoordinator:
         *,
         clock: Callable[[], float] = time.time,
         expected_epoch: str | None = None,
+        max_compile_slots: int | None = None,
     ) -> None:
         self.state_dir = Path(state_dir)
         self.db_path = self.state_dir / "coordinator.sqlite3"
         self.clock = clock
         self.expected_epoch = expected_epoch
+        self.max_compile_slots = (int(os.environ.get("MINDIE_COORDINATOR_MAX_COMPILE_SLOTS", DEFAULT_MAX_COMPILE_SLOTS))
+                                  if max_compile_slots is None else max_compile_slots)
+        if type(self.max_compile_slots) is not int or self.max_compile_slots < 1:
+            raise CoordinationError("max_compile_slots must be a positive integer")
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.db_path), timeout=30, isolation_level=None)
+        connection = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         return connection
@@ -1151,10 +1157,9 @@ class NpuCoordinator:
         for row in deadline_rows:
             devices = set(_load_devices(row["granted_devices"]))
             still_busy = (
-                busy is None
-                or visible is None
-                or not devices.issubset(visible)
-                or (bool(devices & busy) and not row["allow_external_busy"])
+                (bool(devices) and (busy is None or visible is None
+                    or not devices.issubset(visible)
+                    or (bool(devices & busy) and not row["allow_external_busy"])))
                 or process_guard_busy(row["process_guard"])
             )
             next_state = "orphaned_busy" if still_busy else "expired"
@@ -1188,10 +1193,9 @@ class NpuCoordinator:
         for row in heartbeat_rows:
             devices = set(_load_devices(row["granted_devices"]))
             still_busy = (
-                busy is None
-                or visible is None
-                or not devices.issubset(visible)
-                or (bool(devices & busy) and not row["allow_external_busy"])
+                (bool(devices) and (busy is None or visible is None
+                    or not devices.issubset(visible)
+                    or (bool(devices & busy) and not row["allow_external_busy"])))
                 or unguarded_cpu_process(row)
                 or unguarded_shared_process(row)
                 or process_guard_busy(row["process_guard"])
@@ -1209,23 +1213,22 @@ class NpuCoordinator:
             changes.append({"task_id": row["task_id"], "from": "active", "to": next_state})
             self._event(connection, "heartbeat-expired", task_id=row["task_id"], data={"to": next_state}, now=now)
 
-        if busy is not None and visible is not None:
-            for row in connection.execute("SELECT * FROM tasks WHERE state='orphaned_busy'").fetchall():
-                devices = set(_load_devices(row["granted_devices"]))
-                # Service-port rows stay until an explicit release confirms the
-                # listener is gone. Age and occupancy alone are not enough.
-                if self._task_service_ports(connection, row["task_id"]):
-                    continue
-                if (devices.issubset(visible) and (not devices.intersection(busy) or row["allow_external_busy"])
-                        and not unguarded_cpu_process(row) and not unguarded_shared_process(row)
-                        and not process_guard_busy(row["process_guard"])):
-                    connection.execute(
-                        "UPDATE tasks SET state='released', process_guard=NULL, updated_at=?, message=? WHERE task_id=?",
-                        (now, "orphaned shared task has no pending owned process" if row["allow_external_busy"]
-                         else "orphaned task hardware is now free", row["task_id"]),
-                    )
-                    changes.append({"task_id": row["task_id"], "from": "orphaned_busy", "to": "released"})
-                    self._event(connection, "orphaned-task-released", task_id=row["task_id"], now=now)
+        for row in connection.execute("SELECT * FROM tasks WHERE state='orphaned_busy'").fetchall():
+            devices = set(_load_devices(row["granted_devices"]))
+            # CPU reclamation needs process evidence, not unrelated hardware
+            # visibility. Port owners still need an explicit listener check.
+            if self._task_service_ports(connection, row["task_id"]):
+                continue
+            hardware_free = not devices or (busy is not None and visible is not None
+                and devices.issubset(visible) and (not devices.intersection(busy) or row["allow_external_busy"]))
+            if (hardware_free and not unguarded_cpu_process(row) and not unguarded_shared_process(row)
+                    and not process_guard_busy(row["process_guard"])):
+                connection.execute(
+                    "UPDATE tasks SET state='released', process_guard=NULL, updated_at=?, message=? WHERE task_id=?",
+                    (now, "orphaned task has no pending owned process or device", row["task_id"]),
+                )
+                changes.append({"task_id": row["task_id"], "from": "orphaned_busy", "to": "released"})
+                self._event(connection, "orphaned-task-released", task_id=row["task_id"], now=now)
 
         for row in connection.execute(
             "SELECT * FROM tasks WHERE state='active' AND expected_end IS NOT NULL AND expected_end<=?",
@@ -1552,12 +1555,13 @@ class NpuCoordinator:
                 """
                 SELECT * FROM tasks
                 WHERE state='queued' AND not_before<=? AND latest_start>?
+                  AND (requested_count=0)=?
                 ORDER BY priority DESC, submitted_at ASC, task_id ASC
                 LIMIT 1
                 """,
-                (now, now),
+                (now, now, int(row["requested_count"] == 0)),
             ).fetchone()
-            if int(row["requested_count"]) and (head is None or head["task_id"] != task_id):
+            if head is None or head["task_id"] != task_id:
                 return {
                     "status": "waiting",
                     "reason": "strict_fifo",
@@ -1565,6 +1569,15 @@ class NpuCoordinator:
                     "task": self._serialize_task(row),
                     "gc": changes,
                 }
+            if int(row["requested_count"]) == 0:
+                active = connection.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE requested_count=0 "
+                    "AND state IN ('granted','starting','active','orphaned_busy')"
+                ).fetchone()[0]
+                if active >= self.max_compile_slots:
+                    return {"status": "waiting", "reason": "compile_slots_full",
+                            "max_compile_slots": self.max_compile_slots, "active_compile_slots": active,
+                            "task": self._serialize_task(row), "gc": changes}
             estimated_end = now + int(row["estimated_duration_seconds"])
             available = self._available_devices(
                 connection,
@@ -2020,6 +2033,7 @@ class NpuCoordinator:
             "state_dir": str(self.state_dir),
             "database": str(self.db_path),
             "ephemeral": True,
+            "max_compile_slots": self.max_compile_slots,
             "tasks": [self._serialize_task(row) for row in tasks],
             "holds": [self._serialize_hold(row) for row in holds],
             "ports": [item for item in (self._serialize_port(row) for row in port_rows) if item is not None],

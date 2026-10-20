@@ -279,7 +279,7 @@ class TaskClient:
 
     @observed_tool("mindie.execution", component="mindie-coordinator")
     def observe(self, execution_id=None, action="status", force=False, role=None, refresh=True, *, service=None,
-                until="released", timeout_seconds=30, section="all", path=None):
+                until="released", timeout_seconds=30, section="all", path=None, run_id=None):
         """Read status/logs/target/evidence, wait for, or stop one owned execution.
 
         Pass the run reply's execution_id, or a task-scoped service name.
@@ -295,6 +295,10 @@ class TaskClient:
         """
         if action not in {"status", "tail", "stop", "target", "wait", "evidence"}:
             raise ValueError("unsupported execution action")
+        if run_id is not None:
+            if execution_id is not None or service is not None:
+                raise ValueError("run_id identifies the execution; do not combine execution references")
+            execution_id = run_id
         execution_id = self.resolve_execution(execution_id, service=service)
         if execution_id is None:
             return {"state": "not_found", "service": service}
@@ -306,7 +310,7 @@ class TaskClient:
                                              role=role, section=section, path=path)
         if action == "target":
             target = self.target(execution_id)
-            reply = {"execution_id": execution_id, "state": target["state"], "target": target,
+            reply = {"execution_id": execution_id, "run_id": execution_id, "state": target["state"], "target": target,
                      "service_port": target.get("service_port"), "live": target.get("live")}
             if role:
                 reply = self.coordinator.advance(str(self.store.state_dir), self.user, execution_id,

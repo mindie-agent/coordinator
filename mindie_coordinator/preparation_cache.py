@@ -9,11 +9,22 @@ bundle store/restore/rollback (`store_shared_native`, `restore_shared_native`,
 [Invariants]
 - Published donor roots are never mutated; venvs stay at their original absolute
   path while native reuse overlays copied package outputs and generated `.dist-info`.
+- Native bytes also live in the content-addressed `native_cache_pool` keyed by
+  `sha256(csrc tree + CANN + SoC + Python ABI + compile flags)`. A hit links the
+  pool entry into the new execution view; the verified immutable bundle remains
+  the authority and a mutated/corrupt pool entry is never trusted by name.
+- Remote concatenated callers must exec `native_cache_pool.py` before this
+  module so its pool functions are present in the shared namespace.
 - `discard_shared_native` rolls back only cache-created files listed in
   `.mindie-runtime/shared-native.json` before execution starts.
+- Content pool publication copies the verified bundle first, so an in-place write
+  through a writable view can only damage the replaceable pool entry, never the
+  bundle. The next lookup verifies SHA-256 and republishes from the bundle.
 
 [Timeouts & Locks]
 - Shared cache index updates use `tempfile.mkstemp` + atomic `os.replace`.
+- Content entries publish into a private `mkdtemp` directory and become visible
+  with one `os.rename`; no partially published key is ever used.
 
 [Side-Effect Policy]
 - Writes only inside the new execution view root or `/tmp/mindie-native-cache`.
@@ -31,6 +42,33 @@ import sys
 import sysconfig
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+# The remote builder executes these modules in one namespace. Declare that
+# cross-module contract to static tools without importing deployment helpers locally.
+if TYPE_CHECKING:
+    from .build_inputs import BUILD_INPUT_ENV_KEYS, VLLM_ASCEND_REINSTALL_PATTERNS, submodule_content
+    from .native_incremental import kernel_rebuild_plan, native_tree_entries
+    from .runtime_profile import (
+        _publish_captured_bundle, build_key, build_toolchain_from_logs, checked_file,
+        digest, file_digest, native_compatibility_key, native_compatibility_receipt,
+        native_import_receipt, native_import_smoke, native_source_mapping,
+        native_vendor_launch_environment, native_vendor_paths, profile_key, publish,
+        verified_preparation, verify, verify_environment, verify_native_compatibility,
+    )
+
+try:  # Local package use. Remote concatenation must exec native_cache_pool first.
+    from .native_cache_pool import (
+        NATIVE_CONTENT_MANIFEST as NATIVE_CONTENT_MANIFEST,
+        NATIVE_CONTENT_SCHEMA as NATIVE_CONTENT_SCHEMA,
+        _drop_native_content, _link_or_copy, _read_native_content,
+        native_cache_receipt as native_cache_receipt,
+        native_content_key,
+        native_content_key_material as native_content_key_material,
+        publish_native_content,
+    )
+except (ImportError, KeyError):  # pragma: no cover - concatenated namespace
+    pass
 
 
 def safe_destination(root: Path, relative: str) -> Path:
@@ -117,13 +155,17 @@ def copy_native_view(root: Path, source_root: Path, manifest: dict, versions: di
     build_info = 'vllm-ascend/vllm_ascend/_build_info.py'
     if (source_root / build_info).is_file() and build_info not in manifest['files']:
         raise ValueError('generated build metadata has no verified donor hash: ' + build_info)
-    for name, expected in manifest['files'].items():
+    for name, row in manifest['files'].items():
         target = safe_destination(root, name)
         if target.exists():
+            if target.is_file() and file_digest(target) == row['sha256']:
+                # Fixed source materialization may already contain an identical
+                # generated-looking config file. Never overwrite a differing file.
+                continue
             raise ValueError('native output already exists in fresh view: ' + name)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(checked_file(source_root, name), target)
-        if not verify_donor and file_digest(checked_file(root, name)) != expected['sha256']:
+        if not verify_donor and file_digest(checked_file(root, name)) != row['sha256']:
             raise ValueError('copied artifact differs from verified donor hash: ' + name)
     import time
     metadata_started = time.monotonic()
@@ -137,8 +179,6 @@ def copy_native_view(root: Path, source_root: Path, manifest: dict, versions: di
 
 
 SHARED_NATIVE_CACHE = '/tmp/mindie-native-cache'
-
-
 def shared_input_key(preparation: dict, image_digest: str) -> str:
     """One lookup from fixed inputs; a first-use donor has no measured profile."""
     if not image_digest or not all(preparation.get('native', {}).get(name) for name in ('vllm', 'vllm-ascend')):
@@ -162,14 +202,20 @@ def store_shared_native(root: Path, cache: Path) -> dict:
     manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text())
     manifest = _with_distribution_metadata(manifest)
     bundle = publish(root, cache / 'bundles', manifest)
-    return _index_native_bundle(cache, manifest, bundle)
+    result = _index_native_bundle(cache, manifest, bundle)
+    content = publish_native_content(bundle, cache, manifest)
+    return {**result, 'native_content': content, 'cache_key': content['cache_key'],
+            'linked_files': 0}
 
 
 def _store_captured_native(root: Path, cache: Path, manifest: dict, timings: dict) -> dict:
     """Only the managed capture's current stack supplies this fresh manifest."""
     manifest = _with_distribution_metadata(manifest)
     bundle = _publish_captured_bundle(root, cache / 'bundles', manifest, timings=timings)
-    return _index_native_bundle(cache, manifest, bundle)
+    result = _index_native_bundle(cache, manifest, bundle)
+    content = publish_native_content(bundle, cache, manifest)
+    return {**result, 'native_content': content, 'cache_key': content['cache_key'],
+            'linked_files': 0}
 
 
 def _with_distribution_metadata(manifest: dict) -> dict:
@@ -293,24 +339,62 @@ def revalidate_shared_native(root: Path, cache: Path) -> dict:
 
 def restore_shared_native(root: Path, cache: Path, preparation: dict, image_digest: str, versions: dict,
                           machine_type: str | None = None, candidate: dict | None = None) -> dict:
-    """Copy an ABI-compatible cached bundle into this execution's own sources."""
+    """Map an ABI-compatible cached bundle into this execution's own sources."""
     key = shared_input_key(preparation, image_digest)
-    if candidate is None:
-        index = cache / (key + '.json')
-        if not index.is_file():
-            index = cache / ('base-' + shared_base_key(preparation, image_digest) + '.json')
-            if not index.is_file():
-                return {'status': 'miss', 'reason': 'no matching compiled outputs'}
-        pointer = json.loads(index.read_text())
-    else:
+    try:
+        requested_content_key = native_content_key(preparation)
+    except (TypeError, ValueError):
+        requested_content_key = None
+    material_root = None
+    content = None
+    pointer = None
+    if candidate is None and requested_content_key is not None:
+        entry = cache / requested_content_key
+        try:
+            content = _read_native_content(entry, requested_content_key)
+        except ValueError:
+            # Malformed replaceable entry: discard it and fall back to the
+            # discovery index / verified bundle instead of trusting its name.
+            _drop_native_content(cache, requested_content_key)
+            content = None
+        if content is not None:
+            pointer = {'bundle': content['metadata'].get('bundle'),
+                       'native_key': (content['manifest'].get('preparation') or {}).get('native_key')}
+            bundle = cache / 'bundles' / str(pointer['bundle'])
+            bundle_manifest = (bundle / 'manifest.json').read_bytes()
+            if hashlib.sha256(bundle_manifest).hexdigest() != content['metadata']['bundle_manifest_sha256']:
+                raise ValueError('native content source bundle manifest changed')
+            manifest = content['manifest']
+            verify(bundle, manifest, check_environment=False)
+            try:
+                verify(entry, manifest, check_environment=False)
+            except ValueError:
+                # A writable view may have damaged this replaceable entry. Drop
+                # it and republish from the still-verified immutable bundle.
+                _drop_native_content(cache, requested_content_key)
+            else:
+                material_root = entry
+    if candidate is not None:
         # An export selects immutable content, never whichever donor happened
         # to overwrite the shared exact/base index before this restore.
         pointer = candidate
-    if not re.fullmatch('[0-9a-f]{64}', pointer.get('bundle', '')):
+    elif pointer is None:
+        index = cache / (key + '.json')
+        if not index.is_file():
+            index = cache / ('base-' + shared_base_key(preparation, image_digest) + '.json')
+        if index.is_file():
+            pointer = json.loads(index.read_text())
+        else:
+            return {'status': 'miss', 'reason': 'no matching compiled outputs',
+                    'cache_key': requested_content_key or '', 'linked_files': 0}
+    if not re.fullmatch('[0-9a-f]{64}', str(pointer.get('bundle', ''))):
         raise ValueError('invalid shared native cache pointer')
-    bundle = cache / 'bundles' / pointer['bundle']
-    manifest_bytes = (bundle / 'manifest.json').read_bytes()
-    manifest = json.loads(manifest_bytes)
+    if material_root is None:
+        bundle = cache / 'bundles' / pointer['bundle']
+        manifest_bytes = (bundle / 'manifest.json').read_bytes()
+        manifest = json.loads(manifest_bytes)
+    else:
+        manifest_bytes = (material_root / 'manifest.json').read_bytes()
     profile = manifest['profile']
     expected = verified_preparation(preparation, profile)
     baseline = manifest.get('preparation', {})
@@ -338,26 +422,49 @@ def restore_shared_native(root: Path, cache: Path, preparation: dict, image_dige
         entries = native_tree_entries(root / 'vllm-ascend', VLLM_ASCEND_REINSTALL_PATTERNS, submodule_content)
         plan = kernel_rebuild_plan(root, bundle, manifest, preparation, entries)
         if plan is None:
-            return {'status': 'miss', 'reason': 'native changes require a complete build'}
+            return {'status': 'miss', 'reason': 'native changes require a complete build',
+                    'cache_key': requested_content_key or '', 'linked_files': 0}
     verify_recipient_native_abi(profile)
     verify(bundle, manifest, check_environment=False)
     if 'vllm-ascend/vllm_ascend/_build_info.py' not in manifest['files']:
         raise ValueError('cached generated build metadata is missing')
     # Preflight all destinations before writing any cached output.
-    for name in manifest['files']:
-        if safe_destination(root, name).exists():
+    for name, row in manifest['files'].items():
+        target = safe_destination(root, name)
+        if target.exists():
+            if target.is_file() and file_digest(target) == row['sha256']:
+                continue
             raise ValueError('native output already exists in fresh view: ' + name)
+    if plan is not None:
+        cache_key = requested_content_key or native_content_key(baseline)
+        linked_files = 0
+    else:
+        cache_key = native_content_key(baseline)
+        if material_root is None:
+            publish_native_content(bundle, cache, manifest)
+            material_root = cache / cache_key
+            verify(material_root, manifest, check_environment=False)
+        linked_files = 0
     receipt = {'status': 'incremental' if plan else 'hit', 'native_key': expected['native_key'],
                'copied': list(manifest['files']), 'bundle': pointer['bundle'],
+               'cache_key': cache_key, 'linked_files': linked_files,
                'bundle_manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest()}
     marker = safe_destination(root, '.mindie-runtime/shared-native.json')
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps(receipt))
     try:
-        for name in manifest['files']:
+        for name, row in manifest['files'].items():
             target = safe_destination(root, name)
+            if target.is_file() and file_digest(target) == row['sha256']:
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(checked_file(bundle, name), target)
+            source = checked_file(material_root, name) if material_root is not None else checked_file(bundle, name)
+            if material_root is not None:
+                if _link_or_copy(source, target):
+                    linked_files += 1
+            else:
+                shutil.copy2(source, target)
+        receipt['linked_files'] = linked_files
         write_source_metadata(root, versions, manifest['distributions'])
         receipt['dependencies'] = recipient_dependencies(manifest['distributions'], profile)
         marker.write_text(json.dumps(receipt))
@@ -403,7 +510,11 @@ try:
         result = restore_shared_native(root, cache, args['preparation'], args['image_digest'], args['versions'],
                                        args.get('machine_type'), args.get('candidate'))
 except Exception as exc:
-    result = {'status': 'miss', 'reason': str(exc)}
+    result = {'status': 'miss', 'reason': str(exc), 'linked_files': 0}
+    try:
+        result['cache_key'] = native_content_key(args.get('preparation', {}))
+    except (TypeError, ValueError):
+        result['cache_key'] = ''
 if args['action'] == 'restore' and result.get('status') in {'hit', 'incremental'}:
     # Rollback owns this full list in shared-native.json. The coordinator
     # needs the outcome/compatibility facts, not every copied artifact path.

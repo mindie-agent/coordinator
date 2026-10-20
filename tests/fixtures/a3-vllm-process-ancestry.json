@@ -1,0 +1,245 @@
+{
+  "process": {
+    "ancestry": [
+      {
+        "cgroup": [
+          "12:devices:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "11:memory:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "10:hugetlb:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "9:perf_event:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "8:blkio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "7:pids:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "6:freezer:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "5:cpu,cpuacct:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "4:net_cls,net_prio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "3:rdma:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "2:cpuset:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "1:name=systemd:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": false,
+        "job_marker_present": false,
+        "job_marker_sha256": [],
+        "name": "VLLM::EngineCor",
+        "namespace_pids": [
+          144345,
+          213970
+        ],
+        "pid": 144345,
+        "ppid": 142918,
+        "start_ticks": "143340758"
+      },
+      {
+        "cgroup": [
+          "12:devices:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "11:memory:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "10:hugetlb:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "9:perf_event:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "8:blkio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "7:pids:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "6:freezer:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "5:cpu,cpuacct:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "4:net_cls,net_prio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "3:rdma:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "2:cpuset:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "1:name=systemd:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": true,
+        "job_marker_present": true,
+        "job_marker_sha256": [
+          "b76bc8652b7b073bb137181aab419452c8bdeed91f7738eb43e8bcbac331024c"
+        ],
+        "name": "python3",
+        "namespace_pids": [
+          142918,
+          213938
+        ],
+        "pid": 142918,
+        "ppid": 142891,
+        "start_ticks": "143338653"
+      },
+      {
+        "cgroup": [
+          "12:devices:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "11:memory:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "10:hugetlb:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "9:perf_event:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "8:blkio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "7:pids:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "6:freezer:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "5:cpu,cpuacct:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "4:net_cls,net_prio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "3:rdma:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "2:cpuset:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "1:name=systemd:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": true,
+        "job_marker_present": true,
+        "job_marker_sha256": [
+          "b76bc8652b7b073bb137181aab419452c8bdeed91f7738eb43e8bcbac331024c"
+        ],
+        "name": "python3",
+        "namespace_pids": [
+          142891,
+          213936
+        ],
+        "pid": 142891,
+        "ppid": 142760,
+        "start_ticks": "143338630"
+      },
+      {
+        "cgroup": [
+          "12:devices:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "11:memory:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "10:hugetlb:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "9:perf_event:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "8:blkio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "7:pids:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "6:freezer:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "5:cpu,cpuacct:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "4:net_cls,net_prio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "3:rdma:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "2:cpuset:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "1:name=systemd:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": true,
+        "job_marker_present": true,
+        "job_marker_sha256": [
+          "b76bc8652b7b073bb137181aab419452c8bdeed91f7738eb43e8bcbac331024c"
+        ],
+        "name": "python3",
+        "namespace_pids": [
+          142760,
+          213935
+        ],
+        "pid": 142760,
+        "ppid": 3308077,
+        "start_ticks": "143338573"
+      },
+      {
+        "cgroup": [
+          "12:devices:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "11:memory:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "10:hugetlb:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "9:perf_event:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "8:blkio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "7:pids:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "6:freezer:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "5:cpu,cpuacct:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "4:net_cls,net_prio:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "3:rdma:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "2:cpuset:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9",
+          "1:name=systemd:/docker/1912f977b93ece604f27a83bc7e35ce34a58e31db8181b1f2e3f8bfb3b058fe9"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": false,
+        "job_marker_present": false,
+        "job_marker_sha256": [],
+        "name": "sleep",
+        "namespace_pids": [
+          3308077,
+          1
+        ],
+        "pid": 3308077,
+        "ppid": 3308058,
+        "start_ticks": "113669354"
+      },
+      {
+        "cgroup": [
+          "12:devices:/system.slice/docker.service",
+          "11:memory:/system.slice/docker.service",
+          "10:hugetlb:/",
+          "9:perf_event:/",
+          "8:blkio:/system.slice/docker.service",
+          "7:pids:/system.slice/docker.service",
+          "6:freezer:/system.slice/docker.service",
+          "5:cpu,cpuacct:/system.slice/docker.service",
+          "4:net_cls,net_prio:/",
+          "3:rdma:/",
+          "2:cpuset:/",
+          "1:name=systemd:/system.slice/docker.service"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": false,
+        "job_marker_present": false,
+        "job_marker_sha256": [],
+        "name": "containerd-shim",
+        "namespace_pids": [
+          3308058
+        ],
+        "pid": 3308058,
+        "ppid": 16985,
+        "start_ticks": "113669349"
+      },
+      {
+        "cgroup": [
+          "12:devices:/system.slice/docker.service",
+          "11:memory:/system.slice/docker.service",
+          "10:hugetlb:/",
+          "9:perf_event:/",
+          "8:blkio:/system.slice/docker.service",
+          "7:pids:/system.slice/docker.service",
+          "6:freezer:/system.slice/docker.service",
+          "5:cpu,cpuacct:/system.slice/docker.service",
+          "4:net_cls,net_prio:/",
+          "3:rdma:/",
+          "2:cpuset:/",
+          "1:name=systemd:/system.slice/docker.service"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": false,
+        "job_marker_present": false,
+        "job_marker_sha256": [],
+        "name": "containerd",
+        "namespace_pids": [
+          16985
+        ],
+        "pid": 16985,
+        "ppid": 16910,
+        "start_ticks": "11957"
+      },
+      {
+        "cgroup": [
+          "12:devices:/system.slice/docker.service",
+          "11:memory:/system.slice/docker.service",
+          "10:hugetlb:/",
+          "9:perf_event:/",
+          "8:blkio:/system.slice/docker.service",
+          "7:pids:/system.slice/docker.service",
+          "6:freezer:/system.slice/docker.service",
+          "5:cpu,cpuacct:/system.slice/docker.service",
+          "4:net_cls,net_prio:/",
+          "3:rdma:/",
+          "2:cpuset:/",
+          "1:name=systemd:/system.slice/docker.service"
+        ],
+        "identity_stable": true,
+        "job_marker_matches": false,
+        "job_marker_present": false,
+        "job_marker_sha256": [],
+        "name": "dockerd",
+        "namespace_pids": [
+          16910
+        ],
+        "pid": 16910,
+        "ppid": 1,
+        "start_ticks": "11951"
+      }
+    ],
+    "npu_smi": {
+      "memory_mb": 0,
+      "name": "VLLMEngineCor",
+      "pid": 144345
+    }
+  },
+  "provenance": {
+    "finished_wall_ns": 1792448010768333690,
+    "run_id": "profiler-online-v6-a3-68e0c9341e40407cb22d23804d64d98a",
+    "source": "private-source/online-v6-a3-identity.jsonl",
+    "source_sha256": "4692ef4d4328ad04330cd1f76c216f608c550f5feb4f8ab9630423c07d8d8988",
+    "started_wall_ns": 1792448010229334170
+  }
+}

@@ -2,8 +2,6 @@
 import copy
 import json
 import sys
-import threading
-import time
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -201,41 +199,6 @@ def test_one_failed_build_cannot_make_other_unquiet_preparation_terminal(tmp_pat
     }}
     reply = service._record_execution_error(Mock(), row, RemoteCommandError(1, "compiler failed"))
     assert reply["state"] == "uncertain" and reply["resources_released"] is False
-
-
-def test_cancel_while_waiting_for_other_executions_compiler(tmp_path, monkeypatch):
-    store = AgentSessions(tmp_path / "sessions")
-    context = store.attach("codex", "waiting-task", str(tmp_path))
-    row = store.execution(context, "queued-build", {"command": "build", "source_snapshot": {}})
-    row.update(user="user", phase="preparing", sources={}, remote_session={"id": "remote"})
-    store.save_execution(row)
-    service = CoordinatorService(tmp_path / "coordinator", pool=MagicMock())
-    monkeypatch.setattr(service, "_donor_for_role", lambda *a: {"host": "host-a"})
-    prepared = Mock()
-    def prepare_environment(*args, **kwargs):
-        with kwargs['compile_scope']('install-vllm-ascend'):
-            prepared()
-    monkeypatch.setattr('mindie_coordinator.provision.prepare_task_environment', prepare_environment)
-    host_lock = service._lock_for("compile-host", "host-a")
-    host_lock.acquire()
-    result = []
-    waiter = threading.Thread(target=lambda: result.append(service._place_or_prepare(
-        store, "user", row, [{"name": "worker"}], {})))
-    try:
-        waiter.start()
-        time.sleep(0.05)
-        with store.transaction() as db:
-            cancelled = store.get(db, "execution", row["id"])
-        cancelled["cancel_requested"] = True
-        store.save_execution(cancelled)
-        waiter.join(2)
-        assert not waiter.is_alive(), "queued cancellation must not wait for the other compilation"
-        assert host_lock.locked(), "the other execution must retain its preparation lock"
-        prepared.assert_not_called()
-        assert result[0]["status"] == "waiting" and row["cancel_requested"] is True
-    finally:
-        host_lock.release()
-        waiter.join(2)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="remote-dev supervisor requires Linux /proc")

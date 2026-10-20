@@ -1,0 +1,700 @@
+{
+  "source_run_id": "stage1-1cd637fea06e4e9d890e441b690129dc",
+  "source_files": {
+    "comparison-stage-projections.json": {
+      "path": "private-source/comparison-stage-projections.json",
+      "sha256": "b571076eb10d97aff845ee74cf47ede57c08129ca14d7dd4424594e81fad620b"
+    },
+    "dcmi-metrics.jsonl": {
+      "path": "private-source/dcmi-metrics.jsonl",
+      "sha256": "3559a08e8b3fa52760e02b4107298c73f411191e298f1a21e8ad223177592200"
+    },
+    "process-stream.jsonl": {
+      "path": "private-source/process-stream.jsonl",
+      "sha256": "6ea024daa908cb9f9f0ebd35e7edd1c9ce04117a281c47393c2d6aadbe590858"
+    }
+  },
+  "window": {
+    "end_ts": 1792429021.0821493,
+    "start_ts": 1792429019.5927708
+  },
+  "interval_ns": 200000000,
+  "samples": [
+    {
+      "sample_index": 1092,
+      "monotonic_ns": 1353500336686638,
+      "schedule_slip_ns": 62546,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 1393789,
+              "error": null,
+              "finished_at": "2026-10-19T16:56:59.562056+00:00",
+              "finished_at_ns": 1792429019562055888,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:56:59.560662+00:00",
+              "started_at_ns": 1792429019560662309,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 283594,
+              "error": null,
+              "finished_at": "2026-10-19T16:56:59.691312+00:00",
+              "finished_at_ns": 1792429019691311538,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:56:59.691028+00:00",
+              "started_at_ns": 1792429019691028284,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1093,
+      "monotonic_ns": 1353500536685488,
+      "schedule_slip_ns": 61396,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 1438651,
+              "error": null,
+              "finished_at": "2026-10-19T16:56:59.762100+00:00",
+              "finished_at_ns": 1792429019762099620,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:56:59.760661+00:00",
+              "started_at_ns": 1792429019760661139,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 318375,
+              "error": null,
+              "finished_at": "2026-10-19T16:56:59.893593+00:00",
+              "finished_at_ns": 1792429019893592691,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:56:59.893275+00:00",
+              "started_at_ns": 1792429019893274656,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1094,
+      "monotonic_ns": 1353500736687179,
+      "schedule_slip_ns": 63087,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 399826,
+              "error": null,
+              "finished_at": "2026-10-19T16:56:59.961066+00:00",
+              "finished_at_ns": 1792429019961065426,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:56:59.960666+00:00",
+              "started_at_ns": 1792429019960665790,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 295234,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.090263+00:00",
+              "finished_at_ns": 1792429020090263045,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.089968+00:00",
+              "started_at_ns": 1792429020089968091,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1095,
+      "monotonic_ns": 1353500936684830,
+      "schedule_slip_ns": 60738,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 342945,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.161003+00:00",
+              "finished_at_ns": 1792429020161002906,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.160660+00:00",
+              "started_at_ns": 1792429020160660311,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 273094,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.286214+00:00",
+              "finished_at_ns": 1792429020286213649,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.285941+00:00",
+              "started_at_ns": 1792429020285940805,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1096,
+      "monotonic_ns": 1353501136685500,
+      "schedule_slip_ns": 61408,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 363985,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.361024+00:00",
+              "finished_at_ns": 1792429020361024127,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.360661+00:00",
+              "started_at_ns": 1792429020360660352,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 1305768,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.491255+00:00",
+              "finished_at_ns": 1792429020491254960,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.489949+00:00",
+              "started_at_ns": 1792429020489949352,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1097,
+      "monotonic_ns": 1353501336684601,
+      "schedule_slip_ns": 60509,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 358215,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.561018+00:00",
+              "finished_at_ns": 1792429020561018287,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.560660+00:00",
+              "started_at_ns": 1792429020560660352,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 279194,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.695323+00:00",
+              "finished_at_ns": 1792429020695322728,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.695044+00:00",
+              "started_at_ns": 1792429020695043604,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1098,
+      "monotonic_ns": 1353501536685492,
+      "schedule_slip_ns": 61400,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 357305,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.761018+00:00",
+              "finished_at_ns": 1792429020761017948,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.760661+00:00",
+              "started_at_ns": 1792429020760660893,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 1357719,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.894636+00:00",
+              "finished_at_ns": 1792429020894636349,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.893279+00:00",
+              "started_at_ns": 1792429020893278840,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1099,
+      "monotonic_ns": 1353501736691953,
+      "schedule_slip_ns": 67861,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 1436950,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:00.962110+00:00",
+              "finished_at_ns": 1792429020962110194,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:00.960674+00:00",
+              "started_at_ns": 1792429020960673474,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 281914,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:01.086440+00:00",
+              "finished_at_ns": 1792429021086439955,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:01.086158+00:00",
+              "started_at_ns": 1792429021086158391,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "sample_index": 1100,
+      "monotonic_ns": 1353501936686363,
+      "schedule_slip_ns": 62271,
+      "cards": {
+        "0": {
+          "getters": {
+            "current_freq": {
+              "api": "dcmi_get_device_frequency",
+              "duration_ns": 365886,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:01.161028+00:00",
+              "finished_at_ns": 1792429021161027850,
+              "freq_type": 7,
+              "meaning": "current AICore frequency",
+              "raw": 1650,
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:01.160662+00:00",
+              "started_at_ns": 1792429021160662184,
+              "unit": "MHz",
+              "value": 1650
+            },
+            "freq_reduc_cause": {
+              "api": "dcmi_get_device_info",
+              "decoded": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              },
+              "duration_ns": 285614,
+              "error": null,
+              "finished_at": "2026-10-19T16:57:01.287322+00:00",
+              "finished_at_ns": 1792429021287321838,
+              "lp_sub_cmd_aicore_freqreduc_cause": 9,
+              "main_cmd_lp": 8,
+              "raw": {
+                "mask": 0,
+                "size": 8
+              },
+              "ret": 0,
+              "started_at": "2026-10-19T16:57:01.287036+00:00",
+              "started_at_ns": 1792429021287036514,
+              "unit": "bitmask_u64",
+              "value": {
+                "bits_set": [],
+                "error": null,
+                "error_type": null,
+                "idle": false,
+                "power_limit": false,
+                "raw_mask": 0,
+                "raw_mask_hex": "0x0000000000000000",
+                "reasons": [],
+                "ret": 0,
+                "size_bytes": 8,
+                "state": "observed",
+                "svfd": false,
+                "thermal_limit": false,
+                "unknown_bits": []
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "proc_mem_stdout": "\tProcess id:3466550 Process name:python3           Process memory(MB):130\n"
+}

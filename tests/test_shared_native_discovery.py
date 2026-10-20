@@ -131,3 +131,27 @@ def test_actual_metadata_discovery_accepts_equivalent_image_request(tmp_path, mi
     assert bool(found) == (mismatch is None)
     if found:
         assert found[0]['root'] == str(root)
+
+
+def test_shared_native_and_export_concatenate_pool_before_cache(monkeypatch):
+    from mindie_coordinator.backend import RemoteBackend
+    backend = RemoteBackend()
+    spec = {'endpoint': {'host': 'host', 'port': 22, 'user': 'root', 'root': '/root', 'cwd': '/root'},
+            'host_endpoint': {'host': 'host', 'port': 22, 'user': 'root'},
+            'container_name': 'mindie-user', 'python': '/venv/bin/python',
+            'preparation': {'native': {'vllm': 'v', 'vllm-ascend': 'a'}}, 'source_snapshot': {}}
+    monkeypatch.setattr(backend, '_preparation_container', lambda spec: {'Image': 'sha256:same'})
+    shared = {}
+    monkeypatch.setattr(backend, 'bash', lambda endpoint, command: shared.setdefault('command', command) or '{}')
+    backend._shared_native(spec, 'restore', {})
+    assert shared['command'].index('NATIVE_CONTENT_SCHEMA') < \
+        shared['command'].index('def store_shared_native')
+
+    exported = {}
+    def remote(endpoint, script, request, **kwargs):
+        exported['source'] = request['export_source']
+        return {'status': 'miss'}
+    monkeypatch.setattr('remote_dev.core.ssh_transport.run_remote_python', remote)
+    backend._export_shared_native(spec)
+    assert exported['source'].index('NATIVE_CONTENT_SCHEMA') < \
+        exported['source'].index('def store_shared_native')

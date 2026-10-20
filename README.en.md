@@ -199,6 +199,12 @@ run = client.run(
 | `mindie_finish` | `TaskClient.finish()` | Close the current task, terminate all owned executions, and return all runtime bindings and NPU leases |
 | `mindie_message` | `TaskClient.message()` | Send or reply to offline coordination messages with peer tasks waiting on or holding host resources (`coordination_peers[].reference`) |
 
+### 3. Compile Slots, Native Content Pool & Accepted-Source `RunManifest` Boundary
+
+- **Two-Stage Leases & CPU `compile slots`**: `HostQueue` arbitrates host CPU compile slots independently from physical NPU timing leases — different tasks can prepare sources and compile in parallel, while managed execution on the same physical NPU is still arbitrated by exclusive leases.
+- **Content-Addressed Native Content Pool (`native_cache_pool` / `preparation_cache` / `native_kernel_recipe`)**: Indexes and reuses native build artifacts across task slots by `sha256(csrc tree + CANN version + SoC model + Python ABI + compile flags)` and records `native_cache_receipt`. **Current live parallel native acceptance covers CPU C++ extensions (`torch.utils.cpp_extension`); it does not claim end-to-end compile-pool acceptance for full `AscendC` custom operator projects**.
+- **Accepted-Source Identity & `RunManifest` Boundary**: [`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) requires every mounted source entry to carry non-empty accepted Git identities (`source_head` and `snapshot_commit`), and records additive `hardware_telemetry`, `native_cache_receipt`, `active_execution_proof`, and `profile_summary_ref` fields while keeping Run Manifest v1 backward-compatible.
+
 ---
 
 ## Documentation
@@ -223,10 +229,12 @@ run = client.run(
 | `mindie_coordinator/fleet_probe.py` | Agentless single-pass SSH probe for Ascend NPUs, Docker containers, server load, and weight mounts |
 | `mindie_coordinator/task_client.py` | Python `TaskClient` SDK |
 | `mindie_coordinator/host_queue.py` | Public Python API for the host NPU allocation queue |
-| `mindie_coordinator/host/` | Zero-dependency host NPU & port arbitration module shipped over SSH |
+| `mindie_coordinator/host/` | Zero-dependency host NPU, port, and compile-slot arbitration module shipped over SSH |
 | `mindie_coordinator/prepare_runtime.py` | In-container runtime verification, native build cache reuse, and publication |
+| `mindie_coordinator/preparation_cache.py` | Content-addressed native build cache pool (`native_cache_pool`) across task slots |
+| `mindie_coordinator/native_kernel_recipe.py` | Native extension build and active-execution proof recipe (live parallel acceptance currently covers CPU C++ extensions) |
 | `mindie_coordinator/parity.py` | Local Git working-tree snapshot capture and incremental remote materialization |
-| `mindie_coordinator/run_manifest.py` | Run Manifest v1 and Git code identity recording |
+| `mindie_coordinator/run_manifest.py` | Run Manifest v1, accepted Git source identity (`source_head`/`snapshot_commit`), and additive evidence fields |
 | `docs/` | Bilingual lifecycle guide and tool/runtime reference documentation |
 | `tests/` | Unit test suite (runs locally with no NPU or Docker required) |
 

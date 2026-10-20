@@ -80,7 +80,7 @@ TOOL_SCHEMAS = {
         "service": {"type": ["string", "null"], "description": "Ensure a task-scoped service with identical fixed sources and configuration. Changed inputs require restart. To connect without capture, use mindie_execution(service=...)."},
         "restart": {"type": "boolean", "description": "Replace a live named service, including one with the same spec"},
     }),
-    "mindie.execution": task_schema({"execution_id": {"type": "string"}, "service": {"type": "string", "description": "Task-scoped service name, mutually exclusive with execution_id"}, "action": {"type": "string", "enum": ["status", "wait", "evidence", "tail", "stop", "target"]}, "force": {"type": "boolean"}, "refresh": {"type": "boolean", "default": False, "description": "Refresh remote status instead of reusing the last snapshot for up to two seconds. Busy executions return cache age and refresh_deferred."}, "role": {"type": "string", "description": "Optional topology role name"},
+    "mindie.execution": task_schema({"execution_id": {"type": "string"}, "run_id": {"type": "string", "description": "Stable run_id returned at admission; identifies the same execution record."}, "service": {"type": "string", "description": "Task-scoped service name, mutually exclusive with execution_id/run_id"}, "action": {"type": "string", "enum": ["status", "wait", "evidence", "tail", "stop", "target"]}, "force": {"type": "boolean"}, "refresh": {"type": "boolean", "default": False, "description": "Refresh remote status instead of reusing the last snapshot for up to two seconds. Busy executions return cache age and refresh_deferred."}, "role": {"type": "string", "description": "Optional topology role name"},
         "until": {"type": "string", "enum": ["running", "released"], "default": "released"},
         "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 600, "default": 30},
         "section": {"type": "string", "enum": ["all", "sources", "preparation", "build", "diagnostics"], "default": "all",
@@ -167,8 +167,9 @@ TOOL_SCHEMAS["mindie.run"]["oneOf"] = [
     {"required": ["script_file"], "not": {"required": ["command"]}},
 ]
 TOOL_SCHEMAS["mindie.execution"]["oneOf"] = [
-    {"required": ["execution_id"], "not": {"required": ["service"]}},
-    {"required": ["service"], "not": {"required": ["execution_id"]}},
+    {"required": ["execution_id"], "not": {"anyOf": [{"required": ["service"]}, {"required": ["run_id"]}]}},
+    {"required": ["run_id"], "not": {"anyOf": [{"required": ["service"]}, {"required": ["execution_id"]}]}},
+    {"required": ["service"], "not": {"anyOf": [{"required": ["execution_id"]}, {"required": ["run_id"]}]}},
 ]
 
 
@@ -222,7 +223,9 @@ def mindie_call(name, args, *, allow_native_context=True):
                 value = client.run(**{key: args[key] for key in keys if key in args})
                 status = value["state"]
             elif name == "mindie.execution":
-                value = client.observe(args.get("execution_id"), args.get("action", "status"),
+                if sum(key in args for key in ("execution_id", "run_id", "service")) != 1:
+                    raise caller_error("supply exactly one of execution_id, run_id or service")
+                value = client.observe(args.get("execution_id") or args.get("run_id"), args.get("action", "status"),
                                        args.get("force", False), role=args.get("role"), refresh=bool(args.get("refresh")),
                                        **{key: args[key] for key in ("until", "timeout_seconds", "section", "path") if key in args},
                                        **({"service": args["service"]} if "service" in args else {}))

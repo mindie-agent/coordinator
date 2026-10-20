@@ -12,11 +12,15 @@ large model-weight mounts.
   physical device IDs rather than logical module IDs (`0..7`).
 - A card/die is marked `busy` when `hbm_used_mb >= 8192`, `aicore_pct >= 5.0`,
   or any attached process consumes `>= 8192` MB.
+- `npu-top` capacity observations only order host probes when no explicit host
+  was requested. The SSH/NPU queue evidence still decides actual availability;
+  a monitor outage is reported in `npu_top_observation`, never as zero capacity.
 
 [Timeouts & Locks]
 - Remote script bounds: `npu-smi info` `10s`, `docker ps` `5s`, `df` `3s`;
   outer `remote_bash` timeout is `20000ms` (`20s`).
 - Local snapshot cache (`probe_cache.json`) has default TTL `30.0s`.
+- `npu-top` capacity reads are bounded by the bridge (`2.0s` default).
 
 [Side-Effect Policy]
 - Remote probe is strictly read-only; local cache writes `<state_dir>/probe_cache.json`
@@ -26,12 +30,14 @@ large model-weight mounts.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from mindie_coordinator.machine_directory import MachineDirectory, MachineDirectoryUnavailable
+from mindie_coordinator.npu_top_bridge import NpuTopObservationClient, observation_host_order
 from mindie_coordinator.state_paths import coordinator_state_dir
 
 PROBE_CACHE_FILENAME = "probe_cache.json"
@@ -878,6 +884,100 @@ def _recommend_devices(free_ids: list[int], count: int) -> tuple[list[int], bool
     return sorted_ids[:count], False
 
 
+def _npu_top_capacity(
+    *,
+    count: int,
+    host: str | None,
+    client: Any | None,
+    use_npu_top: bool | None,
+    min_weight_mount_avail_gb: float,
+    prefer_same_package: bool,
+    exclude_throttled: bool,
+) -> dict:
+    """Observe capacity only; failures remain visible evidence."""
+    requirements = {
+        "min_idle_npus": count,
+        "min_weight_mount_avail_gb": float(min_weight_mount_avail_gb),
+        "prefer_same_package": bool(prefer_same_package),
+        "exclude_throttled": bool(exclude_throttled),
+    }
+    if host:
+        return {"source": "npu-top", "status": "skipped", "allocation_authority": False,
+                "reason": "explicit host request preserves its original semantics",
+                "candidates": [], "measurement_limitations": [], "requirements": requirements}
+    if use_npu_top is False or os.environ.get("MINDIE_TOP_DISABLE") == "1":
+        return {"source": "npu-top", "status": "disabled", "allocation_authority": False,
+                "reason": "observation ranking disabled by caller/environment",
+                "candidates": [], "measurement_limitations": [], "requirements": requirements}
+    try:
+        if client is None:
+            # Default to the local observation API. The bridge keeps the call
+            # short and returns a visible unavailable status if no monitor runs.
+            client = NpuTopObservationClient(timeout=1.0)
+        observation = client.capacity(
+            min_idle_npus=count,
+            min_weight_mount_avail_gb=min_weight_mount_avail_gb,
+            prefer_same_package=prefer_same_package,
+            exclude_throttled=exclude_throttled,
+        )
+    except Exception as exc:
+        return {"source": "npu-top", "status": "unavailable", "allocation_authority": False,
+                "error": str(exc)[:500], "candidates": [], "requirements": requirements,
+                "measurement_limitations": [f"npu-top observation unavailable: {exc}"][:1]}
+    return observation if isinstance(observation, dict) else {
+        "source": "npu-top", "status": "unavailable", "allocation_authority": False,
+        "error": "npu-top client returned a non-object observation",
+        "candidates": [], "measurement_limitations": ["npu-top observation unavailable"],
+        "requirements": requirements}
+
+
+def _record_observation_rank(record: Mapping[str, Any], order: Mapping[str, int]) -> int | None:
+    host = record.get("host") or {}
+    identities = [record.get("alias"), host.get("ip") if isinstance(host, Mapping) else None,
+                  host.get("host") if isinstance(host, Mapping) else None]
+    ranks = [order[str(value).strip().casefold()] for value in identities
+             if value and str(value).strip().casefold() in order]
+    return min(ranks) if ranks else None
+
+
+def _order_records_by_observation(records: list[dict], observation: Mapping[str, Any]) -> list[dict]:
+    order = observation_host_order(observation)
+    if not order:
+        return list(records)
+
+    def key(record: dict) -> int:
+        rank = _record_observation_rank(record, order)
+        return len(order) + 1 if rank is None else rank
+
+    # Only reorder. Missing/stale observations never remove a host from the
+    # probe set; the host queue still decides actual availability.
+    return sorted(records, key=key)
+
+
+def _observation_summary(observation: Mapping[str, Any] | None) -> dict | None:
+    if not isinstance(observation, Mapping):
+        return None
+    candidates = []
+    for row in observation.get("candidates") or []:
+        if not isinstance(row, Mapping):
+            continue
+        candidates.append({key: row.get(key) for key in (
+            "host", "name", "idle_npu_count", "npu_top_rank", "npu_top_eligible",
+            "npu_top_reasons", "IdlePackagePairs", "MaxWeightMountAvailGb",
+            "ThermalHealth", "observed_at", "age_seconds") if row.get(key) is not None})
+    return {
+        "source": observation.get("source", "npu-top"),
+        "status": observation.get("status"),
+        "allocation_authority": False,
+        "error": observation.get("error"),
+        "reason": observation.get("reason"),
+        "requirements": observation.get("requirements"),
+        "observation": observation.get("observation"),
+        "measurement_limitations": list(observation.get("measurement_limitations") or []),
+        "candidates": candidates,
+    }
+
+
 def find_fleet_capacity(
     *,
     count: int = 1,
@@ -887,14 +987,31 @@ def find_fleet_capacity(
     directory: MachineDirectory | None = None,
     state_dir: Path | str | None = None,
     runner: Callable[[Mapping[str, Any], str], str] | None = None,
+    npu_top_client: Any | None = None,
+    use_npu_top: bool | None = None,
+    min_weight_mount_avail_gb: float = 0.0,
+    prefer_same_package: bool = True,
+    exclude_throttled: bool = True,
 ) -> dict[str, Any]:
-    """Find and rank machines with at least `count` free NPUs across the fleet."""
+    """Find and rank machines with at least `count` free NPUs across the fleet.
+
+    `npu-top` observations (when configured) order the host probes; they never
+    replace the SSH/NPU queue evidence or allocate a device.
+    """
     store = directory if directory is not None else MachineDirectory()
     try:
         records = [store.record(host)] if host else store.machines()
     except MachineDirectoryUnavailable as exc:
         raise ValueError(str(exc)) from exc
 
+    observation = _npu_top_capacity(
+        count=count, host=host, client=npu_top_client, use_npu_top=use_npu_top,
+        min_weight_mount_avail_gb=min_weight_mount_avail_gb,
+        prefer_same_package=prefer_same_package,
+        exclude_throttled=exclude_throttled,
+    )
+    records = _order_records_by_observation(records, observation)
+    observation_order = observation_host_order(observation)
     chip_filter = (chip_query or "").strip().lower()
     candidates: list[dict[str, Any]] = []
     unsatisfied: list[dict[str, Any]] = []
@@ -951,6 +1068,7 @@ def find_fleet_capacity(
                 recommended_phy_ids.append(nid)
         visible_str = ",".join(str(x) for x in recommended_phy_ids)
         contig_run = _max_contiguous_run(free_ids)
+        observation_rank = _record_observation_rank(rec, observation_order)
         candidates.append(
             {
                 "alias": snap["alias"],
@@ -969,17 +1087,18 @@ def find_fleet_capacity(
                 "max_contiguous_free": len(contig_run),
                 "bound_container": snap.get("bound_container"),
                 "remote_dev_alias": snap["alias"],
+                **({"npu_top_rank": observation_rank} if observation_rank is not None else {}),
             }
         )
 
-    candidates.sort(
-        key=lambda item: (
-            1 if item["contiguous"] else 0,
-            item["max_contiguous_free"],
-            item["free_npus"],
-        ),
-        reverse=True,
-    )
+    # Observation order is primary only when available; host queue evidence
+    # (contiguous/free devices) still determines the recommended device set.
+    candidates.sort(key=lambda item: (
+        item.get("npu_top_rank") if item.get("npu_top_rank") is not None else 10 ** 9,
+        -int(item["contiguous"]),
+        -item["max_contiguous_free"],
+        -item["free_npus"],
+    ))
     return {
         "requested_npus": count,
         "chip_query": chip_query,
@@ -988,4 +1107,5 @@ def find_fleet_capacity(
         "recommended": candidates[0] if candidates else None,
         "candidates": candidates,
         "unsatisfied": unsatisfied,
+        "npu_top_observation": _observation_summary(observation),
     }
