@@ -421,7 +421,7 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
             provision.host_ops,
             "run_remote_script",
             side_effect=["probe", "bootstrap", "smoke"],
-        ), mock.patch.object(
+        ) as remote_calls, mock.patch.object(
             provision.host_ops,
             "assert_remote_success",
             side_effect=[{"free_port": 46000}, {}, {}],
@@ -433,6 +433,10 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
             provision.host_ops,
             "load_public_key",
             return_value="ssh-ed25519 test",
+        ), mock.patch.object(
+            provision.host_ops,
+            "fetch_release_catalog",
+            return_value=[{"tag_name": "v0.13.0", "draft": False, "prerelease": False}],
         ):
             res = handle_container(
                 {
@@ -445,6 +449,10 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
                 queue=RealPortReserveQueue(),
             )
         self.assertEqual(res["alias"], "atlas-a3-bob")
+        image_request = json.loads(remote_calls.call_args_list[1].kwargs["args"][2])
+        self.assertEqual(image_request["policy"], "latest-official-release")
+        self.assertEqual(image_request["resolved_tag"], "v0.13.0")
+        self.assertEqual(image_request, json.loads(remote_calls.call_args_list[0].kwargs["args"][0]))
         self.assertTrue(any(r.get("action") == "container-ssh-reserve" for r in reserved_requests))
         # Verify both aliases on 192.168.13.165 remain intact
         aliases = [m["alias"] for m in store.machines()]
