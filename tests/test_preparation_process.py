@@ -179,7 +179,7 @@ def test_restarted_service_stops_persisted_preparation_before_marking_cancelled(
     reply = service.advance(str(tmp_path / "sessions"), "user", row["id"], action="stop")
     assert reply["state"] == ("cancelled" if quiet else "uncertain")
     assert reply["resources_released"] is quiet
-    control.assert_called_once_with(ENDPOINT, "prepare-retained", "stop", force=False)
+    control.assert_called_once_with(ENDPOINT, "prepare-retained", "stop", force=False, timeout_ms=10000)
     with store.transaction() as db:
         latest = store.get(db, "execution", row["id"])
     assert latest["preparation_jobs"]["worker"]["prepare-retained"]["quiet"] is quiet
