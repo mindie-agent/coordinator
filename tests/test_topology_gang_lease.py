@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import os
 import subprocess
 import time
 import uuid
@@ -479,6 +480,7 @@ def test_tier0_hygiene_commands_are_scoped_and_shm_is_read_only():
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX remote-host /tmp and bash contract")
 def test_tier1_local_sandbox_hygiene_and_cleanup_process_boundary():
     sandbox = f"/tmp/mindie-npu-test-{uuid.uuid4().hex}"
     validate_sandbox_path(sandbox)
