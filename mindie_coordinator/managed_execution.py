@@ -358,7 +358,7 @@ class ManagedExecution:
                         job = self.get(db, 'job', key)
                         binding = self.get(db, 'binding', job['binding_id'])
                         runtime = self.get(db, 'runtime', binding['runtime_id'])
-                    if job['state'] in JOB_TERMINAL or job['state'] != 'running':
+                    if job['state'] != 'running':
                         return
                     with bind_context(job.get("diagnostics_context") or {}):
                         observed = self.backend.wait_job(runtime, job['job_id'], timeout_seconds=10)
