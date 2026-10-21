@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+</p>
+
 <h1 align="center">MindIE Agent Coordinator (<code>mindie-coordinator</code>)</h1>
 
 <p align="center">
@@ -201,11 +205,12 @@ run = client.run(
 | `mindie_finish` | `TaskClient.finish()` | 结束当前任务，把名下还在跑的受管进程全部停掉，并归还所有运行环境绑定与 NPU 租约 |
 | `mindie_message` | `TaskClient.message()` | 当排队等卡看到队友也在用机器时（`coordination_peers`），直接给对方的任务发一条离线协调留言或回复消息 |
 
-### 3. 编译槽（`compile slots`）、原生构建缓存池与 `RunManifest` 边界
+### 3. 编译槽、独占进程组与构建缓存复用机制
 
-- **两阶段租约与 CPU 编译槽（`compile slots`）**：宿主机 `HostQueue` 将 CPU 编译槽与物理 NPU 计时租约分离管理——不同任务可并行准备和编译，同一物理 NPU 的受管执行仍按独占租约仲裁。
-- **内容寻址原生构建缓存池（`native_cache_pool` / `preparation_cache` / `native_kernel_recipe`）**：按 `sha256(csrc 源码树 + CANN 版本 + SoC 型号 + Python ABI + 编译参数)` 对原生扩展产物进行跨工位内容寻址复用并记录 `native_cache_receipt`。**当前已完成实机并行验收的范围为 CPU C++ 扩展（`torch.utils.cpp_extension`），不声称已完成完整 `AscendC` 算子工程的端到端编译池验收**。
-- **已接受源码身份与 `RunManifest` 边界（`accepted-source RunManifest`）**：[`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) 强制校验每个源码项同时具备非空的 `source_head` 与 `snapshot_commit` 已接受源码身份，并在保持 Run Manifest v1 向后兼容的前提下按需记录 `hardware_telemetry`、`native_cache_receipt`、`active_execution_proof` 与 `profile_summary_ref` 扩展证据。
+- **编译与跑卡分离（两阶段租约与 CPU 编译槽）**：宿主机 `HostQueue` 将 CPU 编译槽（`compile slots`）与物理 NPU 执行租约分开管理——多个任务可以同时在后台拉代码、编扩展，互不阻塞；只有真正上卡跑测试或起服务时才按独占租约分配物理 NPU。
+- **独占进程组与干净退出回收**：每次受管执行都在独立的进程组中启动，任务自然结束、超时或收到 `stop` 指令时，协调器会排空整个子进程树并校验宿主机 `/proc` 与设备占用，确保不留僵尸进程、不漏端口，随后立即归还 NPU 租约。
+- **跨任务原生构建缓存复用（`native_cache_pool`）**：按 `sha256(csrc 源码树 + CANN 版本 + SoC 型号 + Python ABI + 编译参数)` 对编译产物做内容寻址缓存并记录 `native_cache_receipt`，相同源码与环境直接秒级复用（注：当前实机并行构建池验收覆盖 `torch.utils.cpp_extension` CPU C++ 扩展；完整 `AscendC` 算子工程的编译池复用正在持续扩展中）。
+- **可追溯的执行清单（`RunManifest`）**：[`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) 为每次运行记录完整的 Git 源码快照身份（`source_head` 与 `snapshot_commit`），并按需附带硬件遥测（`hardware_telemetry`）、缓存命中回执（`native_cache_receipt`）、活跃执行证明（`active_execution_proof`）与性能剖析引用（`profile_summary_ref`），方便随时复盘某次实验到底跑的是哪版代码和环境。
 
 ---
 

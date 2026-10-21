@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+</p>
+
 <h1 align="center">MindIE Agent Coordinator (<code>mindie-coordinator</code>)</h1>
 
 <p align="center">
@@ -199,11 +203,12 @@ run = client.run(
 | `mindie_finish` | `TaskClient.finish()` | Close the current task, terminate all owned executions, and return all runtime bindings and NPU leases |
 | `mindie_message` | `TaskClient.message()` | Send or reply to offline coordination messages with peer tasks waiting on or holding host resources (`coordination_peers[].reference`) |
 
-### 3. Compile Slots, Native Content Pool & Accepted-Source `RunManifest` Boundary
+### 3. Build Slots, Exclusive Process Groups, and Build Cache Reuse
 
-- **Two-Stage Leases & CPU `compile slots`**: `HostQueue` arbitrates host CPU compile slots independently from physical NPU timing leases — different tasks can prepare sources and compile in parallel, while managed execution on the same physical NPU is still arbitrated by exclusive leases.
-- **Content-Addressed Native Content Pool (`native_cache_pool` / `preparation_cache` / `native_kernel_recipe`)**: Indexes and reuses native build artifacts across task slots by `sha256(csrc tree + CANN version + SoC model + Python ABI + compile flags)` and records `native_cache_receipt`. **Current live parallel native acceptance covers CPU C++ extensions (`torch.utils.cpp_extension`); it does not claim end-to-end compile-pool acceptance for full `AscendC` custom operator projects**.
-- **Accepted-Source Identity & `RunManifest` Boundary**: [`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) requires every mounted source entry to carry non-empty accepted Git identities (`source_head` and `snapshot_commit`), and records additive `hardware_telemetry`, `native_cache_receipt`, `active_execution_proof`, and `profile_summary_ref` fields while keeping Run Manifest v1 backward-compatible.
+- **Decoupled CPU Build Slots & NPU Leases**: `HostQueue` separates host CPU `compile slots` from physical NPU execution leases — multiple tasks can sync sources and compile in parallel without waiting for a card, while actual NPU execution remains safely arbitrated by exclusive leases.
+- **Exclusive Process Groups & Clean Exit Draining**: Every managed run launches inside its own process group. When a job finishes, times out, or is stopped, the coordinator drains the entire descendant process tree and verifies host `/proc` state before releasing the NPU and port lease, preventing orphan workers from leaking HBM.
+- **Content-Addressed Native Build Cache (`native_cache_pool`)**: Caches and reuses compiled native extensions across task worktrees by `sha256(csrc tree + CANN version + SoC model + Python ABI + compile flags)` with a recorded `native_cache_receipt` (note: live parallel cache-pool acceptance currently covers `torch.utils.cpp_extension` CPU C++ extensions, while full `AscendC` operator project caching continues expanding).
+- **Traceable Run Manifests (`RunManifest`)**: [`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) records the exact Git identity (`source_head` and `snapshot_commit`) for every mounted repository alongside optional `hardware_telemetry`, `native_cache_receipt`, `active_execution_proof`, and `profile_summary_ref` evidence so every benchmark or test run is reproducible.
 
 ---
 
