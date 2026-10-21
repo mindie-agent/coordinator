@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__ = version("mindie-coordinator")
 except PackageNotFoundError:  # pragma: no cover - source tree without install
-    __version__ = "0.6.1"
+    __version__ = "0.6.2"
 
 from mindie_coordinator.topology_gang import (  # noqa: E402
     PLACEMENT_POLICIES,
