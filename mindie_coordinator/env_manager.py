@@ -1,9 +1,10 @@
-"""SSH host, container, hardware probe, and NPU lease operations for mindie-coordinator.
+"""SSH host, container, hardware probe, NPU lease, and vllm-ascend env preflight.
 
 [Role]
 Implements the four direct environment management handlers (`handle_hosts`,
 `handle_probe`, `handle_container`, `handle_lease`) backing `mindie.hosts`,
-`mindie.probe`, `mindie.container`, and `mindie.lease`.
+`mindie.probe`, `mindie.container`, and `mindie.lease`, plus deterministic
+`validate_vllm_ascend_runtime_env` runtime environment conflict preflight.
 
 [Invariants]
 - `handle_hosts` and `handle_container` keep `<state_dir>/machines.json` and
@@ -12,9 +13,11 @@ Implements the four direct environment management handlers (`handle_hosts`,
   lease metadata (`fence_token`, `coordination_epoch`, `devices`) in `leases.json`.
 - Container removal releases only that container owner's `container_ssh` row
   after confirmed removal/absence; failed or unknown removal keeps it.
+- `validate_vllm_ascend_runtime_env` is a pure in-memory deterministic validator.
 
 [Timeouts & Locks]
 - Delegates remote execution to `fleet_probe`, `host_ops`, and `HostQueue`.
+- `validate_vllm_ascend_runtime_env` performs zero I/O, subprocesses, or waits.
 
 [Side-Effect Policy]
 - Persists `machines.json`, `remote_dev_endpoints.json`, and `leases.json` via
@@ -109,19 +112,13 @@ def handle_hosts(
         try:
             inventory, inv_path = store.load()
         except MachineDirectoryUnavailable:
-            inventory = {"machines": []}
-            inv_path = store.path()
-        endpoints_doc = build_endpoints_document(inventory)
-        ep_path = endpoints_file_path(base_dir)
+            inventory, inv_path = {"machines": []}, store.path()
+        endpoints_doc, ep_path = build_endpoints_document(inventory), endpoints_file_path(base_dir)
         if inventory.get("machines") and str(inv_path) != "<memory>" and not ep_path.is_file():
             sync_endpoints_file(inventory, machines_path=inv_path, target_path=ep_path)
         return {
-            "state": "ready",
-            "action": "list",
-            "inventory_path": str(inv_path),
-            "endpoints_file": str(ep_path),
-            "default_alias": endpoints_doc.get("default_alias"),
-            "machines": inventory.get("machines", []),
+            "state": "ready", "action": "list", "inventory_path": str(inv_path), "endpoints_file": str(ep_path),
+            "default_alias": endpoints_doc.get("default_alias"), "machines": inventory.get("machines", []),
             "remote_dev_endpoints": endpoints_doc.get("endpoints", {}),
         }
 
@@ -129,45 +126,26 @@ def handle_hosts(
         host_ip = str(args.get("host") or "").strip()
         if not host_ip:
             raise caller_error("mindie_hosts(action='upsert') requires `host` (IP or hostname)")
-        alias = str(args.get("alias") or host_ip).strip()
-        port = int(args.get("port") or 22)
+        alias, port = str(args.get("alias") or host_ip).strip(), int(args.get("port") or 22)
         user = str(args.get("user") or "root").strip() or "root"
         machine_type = host_ops.normalize_machine_type(args.get("machine_type")) if args.get("machine_type") else None
-
-        # Preserve existing container/metadata if updating an existing host without overriding container
         existing_rec: dict[str, Any] = {}
-        try:
-            existing_rec = store.record(alias)
-        except (MachineDirectoryUnavailable, ValueError):
+        for key in (alias, host_ip):
             try:
-                existing_rec = store.record(host_ip)
+                existing_rec = store.record(key)
+                break
             except (MachineDirectoryUnavailable, ValueError):
-                existing_rec = {}
+                continue
 
         if args.get("bootstrap_key") or args.get("password_env"):
             password_env = args.get("password_env")
             if not password_env:
                 raise caller_error("bootstrap_key requires `password_env` naming an environment variable that holds the SSH password")
-            ns = host_ops._namespace(
-                host=host_ip,
-                user=user,
-                host_port=port,
-                public_key_file=args.get("public_key_file"),
-                password=None,
-                password_env=str(password_env),
-                password_stdin=False,
-                print_command=False,
-            )
-            rc = host_ops.cmd_bootstrap_host_key(ns)
-            if rc != 0:
+            ns = host_ops._namespace(host=host_ip, user=user, host_port=port, public_key_file=args.get("public_key_file"), password=None, password_env=str(password_env), password_stdin=False, print_command=False)
+            if host_ops.cmd_bootstrap_host_key(ns) != 0:
                 raise RuntimeError(f"SSH key bootstrap failed for {user}@{host_ip}:{port}")
 
-        host_entry: dict[str, Any] = {
-            **(existing_rec.get("host") or {}),
-            "ip": host_ip,
-            "port": port,
-            "user": user,
-        }
+        host_entry: dict[str, Any] = {**(existing_rec.get("host") or {}), "ip": host_ip, "port": port, "user": user}
         if machine_type:
             host_entry["machine_type"] = machine_type
         if args.get("identity_file"):
@@ -186,44 +164,23 @@ def handle_hosts(
             if args.get("container_mode"):
                 container_entry["mode"] = str(args["container_mode"])
 
-        record: dict[str, Any] = {
-            **existing_rec,
-            "alias": alias,
-            "host": host_entry,
-        }
+        record: dict[str, Any] = {**existing_rec, "alias": alias, "host": host_entry}
         if container_entry:
             record["container"] = container_entry
 
         probe_summary: dict[str, Any] | None = None
         if args.get("probe_hardware"):
             snap = probe_machine_record(record, mode="live", state_dir=base_dir, runner=runner)
-            probe_summary = {
-                "online": snap.get("online"),
-                "chip_summary": snap.get("chip_summary"),
-                "total_npus": snap.get("total_npus"),
-                "free_npus": snap.get("free_npus"),
-                "driver_version": snap.get("driver_version"),
-                "error": snap.get("error"),
-            }
+            probe_summary = {"online": snap.get("online"), "chip_summary": snap.get("chip_summary"), "total_npus": snap.get("total_npus"), "free_npus": snap.get("free_npus"), "driver_version": snap.get("driver_version"), "error": snap.get("error")}
             if snap.get("online"):
-                record["hardware"] = {
-                    "chip_summary": snap.get("chip_summary"),
-                    "total_npus": snap.get("total_npus"),
-                    "driver_version": snap.get("driver_version"),
-                }
+                record["hardware"] = {"chip_summary": snap.get("chip_summary"), "total_npus": snap.get("total_npus"), "driver_version": snap.get("driver_version")}
 
         inv_path = store.upsert_machine(record, set_default=bool(args.get("set_default")))
         endpoints_doc = store.endpoints_document()
         return {
-            "state": "ready",
-            "action": "upsert",
-            "alias": alias,
-            "record": record,
-            "probe": probe_summary,
-            "inventory_path": str(inv_path),
-            "endpoints_file": str(endpoints_file_path(inv_path.parent)),
-            "default_alias": endpoints_doc.get("default_alias"),
-            "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
+            "state": "ready", "action": "upsert", "alias": alias, "record": record, "probe": probe_summary,
+            "inventory_path": str(inv_path), "endpoints_file": str(endpoints_file_path(inv_path.parent)),
+            "default_alias": endpoints_doc.get("default_alias"), "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
 
     if action == "remove":
@@ -235,14 +192,7 @@ def handle_hosts(
         except MachineDirectoryUnavailable as exc:
             raise caller_error(str(exc)) from exc
         endpoints_doc = store.endpoints_document()
-        return {
-            "state": "ready",
-            "action": "remove",
-            "target": target,
-            "removed": removed,
-            "inventory_path": str(inv_path),
-            "default_alias": endpoints_doc.get("default_alias"),
-        }
+        return {"state": "ready", "action": "remove", "target": target, "removed": removed, "inventory_path": str(inv_path), "default_alias": endpoints_doc.get("default_alias")}
 
     if action == "set_default":
         target = str(args.get("alias") or args.get("host") or "").strip()
@@ -253,89 +203,34 @@ def handle_hosts(
         except (MachineDirectoryUnavailable, ValueError) as exc:
             raise caller_error(str(exc)) from exc
         endpoints_doc = store.endpoints_document()
-        return {
-            "state": "ready",
-            "action": "set_default",
-            "default_alias": endpoints_doc.get("default_alias"),
-            "inventory_path": str(inv_path),
-            "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get("default"),
-        }
+        return {"state": "ready", "action": "set_default", "default_alias": endpoints_doc.get("default_alias"), "inventory_path": str(inv_path), "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get("default")}
 
     if action == "bootstrap_key":
         alias, host_spec, _ = _resolve_host_target(args, store)
         password_env = args.get("password_env")
         if not password_env:
             raise caller_error("mindie_hosts(action='bootstrap_key') requires `password_env`")
-        ns = host_ops._namespace(
-            host=host_spec["host"],
-            user=host_spec["user"],
-            host_port=host_spec["port"],
-            public_key_file=args.get("public_key_file"),
-            password=None,
-            password_env=str(password_env),
-            password_stdin=False,
-            print_command=False,
-        )
-        rc = host_ops.cmd_bootstrap_host_key(ns)
-        if rc != 0:
+        ns = host_ops._namespace(host=host_spec["host"], user=host_spec["user"], host_port=host_spec["port"], public_key_file=args.get("public_key_file"), password=None, password_env=str(password_env), password_stdin=False, print_command=False)
+        if host_ops.cmd_bootstrap_host_key(ns) != 0:
             raise RuntimeError(f"SSH key bootstrap failed for {host_spec['user']}@{host_spec['host']}:{host_spec['port']}")
-        return {
-            "state": "ready",
-            "action": "bootstrap_key",
-            "alias": alias,
-            "host": host_spec["host"],
-            "port": host_spec["port"],
-            "user": host_spec["user"],
-        }
+        return {"state": "ready", "action": "bootstrap_key", "alias": alias, "host": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]}
 
     if action == "mesh":
-        alias_a = str(args.get("alias") or args.get("host") or "").strip()
-        alias_b = str(args.get("peer_alias") or args.get("peer_host") or "").strip()
+        alias_a, alias_b = str(args.get("alias") or args.get("host") or "").strip(), str(args.get("peer_alias") or args.get("peer_host") or "").strip()
         if not alias_a or not alias_b:
             raise caller_error("mindie_hosts(action='mesh') requires both `alias`/`host` and `peer_alias`/`peer_host`")
-        rec_a = store.record(alias_a)
-        rec_b = store.record(alias_b)
-        port_a = int((rec_a.get("container") or {}).get("ssh_port") or args.get("port") or 0)
-        port_b = int((rec_b.get("container") or {}).get("ssh_port") or args.get("peer_port") or 0)
+        rec_a, rec_b = store.record(alias_a), store.record(alias_b)
+        port_a, port_b = int((rec_a.get("container") or {}).get("ssh_port") or args.get("port") or 0), int((rec_b.get("container") or {}).get("ssh_port") or args.get("peer_port") or 0)
         if port_a <= 0 or port_b <= 0:
             raise caller_error("SSH mesh requires both machines to have a container `ssh_port` configured")
-        host_a = (rec_a.get("host") or {}).get("ip")
-        host_b = (rec_b.get("host") or {}).get("ip")
-        target_a = host_ops.SshTarget(host=host_a, user="root", port=port_a)
-        target_b = host_ops.SshTarget(host=host_b, user="root", port=port_b)
-        comment_a = f"mindie-mesh:{rec_a.get('alias') or host_a}"
-        comment_b = f"mindie-mesh:{rec_b.get('alias') or host_b}"
-
-        key_a = host_ops.assert_remote_success(
-            host_ops.run_remote_script(target_a, host_ops.render_mesh_export_key_script(), args=[comment_a], batch_mode=True)
-        )
-        key_b = host_ops.assert_remote_success(
-            host_ops.run_remote_script(target_b, host_ops.render_mesh_export_key_script(), args=[comment_b], batch_mode=True)
-        )
-        host_ops.assert_remote_success(
-            host_ops.run_remote_script(
-                target_a,
-                host_ops.render_mesh_add_peer_script(),
-                args=[key_b["public_key"], host_b, str(port_b)],
-                batch_mode=True,
-            )
-        )
-        host_ops.assert_remote_success(
-            host_ops.run_remote_script(
-                target_b,
-                host_ops.render_mesh_add_peer_script(),
-                args=[key_a["public_key"], host_a, str(port_a)],
-                batch_mode=True,
-            )
-        )
-        return {
-            "state": "ready",
-            "action": "mesh",
-            "pair": [
-                {"alias": rec_a.get("alias"), "host": host_a, "ssh_port": port_a},
-                {"alias": rec_b.get("alias"), "host": host_b, "ssh_port": port_b},
-            ],
-        }
+        host_a, host_b = (rec_a.get("host") or {}).get("ip"), (rec_b.get("host") or {}).get("ip")
+        target_a, target_b = host_ops.SshTarget(host=host_a, user="root", port=port_a), host_ops.SshTarget(host=host_b, user="root", port=port_b)
+        comment_a, comment_b = f"mindie-mesh:{rec_a.get('alias') or host_a}", f"mindie-mesh:{rec_b.get('alias') or host_b}"
+        key_a = host_ops.assert_remote_success(host_ops.run_remote_script(target_a, host_ops.render_mesh_export_key_script(), args=[comment_a], batch_mode=True))
+        key_b = host_ops.assert_remote_success(host_ops.run_remote_script(target_b, host_ops.render_mesh_export_key_script(), args=[comment_b], batch_mode=True))
+        host_ops.assert_remote_success(host_ops.run_remote_script(target_a, host_ops.render_mesh_add_peer_script(), args=[key_b["public_key"], host_b, str(port_b)], batch_mode=True))
+        host_ops.assert_remote_success(host_ops.run_remote_script(target_b, host_ops.render_mesh_add_peer_script(), args=[key_a["public_key"], host_a, str(port_a)], batch_mode=True))
+        return {"state": "ready", "action": "mesh", "pair": [{"alias": rec_a.get("alias"), "host": host_a, "ssh_port": port_a}, {"alias": rec_b.get("alias"), "host": host_b, "ssh_port": port_b}]}
 
     raise caller_error(f"unsupported mindie.hosts action: {action!r}")
 
@@ -357,22 +252,9 @@ def handle_probe(
         npu_count = int(args.get("npu_count") if args.get("npu_count") is not None else 1)
         if npu_count < 1:
             raise caller_error("npu_count must be >= 1 for capacity search")
-        cap = find_fleet_capacity(
-            count=npu_count,
-            chip_query=args.get("chip_query"),
-            host=target or None,
-            mode=mode,
-            directory=store,
-            state_dir=base_dir,
-            runner=runner,
-        )
-        return {
-            "state": "ready" if cap["matched_count"] > 0 else "insufficient_capacity",
-            "action": "capacity",
-            **cap,
-        }
+        cap = find_fleet_capacity(count=npu_count, chip_query=args.get("chip_query"), host=target or None, mode=mode, directory=store, state_dir=base_dir, runner=runner)
+        return {"state": "ready" if cap["matched_count"] > 0 else "insufficient_capacity", "action": "capacity", **cap}
 
-    # Resolve target records
     if target:
         _, host_spec, rec = _resolve_host_target(args, store)
         records = [rec if rec is not None else {"alias": target, "host": {"ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]}}]
@@ -382,106 +264,44 @@ def handle_probe(
         except MachineDirectoryUnavailable:
             records = []
 
-    snapshots = [
-        probe_machine_record(rec, mode=mode, state_dir=base_dir, runner=runner)
-        for rec in records
-    ]
-
+    snapshots = [probe_machine_record(rec, mode=mode, state_dir=base_dir, runner=runner) for rec in records]
     if action == "hosts":
         hosts_summary = [
             {
-                "alias": snap["alias"],
-                "host": snap["host"],
-                "port": snap["port"],
-                "online": snap["online"],
-                "error": snap.get("error"),
-                "chip_summary": snap.get("chip_summary"),
-                "driver_version": snap.get("driver_version"),
-                "total_npus": snap["total_npus"],
-                "free_npus": snap["free_npus"],
-                "busy_npus": snap["busy_npus"],
-                "free_npu_ids": snap["free_npu_ids"],
-                "busy_npu_ids": snap["busy_npu_ids"],
-                "free_phy_ids": snap.get("free_phy_ids", []),
-                "busy_phy_ids": snap.get("busy_phy_ids", []),
-                "bound_container": snap.get("bound_container"),
-                "containers_count": len(snap.get("containers") or []),
-                "cache_hit": snap.get("cache_hit", False),
+                "alias": snap["alias"], "host": snap["host"], "port": snap["port"], "online": snap["online"],
+                "error": snap.get("error"), "chip_summary": snap.get("chip_summary"), "driver_version": snap.get("driver_version"),
+                "total_npus": snap["total_npus"], "free_npus": snap["free_npus"], "busy_npus": snap["busy_npus"],
+                "free_npu_ids": snap["free_npu_ids"], "busy_npu_ids": snap["busy_npu_ids"],
+                "free_phy_ids": snap.get("free_phy_ids", []), "busy_phy_ids": snap.get("busy_phy_ids", []),
+                "bound_container": snap.get("bound_container"), "containers_count": len(snap.get("containers") or []), "cache_hit": snap.get("cache_hit", False),
             }
             for snap in snapshots
         ]
-        return {
-            "state": "ready",
-            "action": "hosts",
-            "mode": mode,
-            "hosts_count": len(hosts_summary),
-            "hosts": hosts_summary,
-        }
+        return {"state": "ready", "action": "hosts", "mode": mode, "hosts_count": len(hosts_summary), "hosts": hosts_summary}
 
     if action == "npu":
-        return {
-            "state": "ready",
-            "action": "npu",
-            "mode": mode,
-            "hosts": [
-                {
-                    "alias": snap["alias"],
-                    "host": snap["host"],
-                    "online": snap["online"],
-                    "error": snap.get("error"),
-                    "chip_summary": snap.get("chip_summary"),
-                    "driver_version": snap.get("driver_version"),
-                    "npu_smi_version": snap.get("npu_smi_version"),
-                    "total_npus": snap["total_npus"],
-                    "free_npus": snap["free_npus"],
-                    "free_npu_ids": snap["free_npu_ids"],
-                    "busy_npu_ids": snap["busy_npu_ids"],
-                    "free_phy_ids": snap.get("free_phy_ids", []),
-                    "busy_phy_ids": snap.get("busy_phy_ids", []),
-                    "npus": snap.get("npus", []),
-                }
-                for snap in snapshots
-            ],
-        }
+        return {"state": "ready", "action": "npu", "mode": mode, "hosts": [
+            {
+                "alias": snap["alias"], "host": snap["host"], "online": snap["online"], "error": snap.get("error"),
+                "chip_summary": snap.get("chip_summary"), "driver_version": snap.get("driver_version"),
+                "npu_smi_version": snap.get("npu_smi_version"), "total_npus": snap["total_npus"], "free_npus": snap["free_npus"],
+                "free_npu_ids": snap["free_npu_ids"], "busy_npu_ids": snap["busy_npu_ids"],
+                "free_phy_ids": snap.get("free_phy_ids", []), "busy_phy_ids": snap.get("busy_phy_ids", []), "npus": snap.get("npus", []),
+            }
+            for snap in snapshots
+        ]}
 
     if action == "server":
-        return {
-            "state": "ready",
-            "action": "server",
-            "mode": mode,
-            "hosts": [
-                {
-                    "alias": snap["alias"],
-                    "host": snap["host"],
-                    "online": snap["online"],
-                    "error": snap.get("error"),
-                    "server": snap.get("server") or {},
-                    "containers": snap.get("containers") or [],
-                    "bound_container": snap.get("bound_container"),
-                }
-                for snap in snapshots
-            ],
-        }
+        return {"state": "ready", "action": "server", "mode": mode, "hosts": [
+            {"alias": snap["alias"], "host": snap["host"], "online": snap["online"], "error": snap.get("error"), "server": snap.get("server") or {}, "containers": snap.get("containers") or [], "bound_container": snap.get("bound_container")}
+            for snap in snapshots
+        ]}
 
     if action == "mounts":
-        return {
-            "state": "ready",
-            "action": "mounts",
-            "mode": mode,
-            "hosts": [
-                {
-                    "alias": snap["alias"],
-                    "host": snap["host"],
-                    "online": snap["online"],
-                    "error": snap.get("error"),
-                    "mounts": snap.get("mounts") or [],
-                    "weights_mounts": [
-                        m for m in (snap.get("mounts") or []) if m.get("likely_weights_dir")
-                    ],
-                }
-                for snap in snapshots
-            ],
-        }
+        return {"state": "ready", "action": "mounts", "mode": mode, "hosts": [
+            {"alias": snap["alias"], "host": snap["host"], "online": snap["online"], "error": snap.get("error"), "mounts": snap.get("mounts") or [], "weights_mounts": [m for m in (snap.get("mounts") or []) if m.get("likely_weights_dir")]}
+            for snap in snapshots
+        ]}
 
     raise caller_error(f"unsupported mindie.probe action: {action!r}")
 
@@ -509,11 +329,7 @@ def handle_container(
         workdir = str(args.get("workdir") or "/vllm-workspace").strip() or "/vllm-workspace"
         mode = str(args.get("mode") or ("ssh" if ssh_port else "docker_exec")).strip().lower()
 
-        container_entry: dict[str, Any] = {
-            "user": container_user,
-            "workdir": workdir,
-            "mode": mode,
-        }
+        container_entry: dict[str, Any] = {"user": container_user, "workdir": workdir, "mode": mode}
         if container_name:
             container_entry["name"] = container_name
         if args.get("container_id"):
@@ -529,25 +345,15 @@ def handle_container(
 
         base_rec = rec if rec is not None else {"alias": alias, "host": {"ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]}}
         updated_rec = {
-            **base_rec,
-            "alias": alias,
-            "host": {
-                **(base_rec.get("host") or {}),
-                "ip": host_spec["host"],
-                "port": host_spec["port"],
-                "user": host_spec["user"],
-            },
+            **base_rec, "alias": alias,
+            "host": {**(base_rec.get("host") or {}), "ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]},
             "container": container_entry,
         }
         inv_path = store.upsert_machine(updated_rec, set_default=bool(args.get("set_default")))
         endpoints_doc = store.endpoints_document()
         return {
-            "state": "ready",
-            "action": "bind",
-            "alias": alias,
-            "container": container_entry,
-            "inventory_path": str(inv_path),
-            "endpoints_file": str(endpoints_file_path(inv_path.parent)),
+            "state": "ready", "action": "bind", "alias": alias, "container": container_entry,
+            "inventory_path": str(inv_path), "endpoints_file": str(endpoints_file_path(inv_path.parent)),
             "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
 
@@ -564,36 +370,23 @@ def handle_container(
         def _reserve_port(*, user: str, container_name: str, port: int) -> dict[str, Any]:
             return host_queue.request(
                 host_spec,
-                {
-                    "action": "container-ssh-reserve",
-                    "user": user,
-                    "container_name": container_name,
-                    "port": port,
-                },
+                {"action": "container-ssh-reserve", "user": user, "container_name": container_name, "port": port},
             )
 
         provisioned = provision_user_container(
-            host=host_spec["host"],
-            image=image,
+            host=host_spec["host"], image=image,
             user=args.get("container_user") or args.get("user_namespace") or args.get("user_tag") or args.get("user"),
-            host_user=host_spec["user"],
-            host_port=host_spec["port"],
+            host_user=host_spec["user"], host_port=host_spec["port"],
             ssh_port=int(args["ssh_port"]) if args.get("ssh_port") else None,
-            machine_type=machine_type,
-            password_env=args.get("password_env"),
-            machines=store,
-            reserve_port=_reserve_port,
-            alias=alias,
+            machine_type=machine_type, password_env=args.get("password_env"),
+            machines=store, reserve_port=_reserve_port, alias=alias,
         )
         if args.get("set_default"):
             store.set_default(alias)
         endpoints_doc = store.endpoints_document()
         return {
-            "state": "ready",
-            "action": "provision",
-            "alias": alias,
-            "provisioned": provisioned,
-            "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
+            "state": "ready", "action": "provision", "alias": alias,
+            "provisioned": provisioned, "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
 
     if action == "inspect":
@@ -602,12 +395,8 @@ def handle_container(
         snap = probe_machine_record(probe_rec, mode=str(args.get("mode") or "auto"), state_dir=base_dir, runner=runner)
         endpoints_doc = store.endpoints_document()
         return {
-            "state": "ready",
-            "action": "inspect",
-            "alias": alias,
-            "host": host_spec["host"],
-            "online": snap.get("online"),
-            "bound_container": (rec or {}).get("container"),
+            "state": "ready", "action": "inspect", "alias": alias, "host": host_spec["host"],
+            "online": snap.get("online"), "bound_container": (rec or {}).get("container"),
             "containers": snap.get("containers") or [],
             "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
@@ -625,42 +414,34 @@ def handle_container(
             if not container_name:
                 raise caller_error("mindie_container(action='remove') requires `container_name` or a bound container on the target machine")
             ns = host_ops._namespace(
-                host=host_spec["host"],
-                user=host_spec["user"],
-                host_port=host_spec["port"],
-                container_name=container_name,
-                container_ssh_port=ssh_port if ssh_port > 0 else None,
-                known_hosts=str(host_ops.DEFAULT_KNOWN_HOSTS),
-                clean_local_known_hosts=bool(ssh_port > 0),
+                host=host_spec["host"], user=host_spec["user"], host_port=host_spec["port"],
+                container_name=container_name, container_ssh_port=ssh_port if ssh_port > 0 else None,
+                known_hosts=str(host_ops.DEFAULT_KNOWN_HOSTS), clean_local_known_hosts=bool(ssh_port > 0),
             )
             removal = host_ops.remove_container_result(ns)
             confirmed_absent = removal.get("removed") is False and removal.get("previous_state") is None
             if removal.get("success") is not True or not (removal.get("removed") is True or confirmed_absent):
                 raise RuntimeError(f"failed to confirm removal of container {container_name!r} on {host_spec['host']}")
-            owner = str(args.get("container_user") or args.get("owner")
-                        or (rec or {}).get("user") or "").strip()
+            owner = str(args.get("container_user") or args.get("owner") or (rec or {}).get("user") or "").strip()
             if not owner and container_name.startswith("mindie-"):
                 owner = container_name[len("mindie-"):]
             if not owner:
                 return {
-                    "state": "partial", "action": "remove", "alias": alias,
-                    "container_name": container_name, "removal": removal,
-                    "reservation_release": {"status": "not_attempted",
-                                            "reason": "container owner is unknown; reservation not touched"},
+                    "state": "partial", "action": "remove", "alias": alias, "container_name": container_name,
+                    "removal": removal,
+                    "reservation_release": {"status": "not_attempted", "reason": "container owner is unknown; reservation not touched"},
                     "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
                 }
             host_queue = queue if queue is not None else HostQueue()
             try:
                 release = host_queue.request(host_spec, {
-                    "action": "container-ssh-release",
-                    "user": owner,
-                    "container_name": container_name,
-                    "port": ssh_port if ssh_port > 0 else 0,
+                    "action": "container-ssh-release", "user": owner,
+                    "container_name": container_name, "port": ssh_port if ssh_port > 0 else 0,
                 })
             except Exception as exc:
                 return {
-                    "state": "partial", "action": "remove", "alias": alias,
-                    "container_name": container_name, "removal": removal,
+                    "state": "partial", "action": "remove", "alias": alias, "container_name": container_name,
+                    "removal": removal,
                     "reservation_release": {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:800]},
                     "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
                 }
@@ -670,13 +451,8 @@ def handle_container(
             store.upsert_machine(cleaned)
         endpoints_doc = store.endpoints_document()
         return {
-            "state": "ready",
-            "action": "remove",
-            "alias": alias,
-            "container_name": container_name or None,
-            "unbind_only": unbind_only,
-            "removal": removal,
-            "reservation_release": release,
+            "state": "ready", "action": "remove", "alias": alias, "container_name": container_name or None,
+            "unbind_only": unbind_only, "removal": removal, "reservation_release": release,
             "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
 
@@ -731,21 +507,13 @@ def handle_lease(
             status_req["task_id"] = str(args["lease_id"]).strip()
         response = host_queue.request(host_spec, status_req)
         tasks_list = [
-            {**t, "lease_id": t.get("lease_id") or t.get("task_id")}
-            if isinstance(t, Mapping)
-            else t
+            {**t, "lease_id": t.get("lease_id") or t.get("task_id")} if isinstance(t, Mapping) else t
             for t in (response.get("tasks") or [])
         ]
         return {
-            "state": "ready",
-            "action": "status",
-            "alias": alias,
-            "host": host_spec["host"],
-            "coordination_epoch": response.get("coordination_epoch"),
-            "occupancy": response.get("occupancy"),
-            "tasks": tasks_list,
-            "leases": tasks_list,
-            "count": len(tasks_list),
+            "state": "ready", "action": "status", "alias": alias, "host": host_spec["host"],
+            "coordination_epoch": response.get("coordination_epoch"), "occupancy": response.get("occupancy"),
+            "tasks": tasks_list, "leases": tasks_list, "count": len(tasks_list),
             "coordination_messages": response.get("coordination_messages", []),
         }
 
@@ -762,14 +530,10 @@ def handle_lease(
             epoch = status_resp.get("coordination_epoch")
 
         req: dict[str, Any] = {
-            "action": "submit-acquire" if epoch else "submit",
-            "task_id": lease_id,
-            "agent_id": owner_user,
+            "action": "submit-acquire" if epoch else "submit", "task_id": lease_id, "agent_id": owner_user,
             "message": str(args.get("purpose") or "remote-dev workload"),
-            "estimated_duration_seconds": ttl_seconds,
-            "grant_ttl_seconds": ttl_seconds,
-            "allow_external_busy": bool(args.get("allow_external_busy")),
-            **remote_sd,
+            "estimated_duration_seconds": ttl_seconds, "grant_ttl_seconds": ttl_seconds,
+            "allow_external_busy": bool(args.get("allow_external_busy")), **remote_sd,
         }
         if epoch:
             req["coordination_epoch"] = str(epoch)
@@ -791,17 +555,9 @@ def handle_lease(
             )
         task = response.get("task") or {}
         raw_state = str(task.get("state") or response.get("status") or "unknown")
-        allocated_devices = (
-            task.get("granted_devices")
-            if task.get("granted_devices") is not None
-            else (task.get("allocated_npus") or [])
-        )
+        allocated_devices = task.get("granted_devices") if task.get("granted_devices") is not None else (task.get("allocated_npus") or [])
         visible_str = ",".join(str(d) for d in allocated_devices)
-        service_port = (
-            task.get("granted_service_port")
-            if task.get("granted_service_port") is not None
-            else task.get("service_port")
-        )
+        service_port = task.get("granted_service_port") if task.get("granted_service_port") is not None else task.get("service_port")
         fence_token = task.get("fence_token")
         env_vars: dict[str, str] = {}
         if visible_str:
@@ -816,15 +572,9 @@ def handle_lease(
 
         leases = _load_leases(base_dir)
         lease_record = {
-            "lease_id": lease_id,
-            "alias": alias,
-            "host": host_spec["host"],
-            "owner": owner_user,
-            "fence_token": fence_token,
-            "coordination_epoch": epoch,
-            "devices": allocated_devices,
-            "service_port": service_port,
-            "state": raw_state,
+            "lease_id": lease_id, "alias": alias, "host": host_spec["host"], "owner": owner_user,
+            "fence_token": fence_token, "coordination_epoch": epoch,
+            "devices": allocated_devices, "service_port": service_port, "state": raw_state,
         }
         leases[f"{alias}:{lease_id}"] = lease_record
         leases[lease_id] = lease_record
@@ -832,19 +582,10 @@ def handle_lease(
 
         return {
             "state": "active" if raw_state in {"granted", "active", "starting"} else raw_state,
-            "lease_state": raw_state,
-            "action": "acquire",
-            "alias": alias,
-            "host": host_spec["host"],
-            "lease_id": lease_id,
-            "owner": owner_user,
-            "fence_token": fence_token,
-            "devices": allocated_devices,
-            "ascend_rt_visible_devices": visible_str,
-            "service_port": service_port,
-            "env": env_vars,
-            "lease": task,
-            "remote_dev_alias": alias,
+            "lease_state": raw_state, "action": "acquire", "alias": alias, "host": host_spec["host"],
+            "lease_id": lease_id, "owner": owner_user, "fence_token": fence_token,
+            "devices": allocated_devices, "ascend_rt_visible_devices": visible_str,
+            "service_port": service_port, "env": env_vars, "lease": task, "remote_dev_alias": alias,
         }
 
     if action == "heartbeat":
@@ -864,38 +605,18 @@ def handle_lease(
             raise caller_error(f"no fence_token found for lease {lease_id!r}; pass `fence_token` or acquire the lease first")
         response = host_queue.request(
             host_spec,
-            {
-                "action": "heartbeat",
-                "task_id": lease_id,
-                "fence_token": int(fence_token),
-                "heartbeat_ttl_seconds": ttl_seconds,
-                **remote_sd,
-            },
+            {"action": "heartbeat", "task_id": lease_id, "fence_token": int(fence_token), "heartbeat_ttl_seconds": ttl_seconds, **remote_sd},
         )
         task = response.get("task") or {}
         raw_state = str(task.get("state") or response.get("status") or "active")
-        allocated_devices = (
-            task.get("granted_devices")
-            if task.get("granted_devices") is not None
-            else (task.get("allocated_npus") or [])
-        )
-        service_port = (
-            task.get("granted_service_port")
-            if task.get("granted_service_port") is not None
-            else task.get("service_port")
-        )
+        allocated_devices = task.get("granted_devices") if task.get("granted_devices") is not None else (task.get("allocated_npus") or [])
+        service_port = task.get("granted_service_port") if task.get("granted_service_port") is not None else task.get("service_port")
         return {
             "state": "active" if raw_state in {"granted", "active", "starting"} else raw_state,
-            "lease_state": raw_state,
-            "action": "heartbeat",
-            "alias": alias,
-            "host": host_spec["host"],
-            "lease_id": lease_id,
-            "fence_token": int(fence_token),
-            "devices": allocated_devices,
+            "lease_state": raw_state, "action": "heartbeat", "alias": alias, "host": host_spec["host"],
+            "lease_id": lease_id, "fence_token": int(fence_token), "devices": allocated_devices,
             "ascend_rt_visible_devices": ",".join(str(d) for d in allocated_devices),
-            "service_port": service_port,
-            "lease": task,
+            "service_port": service_port, "lease": task,
         }
 
     if action == "release":
@@ -914,23 +635,13 @@ def handle_lease(
             response = host_queue.request(
                 host_spec,
                 {
-                    "action": "release",
-                    "task_id": lease_id,
-                    "fence_token": int(fence_token),
+                    "action": "release", "task_id": lease_id, "fence_token": int(fence_token),
                     "free_samples": int(args.get("free_samples") or 1),
-                    "interval_seconds": float(args.get("interval_seconds") or 0.0),
-                    **remote_sd,
+                    "interval_seconds": float(args.get("interval_seconds") or 0.0), **remote_sd,
                 },
             )
         else:
-            response = host_queue.request(
-                host_spec,
-                {
-                    "action": "cancel",
-                    "task_id": lease_id,
-                    **remote_sd,
-                },
-            )
+            response = host_queue.request(host_spec, {"action": "cancel", "task_id": lease_id, **remote_sd})
         leases.pop(f"{alias}:{lease_id}", None)
         leases.pop(lease_id, None)
         _save_leases(base_dir, leases)
@@ -938,13 +649,153 @@ def handle_lease(
         raw_state = str(task.get("state") or response.get("status") or "released")
         return {
             "state": "released" if raw_state in {"released", "cancelled"} else raw_state,
-            "lease_state": raw_state,
-            "action": "release",
-            "alias": alias,
-            "host": host_spec["host"],
-            "lease_id": lease_id,
-            "fence_token": int(fence_token) if fence_token is not None else None,
-            "lease": task,
+            "lease_state": raw_state, "action": "release", "alias": alias, "host": host_spec["host"],
+            "lease_id": lease_id, "fence_token": int(fence_token) if fence_token is not None else None, "lease": task,
         }
 
     raise caller_error(f"unsupported mindie.lease action: {action!r}")
+
+
+_LOOPBACK_IFNAMES = frozenset({"lo", "lo0", "localhost", "127.0.0.1", "::1"})
+
+
+def validate_vllm_ascend_runtime_env(
+    env: Mapping[str, Any] | None = None,
+    *,
+    additional_config: Mapping[str, Any] | None = None,
+    enforce_eager: bool = False,
+    cudagraph_mode: str | None = None,
+    enable_custom_ops: bool | None = None,
+    custom_op_vendor_dir: str | None = None,
+    multi_node: bool = False,
+    dynamic_shapes: bool = False,
+    is_moe: bool = False,
+    enable_sleep_mode: bool = False,
+) -> dict[str, Any]:
+    """Deterministically validate `vllm-ascend` & CANN runtime environment variables."""
+    env_map = {str(k): str(v) for k, v in (env or {}).items() if v is not None}
+    add_cfg = dict(additional_config or {})
+    violations: list[dict[str, Any]] = []
+    recommended_env: dict[str, str] = {}
+
+    def _add(code: str, severity: str, message: str, remediation: str, **extra: Any) -> None:
+        violations.append({"code": code, "rule": code, "severity": severity, "message": message, "remediation": remediation, **extra})
+
+    # 1. Graph mode (`ACLGraph` / `torchair` / `xlite` / `npugraph_ex`) vs `ASCEND_LAUNCH_BLOCKING=1`
+    torchair_cfg, xlite_cfg, comp_cfg = add_cfg.get("torchair_graph_config") or {}, add_cfg.get("xlite_graph_config") or {}, add_cfg.get("ascend_compilation_config") or {}
+    cg_mode = str(cudagraph_mode or env_map.get("VLLM_CUDAGRAPH_MODE") or ("NONE" if enforce_eager else "PIECEWISE")).strip().upper()
+    graph_enabled = (
+        (not enforce_eager and cg_mode not in {"NONE", "0", "FALSE", ""})
+        or bool(isinstance(torchair_cfg, Mapping) and torchair_cfg.get("enabled"))
+        or bool(isinstance(xlite_cfg, Mapping) and xlite_cfg.get("enabled"))
+        or bool(isinstance(comp_cfg, Mapping) and comp_cfg.get("enable_npugraph_ex"))
+    )
+    if graph_enabled and env_map.get("ASCEND_LAUNCH_BLOCKING", "").strip().lower() in {"1", "true", "yes"}:
+        recommended_env["ASCEND_LAUNCH_BLOCKING"] = "0"
+        _add(
+            "aclgraph_launch_blocking_conflict", "error",
+            "ACLGraph / Torchair / npugraph_ex graph capture is enabled while ASCEND_LAUNCH_BLOCKING=1 is set; vllm-ascend raises `ValueError: ACL graph is incompatible with ASCEND_LAUNCH_BLOCKING=1`.",
+            "Set `ASCEND_LAUNCH_BLOCKING=0` (or unset it) for ACLGraph/npugraph_ex execution, or pass `--enforce-eager` when isolating single-op faults.",
+            env_keys=["ASCEND_LAUNCH_BLOCKING"],
+        )
+    elif graph_enabled and (env_map.get("DUMP_GE_GRAPH", "").strip() in {"1", "2", "3"} or env_map.get("ASCEND_GLOBAL_LOG_LEVEL", "").strip() in {"0", "1"}):
+        _add(
+            "aclgraph_launch_blocking_conflict", "warning",
+            "Verbose GE graph dump (`DUMP_GE_GRAPH`) or debug log level (`ASCEND_GLOBAL_LOG_LEVEL=0/1`) is active during graph mode.",
+            "Set `ASCEND_GLOBAL_LOG_LEVEL=3` and unset `DUMP_GE_GRAPH` after graph capture diagnosis to avoid capture timeouts.",
+            env_keys=["DUMP_GE_GRAPH", "ASCEND_GLOBAL_LOG_LEVEL"],
+        )
+
+    # 2. Custom AscendC op library path (`_cann_ops_custom` / `op_api/lib` in `LD_LIBRARY_PATH`)
+    rl_cfg = add_cfg.get("rl_config") or {}
+    batch_invariant = env_map.get("VLLM_BATCH_INVARIANT", "").strip().lower() in {"1", "true", "yes"} or bool(isinstance(rl_cfg, Mapping) and rl_cfg.get("enable_batch_invariant"))
+    custom_opp, ld_library_path = str(env_map.get("ASCEND_CUSTOM_OPP_PATH") or custom_op_vendor_dir or "").strip(), str(env_map.get("LD_LIBRARY_PATH") or "").strip()
+    ld_entries = [p.strip().rstrip("/") for p in ld_library_path.split(":") if p.strip()]
+    custom_ops_requested = ((enable_custom_ops is True) or (enable_custom_ops is None and (bool(custom_opp) or env_map.get("COMPILE_CUSTOM_KERNELS", "").strip() in {"1", "true"}))) and not batch_invariant
+    if custom_ops_requested:
+        vendor_dirs = [p.strip().rstrip("/") for p in custom_opp.split(":") if p.strip()]
+        expected_lib_dirs = [f"{v}/op_api/lib" if not v.endswith("/op_api/lib") else v for v in vendor_dirs]
+        has_op_api_lib = any(entry.endswith("/op_api/lib") or "_cann_ops_custom" in entry for entry in ld_entries)
+        missing_specific_libs = [lib_dir for lib_dir in expected_lib_dirs if lib_dir not in ld_entries]
+        if missing_specific_libs or not has_op_api_lib or not env_map.get("ASCEND_CUSTOM_OPP_PATH", "").strip():
+            target_vendor = vendor_dirs[0] if vendor_dirs else "/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize"
+            target_lib = f"{target_vendor}/op_api/lib" if not target_vendor.endswith("/op_api/lib") else target_vendor
+            recommended_env["ASCEND_CUSTOM_OPP_PATH"] = custom_opp or target_vendor
+            recommended_env["LD_LIBRARY_PATH"] = f"{target_lib}:{ld_library_path}" if ld_library_path else target_lib
+            _add(
+                "missing_custom_op_library_path", "error",
+                "Custom AscendC operators (`_C_ascend` / `_cann_ops_custom`) are enabled, but `ASCEND_CUSTOM_OPP_PATH` or `<vendor_dir>/op_api/lib` (`libcust_opapi.so`) is missing from `LD_LIBRARY_PATH`.",
+                f"Export `ASCEND_CUSTOM_OPP_PATH={recommended_env['ASCEND_CUSTOM_OPP_PATH']}` and prepend `{target_lib}` to `LD_LIBRARY_PATH`.",
+                env_keys=["ASCEND_CUSTOM_OPP_PATH", "LD_LIBRARY_PATH"],
+            )
+
+    # 3. Multi-node / HCCL / Gloo / TP socket interface consistency & loopback check
+    hccl_if, gloo_if, tp_if = env_map.get("HCCL_SOCKET_IFNAME", "").strip(), env_map.get("GLOO_SOCKET_IFNAME", "").strip(), env_map.get("TP_SOCKET_IFNAME", "").strip()
+    hccl_ip = (env_map.get("HCCL_IF_IP") or env_map.get("VLLM_HOST_IP") or "").strip()
+    if_map = {k: v for k, v in (("HCCL_SOCKET_IFNAME", hccl_if), ("GLOO_SOCKET_IFNAME", gloo_if), ("TP_SOCKET_IFNAME", tp_if)) if v}
+    loopback_vars = [k for k, v in (*if_map.items(), ("HCCL_IF_IP", hccl_ip)) if v and (v.lower() in _LOOPBACK_IFNAMES or v.startswith("127."))]
+    if loopback_vars:
+        _add(
+            "multinode_socket_ifname_mismatch", "error",
+            f"Loopback interface or address configured in {', '.join(loopback_vars)}.",
+            "Bind `HCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_IF_IP` to the routable host/RoCE NIC (never `lo` or `127.0.0.1`).",
+            env_keys=loopback_vars,
+        )
+    elif len(set(if_map.values())) > 1:
+        canonical_if = hccl_if or gloo_if or tp_if
+        for key in ("HCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "TP_SOCKET_IFNAME"):
+            recommended_env[key] = canonical_if
+        _add(
+            "multinode_socket_ifname_mismatch", "error",
+            f"Inconsistent collective socket interfaces across {if_map}: HCCL, Gloo, and TP must bind the same NIC.",
+            f"Align `HCCL_SOCKET_IFNAME={canonical_if}`, `GLOO_SOCKET_IFNAME={canonical_if}`, and `TP_SOCKET_IFNAME={canonical_if}`.",
+            env_keys=list(if_map.keys()),
+        )
+    elif multi_node and (not hccl_if or not gloo_if):
+        if hccl_if or gloo_if:
+            recommended_env["HCCL_SOCKET_IFNAME"] = recommended_env["GLOO_SOCKET_IFNAME"] = hccl_if or gloo_if
+        _add(
+            "multinode_socket_ifname_mismatch", "error",
+            "Multi-node execution requires both `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` to be explicitly set to the routable NIC.",
+            "Export matching `HCCL_SOCKET_IFNAME=<nic>`, `GLOO_SOCKET_IFNAME=<nic>`, and `HCCL_IF_IP=<node_ip>` on every node.",
+            env_keys=["HCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME"],
+        )
+
+    # 4. NPU memory allocator fragmentation (`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`)
+    alloc_conf = env_map.get("PYTORCH_NPU_ALLOC_CONF", "").strip()
+    alloc_compact = alloc_conf.lower().replace(" ", "")
+    has_expandable_true, has_expandable_false = "expandable_segments:true" in alloc_compact, "expandable_segments:false" in alloc_compact
+    sleep_active = bool(enable_sleep_mode or (isinstance(rl_cfg, Mapping) and rl_cfg.get("enabled")))
+    moe_or_dynamic = bool(dynamic_shapes or is_moe or env_map.get("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", "").strip().lower() in {"1", "true"} or add_cfg.get("enable_shared_expert_dp") or add_cfg.get("multistream_overlap_shared_expert"))
+    if sleep_active and has_expandable_true:
+        recommended_env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
+        _add(
+            "npu_allocator_fragmentation_hazard", "error",
+            "`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` conflicts with `vllm-ascend` CaMem sleep mode (`enable_sleep_mode=True`).",
+            "Unset `expandable_segments:True` (or set `PYTORCH_NPU_ALLOC_CONF=expandable_segments:False`) when `enable_sleep_mode` / RL sleep mode is enabled.",
+            env_keys=["PYTORCH_NPU_ALLOC_CONF"],
+        )
+    elif moe_or_dynamic and not sleep_active and not has_expandable_true:
+        recommended_env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
+        _add(
+            "npu_allocator_fragmentation_hazard", "error" if has_expandable_false else "warning",
+            "Dynamic-shape or MoE workload is running without `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`, risking NPU HBM virtual/physical block fragmentation.",
+            "Export `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` before launching `vllm-ascend` on dynamic-shape or MoE models.",
+            env_keys=["PYTORCH_NPU_ALLOC_CONF"],
+        )
+    elif has_expandable_true and ("max_split_size_mb" in alloc_compact or "garbage_collection_threshold" in alloc_compact):
+        recommended_env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
+        _add(
+            "npu_allocator_fragmentation_hazard", "warning",
+            f"`PYTORCH_NPU_ALLOC_CONF={alloc_conf}` combines `expandable_segments:True` with legacy block-splitting knobs.",
+            "Keep only `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to avoid conflicting allocator behavior.",
+            env_keys=["PYTORCH_NPU_ALLOC_CONF"],
+        )
+
+    errors = [v for v in violations if v["severity"] == "error"]
+    warnings = [v for v in violations if v["severity"] == "warning"]
+    return {
+        "valid": len(errors) == 0, "status": "invalid" if errors else ("warning" if warnings else "ok"),
+        "violations": violations, "violation_codes": [v["code"] for v in violations],
+        "errors": errors, "warnings": warnings, "recommended_env": recommended_env,
+    }
