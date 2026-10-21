@@ -333,3 +333,65 @@ def test_rank_helper_marks_unknown_mount_as_ineligible_not_zero_capacity():
     assert row["npu_top_eligible"] is False
     assert any("unproven" in reason for reason in row["npu_top_reasons"])
     assert observation_host_order(ranked)["unknown-mount"] == 0
+
+
+def test_fleet_probe_distinguishes_disk_io_wait_d_state_from_npu_hang():
+    raw_probe = "\n".join([
+        "===SECTION:NPU_SMI===",
+        "| NPU     Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|",
+        "| 0       910B4               | OK            | 92.1        42                0    / 0             |",
+        "| 0       0                   | 0000:C1:00.0  | 0           1024 / 65536      18432/ 65536         |",
+        "| NPU     Chip                | Process id    | Process name             | Process memory(MB) |",
+        "| 0       0                   | 44120         | VLLM::EngineCore         | 18432              |",
+        "===SECTION:CONTAINERS===",
+        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2|vllm-dev|ascend-vllm:latest|Up 2 hours|0.0.0.0:46001->22/tcp",
+        "===SECTION:PID_MAP===",
+        "44120|root|0::/docker/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2|D|lock_page_killable",
+    ])
+    snap = fleet_probe.parse_fleet_probe_output(raw_probe, alias="a2-node", host="173.125.1.2")
+    card0 = snap["npus"][0]
+    assert card0["aicore_pct"] == 0.0
+    assert card0["disk_io_wait_pids"] == [44120]
+    proc = card0["processes"][0]
+    assert proc["proc_state"] == "D"
+    assert proc["wchan"] == "lock_page_killable"
+    assert proc["disk_io_wait"] is True
+    assert proc["container_name"] == "vllm-dev"
+
+
+def test_checkpoint_preflight_detects_unquantized_experts_truncation_and_unaligned_head_dim(tmp_path):
+    import struct
+    from mindie_coordinator.checkpoint_preflight import inspect_safetensors_checkpoint
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "head_dim": 35,
+        "quantization_config": {"quant_method": "compressed-tensors", "format": "w8a8"},
+    }), encoding="utf-8")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {
+            "model.layers.0.mlp.experts.0.down_proj.weight": "model-00001-of-00002.safetensors",
+            "model.layers.0.self_attn.q_proj.weight": "model-00002-of-00002.safetensors",
+        }
+    }), encoding="utf-8")
+    header = {
+        "model.layers.0.mlp.experts.0.down_proj.weight": {
+            "dtype": "BF16",
+            "shape": [1024, 1024],
+            "data_offsets": [0, 2097152],
+        }
+    }
+    raw_hdr = json.dumps(header).encode("utf-8")
+    # Write truncated payload (only 64 bytes instead of 2097152)
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(
+        struct.pack("<Q", len(raw_hdr)) + raw_hdr + (b"\x00" * 64)
+    )
+    report = inspect_safetensors_checkpoint(tmp_path, tp_size=2, ep_size=4)
+    assert report["valid"] is False
+    assert report["head_dim"] == 35
+    assert report["head_dim_32b_aligned"] is False
+    assert set(report["issue_codes"]) == {
+        "unaligned_head_dim_32b",
+        "missing_safetensors_shards",
+        "truncated_or_corrupt_shard",
+        "unquantized_routed_experts_in_quant_checkpoint",
+    }
