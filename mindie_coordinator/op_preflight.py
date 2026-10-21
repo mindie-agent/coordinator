@@ -1,26 +1,26 @@
-"""Static AST and binary schema preflight for Ascend NPU custom operators.
+"""Static AST, SoC feature compatibility, and NUMA/CPU binding preflight for Ascend NPU.
 
 [Role]
-Extracts ground-truth operator schemas (`npu::*`, `_C_ascend::*`) and validates
-Python source files in sub-second AST preflight before NPU lease allocation or
-model launch.
+Extracts ground-truth operator schemas (`npu::*`, `_C_ascend::*`), validates
+Python source files in sub-second AST preflight, and verifies SoC hardware
+feature compatibility (`validate_model_soc_feature_compatibility`) and NUMA/CPU
+core binding plans (`validate_numa_cpu_binding_plan`) before NPU lease or launch.
 
 [Invariants]
 - Stdlib-only so the module can run both locally on coordinator source snapshots
   and remotely inside container preflight probes without external dependencies.
-- Never executes user code or initializes NPU devices during static AST checks.
-- Every violation reports exact file path, line number, operator name, violated
-  contract (`unknown_ascend_op`, `return_arity_mismatch`,
-  `inplace_noncontiguous_or_copy_arg`, `unmigrated_cuda_call`), and a concrete
-  remediation hint.
+- Never executes user code or initializes NPU devices during static preflight.
+- Every violation reports an explicit rule/code, severity, affected target, and
+  concrete remediation hint.
 
 [Timeouts & Locks]
-- Pure in-memory AST analysis (`< 50ms` per file); zero subprocesses or locks.
+- Pure in-memory analysis (`< 50ms` per file); zero subprocesses or locks.
 
 [Side-Effect Policy]
-- `check_python_op_contracts` and `check_paths_op_contracts` are pure read-only
-  functions. `write_runtime_op_catalog` writes `.mindie-runtime/ascend-ops-catalog.json`
-  atomically via `.tmp` + `os.replace`.
+- `check_python_op_contracts`, `check_paths_op_contracts`,
+  `validate_model_soc_feature_compatibility`, and `validate_numa_cpu_binding_plan`
+  are pure read-only functions. `write_runtime_op_catalog` writes
+  `.mindie-runtime/ascend-ops-catalog.json` atomically via `.tmp` + `os.replace`.
 """
 from __future__ import annotations
 
@@ -39,162 +39,72 @@ CATALOG_RELATIVE_PATH = ".mindie-runtime/ascend-ops-catalog.json"
 # - return_arity: 1 for single Tensor, >=2 for tuple return, 0 for None/in-place.
 # - in_place_args: list of [positional_index, keyword_name] with Tensor(a!) semantics.
 DEFAULT_ASCEND_OP_CATALOG: dict[str, dict[str, Any]] = {
-    # torch_npu / npu:: namespace
     "torch_npu.npu_rms_norm": {
-        "namespace": "torch_npu",
-        "op": "npu_rms_norm",
-        "return_arity": 2,
-        "returns": "(Tensor y, Tensor rstd)",
-        "in_place_args": [],
-        "hint": (
-            "torch_npu.npu_rms_norm(x, gamma, epsilon) returns a 2-tuple (y, rstd); "
-            "unpack `y, _ = torch_npu.npu_rms_norm(...)` or index `[0]`, or use "
-            "`torch.ops._C_ascend.rms_norm(x, gamma, epsilon)` which returns a single Tensor."
-        ),
+        "namespace": "torch_npu", "op": "npu_rms_norm", "return_arity": 2, "returns": "(Tensor y, Tensor rstd)", "in_place_args": [],
+        "hint": "torch_npu.npu_rms_norm(x, gamma, epsilon) returns a 2-tuple (y, rstd); unpack `y, _ = torch_npu.npu_rms_norm(...)` or index `[0]`, or use `torch.ops._C_ascend.rms_norm(x, gamma, epsilon)` which returns a single Tensor.",
     },
     "torch_npu.npu_add_rms_norm": {
-        "namespace": "torch_npu",
-        "op": "npu_add_rms_norm",
-        "return_arity": 3,
-        "returns": "(Tensor y, Tensor rstd, Tensor x_out)",
-        "in_place_args": [],
-        "hint": (
-            "torch_npu.npu_add_rms_norm(x1, x2, gamma, epsilon) returns a 3-tuple "
-            "(y, rstd, x_out); unpack `y, _, residual = torch_npu.npu_add_rms_norm(...)`."
-        ),
+        "namespace": "torch_npu", "op": "npu_add_rms_norm", "return_arity": 3, "returns": "(Tensor y, Tensor rstd, Tensor x_out)", "in_place_args": [],
+        "hint": "torch_npu.npu_add_rms_norm(x1, x2, gamma, epsilon) returns a 3-tuple (y, rstd, x_out); unpack `y, _, residual = torch_npu.npu_add_rms_norm(...)`.",
     },
     "torch_npu.npu_swiglu": {
-        "namespace": "torch_npu",
-        "op": "npu_swiglu",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [],
+        "namespace": "torch_npu", "op": "npu_swiglu", "return_arity": 1, "returns": "Tensor", "in_place_args": [],
         "hint": "torch_npu.npu_swiglu(x, dim=-1) returns a single Tensor.",
     },
     "torch_npu.npu_rotary_mul": {
-        "namespace": "torch_npu",
-        "op": "npu_rotary_mul",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [],
+        "namespace": "torch_npu", "op": "npu_rotary_mul", "return_arity": 1, "returns": "Tensor", "in_place_args": [],
         "hint": "torch_npu.npu_rotary_mul(x, r1, r2) returns a single Tensor.",
     },
     "torch_npu.npu_recurrent_gated_delta_rule": {
-        "namespace": "torch_npu",
-        "op": "npu_recurrent_gated_delta_rule",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [[4, "initial_state"], [4, "state"]],
-        "hint": (
-            "torch_npu.npu_recurrent_gated_delta_rule mutates `initial_state` (`Tensor(a!)`) "
-            "in-place and requires a contiguous tensor buffer; never pass `.transpose(...)`, "
-            "`.permute(...)`, or a temporary `.to(...)`/`.clone()` copy directly as `initial_state`."
-        ),
+        "namespace": "torch_npu", "op": "npu_recurrent_gated_delta_rule", "return_arity": 1, "returns": "Tensor", "in_place_args": [[4, "initial_state"], [4, "state"]],
+        "hint": "torch_npu.npu_recurrent_gated_delta_rule mutates `initial_state` (`Tensor(a!)`) in-place and requires a contiguous tensor buffer; never pass `.transpose(...)`, `.permute(...)`, or a temporary `.to(...)`/`.clone()` copy directly as `initial_state`.",
     },
     "torch_npu.npu_chunk_gated_delta_rule": {
-        "namespace": "torch_npu",
-        "op": "npu_chunk_gated_delta_rule",
-        "return_arity": 2,
-        "returns": "(Tensor out, Tensor final_state)",
-        "in_place_args": [],
+        "namespace": "torch_npu", "op": "npu_chunk_gated_delta_rule", "return_arity": 2, "returns": "(Tensor out, Tensor final_state)", "in_place_args": [],
         "hint": "torch_npu.npu_chunk_gated_delta_rule returns a 2-tuple (out, final_state).",
     },
     "torch_npu.npu_causal_conv1d_update": {
-        "namespace": "torch_npu",
-        "op": "npu_causal_conv1d_update",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [[1, "conv_state"]],
-        "hint": (
-            "torch_npu.npu_causal_conv1d_update mutates `conv_state` (`Tensor(a!)`) in-place; "
-            "pass a contiguous persistent state buffer rather than a non-contiguous `.transpose()` view."
-        ),
+        "namespace": "torch_npu", "op": "npu_causal_conv1d_update", "return_arity": 1, "returns": "Tensor", "in_place_args": [[1, "conv_state"]],
+        "hint": "torch_npu.npu_causal_conv1d_update mutates `conv_state` (`Tensor(a!)`) in-place; pass a contiguous persistent state buffer rather than a non-contiguous `.transpose()` view.",
     },
     "torch_npu.npu_scatter_nd_update_": {
-        "namespace": "torch_npu",
-        "op": "npu_scatter_nd_update_",
-        "return_arity": 1,
-        "returns": "Tensor(a!)",
-        "in_place_args": [[0, "var"], [0, "self"]],
-        "hint": (
-            "torch_npu.npu_scatter_nd_update_ mutates its first argument (`var`, `Tensor(a!)`) "
-            "in-place; pass a contiguous tensor rather than a non-contiguous `.transpose()`/`.permute()` view."
-        ),
+        "namespace": "torch_npu", "op": "npu_scatter_nd_update_", "return_arity": 1, "returns": "Tensor(a!)", "in_place_args": [[0, "var"], [0, "self"]],
+        "hint": "torch_npu.npu_scatter_nd_update_ mutates its first argument (`var`, `Tensor(a!)`) in-place; pass a contiguous tensor rather than a non-contiguous `.transpose()`/`.permute()` view.",
     },
     "torch_npu.npu_grouped_matmul": {
-        "namespace": "torch_npu",
-        "op": "npu_grouped_matmul",
-        "return_arity": 1,
-        "returns": "Tensor[]",
-        "in_place_args": [],
+        "namespace": "torch_npu", "op": "npu_grouped_matmul", "return_arity": 1, "returns": "Tensor[]", "in_place_args": [],
         "hint": "torch_npu.npu_grouped_matmul returns a list of Tensors.",
     },
     "torch_npu.npu_quant_matmul": {
-        "namespace": "torch_npu",
-        "op": "npu_quant_matmul",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [],
+        "namespace": "torch_npu", "op": "npu_quant_matmul", "return_arity": 1, "returns": "Tensor", "in_place_args": [],
         "hint": "torch_npu.npu_quant_matmul returns a single Tensor.",
     },
     "torch_npu.npu_DynamicQuant": {
-        "namespace": "torch_npu",
-        "op": "npu_DynamicQuant",
-        "return_arity": 2,
-        "returns": "(Tensor y, Tensor scale)",
-        "in_place_args": [],
+        "namespace": "torch_npu", "op": "npu_DynamicQuant", "return_arity": 2, "returns": "(Tensor y, Tensor scale)", "in_place_args": [],
         "hint": "torch_npu.npu_dynamic_quant returns (y, scale).",
     },
     "torch_npu.npu_dynamic_quant": {
-        "namespace": "torch_npu",
-        "op": "npu_dynamic_quant",
-        "return_arity": 2,
-        "returns": "(Tensor y, Tensor scale)",
-        "in_place_args": [],
+        "namespace": "torch_npu", "op": "npu_dynamic_quant", "return_arity": 2, "returns": "(Tensor y, Tensor scale)", "in_place_args": [],
         "hint": "torch_npu.npu_dynamic_quant(x) returns a 2-tuple (y, scale).",
     },
-    # _C_ascend custom op namespace
     "torch.ops._C_ascend.rms_norm": {
-        "namespace": "torch.ops._C_ascend",
-        "op": "rms_norm",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [],
-        "hint": (
-            "torch.ops._C_ascend.rms_norm(x, weight, eps) returns a single Tensor "
-            "(unlike torch_npu.npu_rms_norm which returns a 2-tuple (y, rstd))."
-        ),
+        "namespace": "torch.ops._C_ascend", "op": "rms_norm", "return_arity": 1, "returns": "Tensor", "in_place_args": [],
+        "hint": "torch.ops._C_ascend.rms_norm(x, weight, eps) returns a single Tensor (unlike torch_npu.npu_rms_norm which returns a 2-tuple (y, rstd)).",
     },
     "torch.ops._C_ascend.fused_add_rms_norm": {
-        "namespace": "torch.ops._C_ascend",
-        "op": "fused_add_rms_norm",
-        "return_arity": 2,
-        "returns": "(Tensor x, Tensor residual)",
-        "in_place_args": [[0, "input"], [1, "residual"]],
+        "namespace": "torch.ops._C_ascend", "op": "fused_add_rms_norm", "return_arity": 2, "returns": "(Tensor x, Tensor residual)", "in_place_args": [[0, "input"], [1, "residual"]],
         "hint": "torch.ops._C_ascend.fused_add_rms_norm mutates input/residual and returns (x, residual).",
     },
     "torch.ops._C_ascend.fused_rmsnorm_gated": {
-        "namespace": "torch.ops._C_ascend",
-        "op": "fused_rmsnorm_gated",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [],
+        "namespace": "torch.ops._C_ascend", "op": "fused_rmsnorm_gated", "return_arity": 1, "returns": "Tensor", "in_place_args": [],
         "hint": "torch.ops._C_ascend.fused_rmsnorm_gated returns a single Tensor.",
     },
     "torch.ops._C_ascend.weak_ref_tensor": {
-        "namespace": "torch.ops._C_ascend",
-        "op": "weak_ref_tensor",
-        "return_arity": 1,
-        "returns": "Tensor",
-        "in_place_args": [],
+        "namespace": "torch.ops._C_ascend", "op": "weak_ref_tensor", "return_arity": 1, "returns": "Tensor", "in_place_args": [],
         "hint": "torch.ops._C_ascend.weak_ref_tensor(tensor) returns a single Tensor.",
     },
     "torch.ops._C_ascend.reshape_and_cache": {
-        "namespace": "torch.ops._C_ascend",
-        "op": "reshape_and_cache",
-        "return_arity": 0,
-        "returns": "None",
-        "in_place_args": [[2, "key_cache"], [3, "value_cache"]],
+        "namespace": "torch.ops._C_ascend", "op": "reshape_and_cache", "return_arity": 0, "returns": "None", "in_place_args": [[2, "key_cache"], [3, "value_cache"]],
         "hint": "torch.ops._C_ascend.reshape_and_cache mutates key_cache/value_cache in-place and returns None.",
     },
 }
@@ -467,26 +377,14 @@ def check_python_op_contracts(
                             has_star = any(isinstance(elt, ast.Starred) for elt in target.elts)
                             if arity == 1 and len(target.elts) > 1:
                                 violations.append({
-                                    "file": filename,
-                                    "line": stmt.lineno,
-                                    "rule": "return_arity_mismatch",
-                                    "operator": op_name,
-                                    "message": (
-                                        f"`{op_name}` returns a single {spec.get('returns', 'Tensor')}, "
-                                        f"not a {len(target.elts)}-tuple."
-                                    ),
+                                    "file": filename, "line": stmt.lineno, "rule": "return_arity_mismatch", "operator": op_name,
+                                    "message": f"`{op_name}` returns a single {spec.get('returns', 'Tensor')}, not a {len(target.elts)}-tuple.",
                                     "hint": spec.get("hint", f"Assign `{op_name}(...)` to a single variable."),
                                 })
                             elif arity >= 2 and not has_star and len(target.elts) != arity:
                                 violations.append({
-                                    "file": filename,
-                                    "line": stmt.lineno,
-                                    "rule": "return_arity_mismatch",
-                                    "operator": op_name,
-                                    "message": (
-                                        f"`{op_name}` returns a {arity}-tuple {spec.get('returns', '')}, "
-                                        f"but is unpacked into {len(target.elts)} targets."
-                                    ),
+                                    "file": filename, "line": stmt.lineno, "rule": "return_arity_mismatch", "operator": op_name,
+                                    "message": f"`{op_name}` returns a {arity}-tuple {spec.get('returns', '')}, but is unpacked into {len(target.elts)} targets.",
                                     "hint": spec.get("hint", f"Unpack all {arity} elements or index `[0]`."),
                                 })
                         elif isinstance(target, ast.Name):
@@ -508,10 +406,7 @@ def check_python_op_contracts(
                         cuda_api = dotted.split(".", 2)[2]
                         if cuda_api in _UNMIGRATED_CUDA_APIS:
                             violations.append({
-                                "file": filename,
-                                "line": getattr(node, "lineno", 1),
-                                "rule": "unmigrated_cuda_call",
-                                "operator": dotted,
+                                "file": filename, "line": getattr(node, "lineno", 1), "rule": "unmigrated_cuda_call", "operator": dotted,
                                 "message": f"Unmigrated `{dotted}` call in Ascend code path.",
                                 "hint": f"Replace `{dotted}` with `torch.npu.{cuda_api}` or `torch_npu.npu.{cuda_api}`.",
                             })
@@ -539,14 +434,9 @@ def check_python_op_contracts(
                                 issue, detail = _classify_arg_view_or_copy(arg_expr, local_views)
                                 if issue is not None:
                                     violations.append({
-                                        "file": filename,
-                                        "line": getattr(arg_expr, "lineno", getattr(node, "lineno", 1)),
-                                        "rule": "inplace_noncontiguous_or_copy_arg",
-                                        "operator": op_name,
-                                        "message": (
-                                            f"In-place argument `{kw_name}` (`Tensor(a!)`) of `{op_name}` "
-                                            f"received {detail}."
-                                        ),
+                                        "file": filename, "line": getattr(arg_expr, "lineno", getattr(node, "lineno", 1)),
+                                        "rule": "inplace_noncontiguous_or_copy_arg", "operator": op_name,
+                                        "message": f"In-place argument `{kw_name}` (`Tensor(a!)`) of `{op_name}` received {detail}.",
                                         "hint": spec.get("hint", f"Pass a contiguous persistent Tensor buffer to `{kw_name}`."),
                                     })
 
@@ -557,27 +447,15 @@ def check_python_op_contracts(
                         spec = ops_catalog.get(op_name or "")
                         if op_name and spec and int(spec.get("return_arity", 1)) >= 2:
                             violations.append({
-                                "file": filename,
-                                "line": getattr(node, "lineno", 1),
-                                "rule": "return_arity_mismatch",
-                                "operator": op_name,
-                                "message": (
-                                    f"`{op_name}` returns a {spec['return_arity']}-tuple {spec.get('returns', '')}, "
-                                    f"so `.{node.attr}` fails with AttributeError on tuple."
-                                ),
+                                "file": filename, "line": getattr(node, "lineno", 1), "rule": "return_arity_mismatch", "operator": op_name,
+                                "message": f"`{op_name}` returns a {spec['return_arity']}-tuple {spec.get('returns', '')}, so `.{node.attr}` fails with AttributeError on tuple.",
                                 "hint": spec.get("hint", f"Index `{op_name}(...)[0].{node.attr}` or unpack the tuple first."),
                             })
                     elif isinstance(node.value, ast.Name) and node.value.id in tuple_vars:
                         _, op_name, spec = tuple_vars[node.value.id]
                         violations.append({
-                            "file": filename,
-                            "line": getattr(node, "lineno", 1),
-                            "rule": "return_arity_mismatch",
-                            "operator": op_name,
-                            "message": (
-                                f"`{node.value.id}` holds the {spec['return_arity']}-tuple result of `{op_name}` "
-                                f"{spec.get('returns', '')}, so `{node.value.id}.{node.attr}` fails on tuple."
-                            ),
+                            "file": filename, "line": getattr(node, "lineno", 1), "rule": "return_arity_mismatch", "operator": op_name,
+                            "message": f"`{node.value.id}` holds the {spec['return_arity']}-tuple result of `{op_name}` {spec.get('returns', '')}, so `{node.value.id}.{node.attr}` fails on tuple.",
                             "hint": spec.get("hint", f"Unpack `{node.value.id}, _ = {op_name}(...)` or index `{node.value.id}[0]`."),
                         })
 
@@ -587,14 +465,8 @@ def check_python_op_contracts(
                         if isinstance(side, ast.Name) and side.id in tuple_vars:
                             _, op_name, spec = tuple_vars[side.id]
                             violations.append({
-                                "file": filename,
-                                "line": getattr(node, "lineno", 1),
-                                "rule": "return_arity_mismatch",
-                                "operator": op_name,
-                                "message": (
-                                    f"`{side.id}` holds the {spec['return_arity']}-tuple result of `{op_name}` "
-                                    f"and cannot be used directly in tensor arithmetic."
-                                ),
+                                "file": filename, "line": getattr(node, "lineno", 1), "rule": "return_arity_mismatch", "operator": op_name,
+                                "message": f"`{side.id}` holds the {spec['return_arity']}-tuple result of `{op_name}` and cannot be used directly in tensor arithmetic.",
                                 "hint": spec.get("hint", f"Unpack `{side.id}, _ = {op_name}(...)` or index `{side.id}[0]`."),
                             })
 
@@ -686,3 +558,252 @@ def format_op_violations(violations: Iterable[Mapping[str, Any]]) -> str:
     if len(items) > 10:
         lines.append(f"  ... and {len(items) - 10} more violation(s).")
     return "\n".join(lines)
+
+
+def _normalize_soc_family(soc_version: str) -> str:
+    lowered = str(soc_version or "").strip().lower()
+    if any(tok in lowered for tok in ("310p", "300i duo", "_310p")):
+        return "Ascend310P"
+    if any(tok in lowered for tok in ("910_93", "910c", "atlas 900 a3", "atlas 800i a3")) or lowered in {"a3", "ascenda3"}:
+        return "Ascend910_93"
+    if any(tok in lowered for tok in ("950", "ascend950")) or lowered in {"a5", "ascenda5"}:
+        return "Ascend950"
+    if any(tok in lowered for tok in ("910b", "910_91", "910_92")) or lowered in {"a2", "ascenda2"}:
+        return "Ascend910B"
+    return "unknown"
+
+
+def validate_model_soc_feature_compatibility(
+    soc_version: str,
+    features: Mapping[str, Any] | Iterable[str] | None = None,
+    *,
+    dtype: str | None = None,
+    quantization: str | None = None,
+    attention_backend: str | None = None,
+    moe_comm_type: str | None = None,
+    topology_policy: str | None = None,
+    experts_per_rank: int | None = None,
+) -> dict[str, Any]:
+    """Validate model dtype, quantization, attention, MoE, and topology against Ascend SoC capabilities."""
+    family = _normalize_soc_family(soc_version)
+    feat_map: dict[str, Any] = {}
+    active_tags: set[str] = set()
+    if isinstance(features, Mapping):
+        feat_map = {str(k).strip().lower(): v for k, v in features.items()}
+        for k, v in feat_map.items():
+            if isinstance(v, bool) and v:
+                active_tags.add(k)
+            elif isinstance(v, str) and v.strip():
+                active_tags.add(f"{k}:{v.strip().lower()}")
+                active_tags.add(v.strip().lower())
+    elif features is not None and not isinstance(features, (str, bytes)):
+        active_tags.update(str(item).strip().lower() for item in features if str(item).strip())
+    elif isinstance(features, str) and features.strip():
+        active_tags.add(features.strip().lower())
+
+    for key, val in (
+        ("dtype", dtype), ("quantization", quantization), ("attention_backend", attention_backend),
+        ("moe_comm_type", moe_comm_type), ("topology_policy", topology_policy),
+    ):
+        resolved = str(val or feat_map.get(key) or "").strip().lower()
+        if resolved:
+            feat_map[key] = resolved
+            active_tags.add(resolved)
+    resolved_experts = experts_per_rank if experts_per_rank is not None else feat_map.get("experts_per_rank")
+    violations: list[dict[str, Any]] = []
+
+    def _fail(code: str, feature: str, msg: str, remediation: str, severity: str = "error") -> None:
+        violations.append({"code": code, "rule": code, "severity": severity, "feature": feature, "soc_family": family, "message": msg, "remediation": remediation})
+
+    if family == "Ascend310P":
+        if active_tags & {"bf16", "bfloat16", "torch.bfloat16"}:
+            _fail("soc_310p_bf16_unsupported", "bf16", "Ascend310P lacks hardware BF16 compute units and always casts weights to FRACTAL_NZ FP16/INT8.", "Use `--dtype float16` (`fp16`) or W8A8 INT8 quantization on Ascend310P.")
+        if active_tags & {"mxfp8", "mxfp4", "w4a4_mxfp4", "fp8", "w8a8_mxfp8"}:
+            _fail("soc_310p_microscaling_quant_unsupported", "mxfp8/mxfp4", "Microscaling FP8/FP4 (`mxfp8`, `mxfp4`) is unsupported on Ascend310P.", "Quantize to `W8A8` or `W8A16` via `msmodelslim` with FP16 activations on Ascend310P.")
+        if active_tags & {"mla", "mla_v1", "fia_tnd", "sfa_v1", "dsa_v1"}:
+            _fail("soc_310p_mla_fia_tnd_unsupported", "mla/fia_tnd", "DeepSeek MLA / FIA TND layout and Sparse Flash Attention (`sfa_v1`, `dsa_v1`) are unsupported on Ascend310P.", "Run MLA/SFA models on Ascend910B (A2) or Ascend910_93 (A3), or use standard GQA/MHA with BSND layout on 310P.")
+        if active_tags & {"mc2", "fused_mc2", "dispatch_ffn_combine", "mega_moe", "npu_moe_distribute_dispatch_v2"}:
+            _fail("soc_310p_mc2_unsupported", "mc2", "HCCS-backed MC2 fused MoE dispatch/combine operators are unavailable on Ascend310P.", "Deploy MoE MC2 workloads on Ascend910B (A2) or Ascend910_93 (A3) HCCS topologies.")
+        if active_tags & {"npugraph_ex", "static_kernel"}:
+            _fail("soc_310p_graph_static_kernel_unsupported", "npugraph_ex/static_kernel", "Ascend310P does not support `npugraph_ex` static kernel compilation (`is_static_kernel_on_310p() == False`).", "Disable `static_kernel` or run with `--enforce-eager` on Ascend310P.")
+
+    elif family == "Ascend910B":
+        if active_tags & {"mxfp4", "w4a4_mxfp4", "simt", "ub_fabric", "mla_fia_split"}:
+            _fail("soc_910b_a5_native_feature_unsupported", "mxfp4/simt", "Native hardware MXFP4 (`w4a4`), SIMT UB instructions (`lds`/`sts`), and A5 `mla_fia_split` require Ascend950 (A5).", "On Ascend910B (A2), use `W8A8_DYNAMIC` or `W4A8_DYNAMIC` (`msmodelslim`) and standard Cube/Vector kernels.")
+        if active_tags & {"sio", "dual_die_sio", "same_npu_dual_die"}:
+            _fail("soc_910b_dual_die_sio_unsupported", "same_npu_dual_die", "Ascend910B (A2) is a single-Die NPU (`1 NPU = 1 Phy-ID`) without intra-package SIO dual-Die interconnect.", "Use `intra_node_hccs` placement policy on Ascend910B instead of `same_npu_dual_die` / `sio` (A3 910C only).")
+        if (active_tags & {"mc2", "fused_mc2"}) and resolved_experts is not None and int(resolved_experts) > 24:
+            _fail("soc_910b_mc2_expert_limit_exceeded", "mc2", f"Ascend910B MC2 supports at most 24 routed experts per rank (got experts_per_rank={resolved_experts}).", "Increase EP degree (`ep_size`) so `experts_per_rank <= 24`, or switch `moe_comm_type` to `alltoall`.")
+
+    elif family == "Ascend910_93":
+        if active_tags & {"mxfp4", "w4a4_mxfp4", "simt", "ub_fabric"}:
+            _fail("soc_910c_a5_native_feature_unsupported", "mxfp4/simt", "Native hardware MXFP4 and SIMT UB instructions require Ascend950 (A5).", "On Ascend910_93 (A3 910C), use `W8A8_DYNAMIC` or `W4A8_DYNAMIC` with dual-Die SIO/HCCS placement.")
+
+    elif family == "Ascend950":
+        if active_tags & {"hccl_intra_roce_enable", "sfa_dcp_replicated_indexer"}:
+            _fail("soc_950_feature_unsupported", "hccl_intra_roce_enable/sfa_dcp", "`HCCL_INTRA_ROCE_ENABLE=1` and SFA Decode Context Parallelism (`dcp > 1`) are unsupported on Ascend950 (A5).", "Unset `HCCL_INTRA_ROCE_ENABLE` and keep `dcp_size == 1` for SFA on Ascend950.")
+
+    errors = [v for v in violations if v["severity"] == "error"]
+    warnings = [v for v in violations if v["severity"] == "warning"]
+    return {
+        "valid": len(errors) == 0,
+        "status": "incompatible" if errors else ("warning" if warnings else "compatible"),
+        "soc_version": soc_version,
+        "device_family": family,
+        "violations": violations,
+        "violation_codes": [v["code"] for v in violations],
+        "errors": errors,
+        "warnings": warnings,
+        "remediation": [v["remediation"] for v in violations],
+    }
+
+
+def _parse_cpulist(spec: str | Iterable[int] | None) -> list[int]:
+    if spec is None:
+        return []
+    if not isinstance(spec, str):
+        return sorted({int(x) for x in spec})
+    cpus: set[int] = set()
+    for part in spec.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_s, end_s = token.split("-", 1)
+            cpus.update(range(int(start_s), int(end_s) + 1))
+        else:
+            cpus.add(int(token))
+    return sorted(cpus)
+
+
+def validate_numa_cpu_binding_plan(
+    *,
+    npu_ids: Iterable[int],
+    npu_affinity_map: Mapping[int, str | Iterable[int]] | None = None,
+    allowed_cpus: str | Iterable[int] | None = None,
+    soc_version: str = "Ascend910B",
+    rank_cpu_bindings: Mapping[int, str | Iterable[int]] | None = None,
+    omp_num_threads: int | None = None,
+    numa_node_cpus: Mapping[int, str | Iterable[int]] | None = None,
+) -> dict[str, Any]:
+    """Validate NUMA & cgroup CPU core binding plan for `vllm-ascend` NPU workers."""
+    npu_list = [int(x) for x in npu_ids]
+    family = _normalize_soc_family(soc_version)
+    is_a5 = family == "Ascend950"
+    min_cpus_per_npu = 3 if is_a5 else 5
+    allowed_list = _parse_cpulist(allowed_cpus)
+    allowed_set = set(allowed_list)
+    affinity_parsed = {int(k): _parse_cpulist(v) for k, v in (npu_affinity_map or {}).items()}
+    numa_parsed = {int(k): set(_parse_cpulist(v)) for k, v in (numa_node_cpus or {}).items()}
+    violations: list[dict[str, Any]] = []
+    allocations: dict[int, dict[str, Any]] = {}
+    binding_mode = "explicit" if rank_cpu_bindings else ("topo_affinity" if affinity_parsed else "global_slice")
+
+    def _add(code: str, severity: str, message: str, remediation: str, **extra: Any) -> None:
+        violations.append({"code": code, "rule": code, "severity": severity, "message": message, "remediation": remediation, **extra})
+
+    raw_rank_cpus: dict[int, list[int]] = {}
+    if rank_cpu_bindings:
+        raw_rank_cpus = {int(k): _parse_cpulist(v) for k, v in rank_cpu_bindings.items()}
+    elif affinity_parsed:
+        # Group NPUs sharing identical NUMA affinity pools and slice evenly like vllm_ascend/cpu_binding.py
+        pool_groups: dict[tuple[int, ...], list[int]] = {}
+        for npu_id in npu_list:
+            raw_pool = affinity_parsed.get(npu_id, [])
+            effective_pool = [c for c in raw_pool if not allowed_set or c in allowed_set]
+            if raw_pool and allowed_set and not effective_pool:
+                binding_mode = "global_slice"
+                _add(
+                    "cgroup_cpuset_conflict", "error",
+                    f"NPU {npu_id} NUMA affinity CPUs {raw_pool[:6]} have zero intersection with container cgroup allowed_cpus {allowed_list[:6]}.",
+                    "Align Docker `--cpuset-cpus` with the NUMA node bound to the leased NPU (`npu-smi info -t topo`).",
+                    npu_id=npu_id,
+                )
+                effective_pool = allowed_list
+            pool_groups.setdefault(tuple(effective_pool), []).append(npu_id)
+        for pool_tuple, group_npus in pool_groups.items():
+            pool = list(pool_tuple)
+            cpus_per_npu = len(pool) // max(len(group_npus), 1)
+            for idx, npu_id in enumerate(group_npus):
+                start = idx * cpus_per_npu
+                end = len(pool) if idx == len(group_npus) - 1 else (idx + 1) * cpus_per_npu
+                raw_rank_cpus[npu_id] = pool[start:end]
+    elif allowed_list and npu_list:
+        cpus_per_npu = len(allowed_list) // len(npu_list)
+        for idx, npu_id in enumerate(npu_list):
+            start = idx * cpus_per_npu
+            end = len(allowed_list) if idx == len(npu_list) - 1 else (idx + 1) * cpus_per_npu
+            raw_rank_cpus[npu_id] = allowed_list[start:end]
+
+    seen_cores: dict[int, int] = {}
+    for npu_id in npu_list:
+        cpus = raw_rank_cpus.get(npu_id, [])
+        if allowed_set:
+            outside = [c for c in cpus if c not in allowed_set]
+            if outside:
+                _add(
+                    "cgroup_cpuset_conflict", "error",
+                    f"NPU {npu_id} CPU binding includes cores {outside[:6]} outside cgroup allowed_cpus.",
+                    "Restrict CPU binding to `/sys/fs/cgroup/cpuset.cpus.effective` (`Cpus_allowed_list`).",
+                    npu_id=npu_id, outside_cpus=outside,
+                )
+        overlapping_peers = sorted({seen_cores[c] for c in cpus if c in seen_cores and seen_cores[c] != npu_id})
+        if overlapping_peers:
+            _add(
+                "multi_rank_cpu_core_overlap", "error",
+                f"NPU {npu_id} shares worker CPU cores with NPU rank(s) {overlapping_peers}.",
+                "Partition NUMA CPU cores into disjoint per-rank slices so NPU workers never contend on the same cores.",
+                npu_id=npu_id, peer_npu_ids=overlapping_peers,
+            )
+        for c in cpus:
+            seen_cores.setdefault(c, npu_id)
+
+        if len(cpus) < min_cpus_per_npu:
+            _add(
+                "insufficient_cpus_per_npu", "error",
+                f"NPU {npu_id} allocated {len(cpus)} CPU core(s), below the minimum {min_cpus_per_npu} required on {family} (2 IRQ + 1 main + 1 acl + 1 release on A2/A3; 3 on A5).",
+                f"Allocate at least {min_cpus_per_npu} dedicated physical cores per NPU in Docker `--cpuset-cpus`.",
+                npu_id=npu_id, allocated_count=len(cpus), min_required=min_cpus_per_npu,
+            )
+            allocations[npu_id] = {"all_cpus": cpus, "irq_cpus": [], "main_cpus": cpus, "acl_thread_cpu": None, "release_thread_cpu": None}
+            continue
+
+        irq_cpus = [] if is_a5 else cpus[:2]
+        main_cpus = cpus[:-2] if is_a5 else cpus[2:-2]
+        acl_cpu = cpus[-2]
+        release_cpu = cpus[-1]
+        allocations[npu_id] = {
+            "all_cpus": cpus, "irq_cpus": irq_cpus, "main_cpus": main_cpus,
+            "acl_thread_cpu": acl_cpu, "release_thread_cpu": release_cpu,
+        }
+        if numa_parsed:
+            spanned_nodes = sorted(node for node, node_set in numa_parsed.items() if node_set & set(cpus))
+            if len(spanned_nodes) > 1:
+                _add(
+                    "cross_numa_cpu_binding", "warning",
+                    f"NPU {npu_id} CPU binding spans multiple NUMA nodes {spanned_nodes}, increasing host-to-device PCIe/HCCS dispatch jitter.",
+                    "Bind each NPU worker strictly to the single NUMA node affine to its PCIe root complex.",
+                    npu_id=npu_id, spanned_numa_nodes=spanned_nodes,
+                )
+        if omp_num_threads is not None and int(omp_num_threads) > len(main_cpus):
+            _add(
+                "omp_threads_oversubscription", "warning",
+                f"NPU {npu_id} `OMP_NUM_THREADS={omp_num_threads}` exceeds allocated main worker cores ({len(main_cpus)}).",
+                f"Set `OMP_NUM_THREADS={max(1, len(main_cpus))}` to prevent OpenMP thread oversubscription.",
+                npu_id=npu_id, omp_num_threads=int(omp_num_threads), main_cpu_count=len(main_cpus),
+            )
+
+    errors = [v for v in violations if v["severity"] == "error"]
+    warnings = [v for v in violations if v["severity"] == "warning"]
+    return {
+        "valid": len(errors) == 0,
+        "status": "invalid" if errors else ("warning" if warnings else "ok"),
+        "soc_family": family,
+        "binding_mode": binding_mode,
+        "min_cpus_per_npu": min_cpus_per_npu,
+        "allocations": allocations,
+        "violations": violations,
+        "violation_codes": [v["code"] for v in violations],
+        "errors": errors,
+        "warnings": warnings,
+    }
