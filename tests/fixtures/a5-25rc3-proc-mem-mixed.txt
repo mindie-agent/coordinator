@@ -1,0 +1,40 @@
+=====DEVICE 0
+	NPU ID                         : 0
+	Process id:2360798 Process name:python3           Process memory(MB):345
+
+=====RC 0
+=====DEVICE 1
+	NPU ID                         : 1
+	No process in device.
+
+=====RC 0
+=====DEVICE 2
+	NPU ID                         : 2
+	No process in device.
+
+=====RC 0
+=====DEVICE 3
+	NPU ID                         : 3
+	No process in device.
+
+=====RC 0
+=====DEVICE 4
+	NPU ID                         : 4
+	No process in device.
+
+=====RC 0
+=====DEVICE 5
+	NPU ID                         : 5
+	No process in device.
+
+=====RC 0
+=====DEVICE 6
+	NPU ID                         : 6
+	No process in device.
+
+=====RC 0
+=====DEVICE 7
+	NPU ID                         : 7
+	No process in device.
+
+=====RC 0

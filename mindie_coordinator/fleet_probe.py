@@ -12,6 +12,13 @@ large model-weight mounts.
   physical device IDs rather than logical module IDs (`0..7`).
 - A card/die is marked `busy` when `hbm_used_mb >= 8192`, `aicore_pct >= 5.0`,
   or any attached process consumes `>= 8192` MB.
+- A5 (950DT) prints one identity row per card in a single-column device table
+  (`| NPU ID | Name | Health | ... |`) instead of the A2/A3 header+chip pair.
+  Its static ~4.7 GiB HBM reservation is firmware baseline, not workload usage,
+  so A5 occupancy comes from the process table: any attached process means
+  busy and `hbm_used_mb` is normalized to `0` while total capacity is kept.
+  Misreading this layout as "no cards" makes every idle A5 card look like zero
+  free capacity.
 - `npu-top` capacity observations only order host probes when no explicit host
   was requested. The SSH/NPU queue evidence still decides actual availability;
   a monitor outage is reported in `npu_top_observation`, never as zero capacity.
@@ -136,13 +143,22 @@ def is_npu_busy(
     hbm_used_mb: int,
     aicore_pct: float = 0.0,
     processes: list[dict[str, Any]] | None = None,
+    process_presence_is_busy: bool = False,
 ) -> bool:
-    """Apply MindIE's standard occupancy threshold (>= 8192 MB HBM or active compute)."""
+    """Apply MindIE's standard occupancy threshold (>= 8192 MB HBM or active compute).
+
+    `process_presence_is_busy` is A5 (950DT) policy: the card reports a static
+    firmware HBM reservation and small test workloads, so any attributed process
+    is workload occupancy regardless of its reported memory.
+    """
     if hbm_used_mb >= BUSY_HBM_THRESHOLD_MB:
         return True
     if aicore_pct >= BUSY_AICORE_THRESHOLD_PCT:
         return True
-    for proc in processes or []:
+    attached = list(processes or [])
+    if process_presence_is_busy and attached:
+        return True
+    for proc in attached:
         if int(proc.get("memory_mb") or 0) >= BUSY_HBM_THRESHOLD_MB:
             return True
     return False
@@ -170,6 +186,64 @@ def parse_npu_smi_usages(raw: str, current: dict[str, Any]) -> dict[str, Any]:
         processes=updated.get("processes") or [],
     )
     return updated
+
+
+def _a5_single_column_rows(lines: list[str]) -> list[tuple[list[str], list[str], bool]]:
+    """Extract A5 (950DT) device rows from its single-column `npu-smi info` table.
+
+    A5 prints one identity row per card (`| 0 | Ascend950DT | OK | power temp |`)
+    followed by one metric row (`| | | Bus-Id | util mem hbm |`); it has no
+    Chip/Phy-ID column. The A2/A3 header+chip walk ignores the digit-only
+    identity cell and would report the host as having no NPUs at all, which is
+    why idle A5 cards previously looked like zero free capacity. The returned
+    tuples already use the canonical (identity, metric, first-for-card) shape.
+    """
+    rows: list[tuple[list[str], list[str], bool]] = []
+    pending: list[str] | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line.startswith("|") or line.startswith("+"):
+            continue
+        cells = _split_row(line)
+        if len(cells) < 4:
+            continue
+        identity = (
+            cells[0].strip().isdigit()
+            and cells[1].strip()
+            and not cells[1].strip().isdigit()
+            and cells[2].strip()
+            and not cells[2].strip().isdigit()
+        )
+        if identity:
+            if pending is not None:
+                # Identity row without a metric row: keep the card visible and
+                # let the process table decide occupancy instead of dropping it.
+                rows.append((pending, [], True))
+            pending = [f"{cells[0].strip()} {cells[1].strip()}", cells[2].strip(),
+                       cells[3].strip()]
+            continue
+        if pending is not None and not cells[0].strip() and cells[3].strip():
+            rows.append((pending, ["", cells[2].strip(), cells[3].strip()], True))
+            pending = None
+    if pending is not None:
+        rows.append((pending, [], True))
+    return rows
+
+
+def _is_a5_single_column_layout(lines: list[str]) -> bool:
+    """True when the capture carries A5's `NPU ID` device caption.
+
+    A2/A3 captions are `NPU   Name` / `NPU   Chip`, so this stays specific to
+    the 950DT single-column table.
+    """
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = _split_row(line)
+        if cells and cells[0].strip() == "NPU ID":
+            return True
+    return False
 
 
 def parse_npu_smi_info(
@@ -232,6 +306,12 @@ def parse_npu_smi_info(
 
     if current_header is not None and not header_has_chip:
         device_rows.append((current_header, [], True))
+
+    a5_layout = _is_a5_single_column_layout(lines)
+    if a5_layout:
+        a5_rows = _a5_single_column_rows(lines)
+        if a5_rows:
+            device_rows = a5_rows
 
     die_records: dict[int, list[dict[str, Any]]] = {}
     for id_cells, metric_cells, is_first_for_header in device_rows:
@@ -313,7 +393,9 @@ def parse_npu_smi_info(
                 "aicore_pct": aicore_pct,
                 "memory_used_mb": mem_used_mb,
                 "memory_total_mb": mem_total_mb,
-                "hbm_used_mb": hbm_used_mb,
+                # A5's ~4.7 GiB figure at idle is a firmware reservation, not
+                # workload usage; occupancy there comes from the process table.
+                "hbm_used_mb": 0 if a5_layout else hbm_used_mb,
                 "hbm_total_mb": hbm_total_mb,
             }
         )
@@ -395,6 +477,7 @@ def parse_npu_smi_info(
                 hbm_used_mb=int(d["hbm_used_mb"]),
                 aicore_pct=float(d["aicore_pct"]),
                 processes=pid_list,
+                process_presence_is_busy=a5_layout,
             )
             die_entries.append(
                 {
@@ -408,7 +491,8 @@ def parse_npu_smi_info(
                 }
             )
         busy = any(d["busy"] for d in die_entries) or is_npu_busy(
-            hbm_used_mb=hbm_used_mb, aicore_pct=aicore_pct, processes=procs
+            hbm_used_mb=hbm_used_mb, aicore_pct=aicore_pct, processes=procs,
+            process_presence_is_busy=a5_layout,
         )
         phy_ids = list(dict.fromkeys(int(d["phy_id"]) for d in die_entries))
         npus.append(

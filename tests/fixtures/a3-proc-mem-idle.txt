@@ -1,0 +1,9 @@
+	NPU ID                         : 0
+	Chip Count                     : 2
+
+	No process in device.
+	Chip ID                        : 0
+
+	No process in device.
+	Chip ID                        : 1
+
