@@ -93,7 +93,9 @@ for p in $npu_pids; do
     [ -d "/proc/$p" ] || continue
     owner=$(stat -c '%U' "/proc/$p" 2>/dev/null || echo "")
     cg=$(tr '\n' ' ' < "/proc/$p/cgroup" 2>/dev/null || echo "")
-    echo "$p|$owner|$cg"
+    pstate=$(awk '/^State:/ {print $2}' "/proc/$p/status" 2>/dev/null || echo "")
+    wchan=$(tr -d '\n' < "/proc/$p/wchan" 2>/dev/null || echo "")
+    echo "$p|$owner|$cg|$pstate|$wchan"
 done
 
 echo "===SECTION:SYSTEM==="
@@ -136,6 +138,16 @@ def _parse_float(val: str | None) -> float | None:
         return float(cleaned)
     except ValueError:
         return None
+
+
+_DISK_WAIT_WCHAN_TOKENS = ("lock_page", "folio_wait", "nfs_", "ceph_", "blk_mq", "io_schedule", "wait_on_page")
+
+
+def is_disk_io_wait(proc_state: str | None, wchan: str | None) -> bool:
+    """Return True when a Linux process is in uninterruptible disk/NFS page-cache sleep (`D` state)."""
+    st = str(proc_state or "").strip().upper()
+    wc = str(wchan or "").strip().lower()
+    return st == "D" or any(tok in wc for tok in _DISK_WAIT_WCHAN_TOKENS)
 
 
 def is_npu_busy(
@@ -251,6 +263,8 @@ def parse_npu_smi_info(
     *,
     pid_owners: Mapping[int, str] | None = None,
     pid_containers: Mapping[int, str] | None = None,
+    pid_states: Mapping[int, str] | None = None,
+    pid_wchans: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """Parse `npu-smi info` output for 910B (A2), dual-die 910C (A3), 950 (A5), and 310P."""
     npu_smi_version = ""
@@ -419,6 +433,8 @@ def parse_npu_smi_info(
     procs_by_phy: dict[int, list[dict[str, Any]]] = {}
     owners_map = pid_owners or {}
     containers_map = pid_containers or {}
+    states_map = pid_states or {}
+    wchans_map = pid_wchans or {}
     for cells in process_rows:
         npu_tokens = cells[0].split()
         if not npu_tokens or not npu_tokens[0].isdigit():
@@ -430,12 +446,17 @@ def parse_npu_smi_info(
         mem_mb = _parse_int(cells[3]) if len(cells) > 3 else 0
         if pid <= 0:
             continue
+        pstate = states_map.get(pid, "")
+        pwchan = wchans_map.get(pid, "")
         proc_entry: dict[str, Any] = {
             "pid": pid,
             "process_name": proc_name,
             "memory_mb": mem_mb,
             "owner": owners_map.get(pid, ""),
             "container_name": containers_map.get(pid, ""),
+            "proc_state": pstate,
+            "wchan": pwchan,
+            "disk_io_wait": is_disk_io_wait(pstate, pwchan),
         }
         if chip_id is not None:
             proc_entry["chip_id"] = chip_id
@@ -513,6 +534,7 @@ def parse_npu_smi_info(
                 "die_count": die_count,
                 "dies": die_entries,
                 "busy": busy,
+                "disk_io_wait_pids": [int(p["pid"]) for p in procs if p.get("disk_io_wait")],
                 "processes": procs,
             }
         )
@@ -575,11 +597,13 @@ def parse_fleet_probe_output(
 
     pid_owners: dict[int, str] = {}
     pid_containers: dict[int, str] = {}
+    pid_states: dict[int, str] = {}
+    pid_wchans: dict[int, str] = {}
     for line in sections.get("PID_MAP", []):
         line = line.strip()
         if not line or "|" not in line:
             continue
-        parts = line.split("|", 2)
+        parts = line.split("|", 4)
         if len(parts) < 3:
             continue
         pid = _parse_int(parts[0])
@@ -587,6 +611,10 @@ def parse_fleet_probe_output(
             continue
         pid_owners[pid] = parts[1].strip()
         cgroup = parts[2].strip()
+        if len(parts) >= 4:
+            pid_states[pid] = parts[3].strip()
+        if len(parts) >= 5:
+            pid_wchans[pid] = parts[4].strip()
         match_64 = _RE_CONTAINER_ID_64.search(cgroup)
         if match_64:
             cid = match_64.group(1).lower()
@@ -598,6 +626,8 @@ def parse_fleet_probe_output(
         npu_raw,
         pid_owners=pid_owners,
         pid_containers=pid_containers,
+        pid_states=pid_states,
+        pid_wchans=pid_wchans,
     )
     npus = npu_parsed["npus"]
     total_npus = len(npus)
