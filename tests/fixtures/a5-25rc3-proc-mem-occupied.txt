@@ -1,0 +1,3 @@
+	NPU ID                         : 0
+	Process id:904683  Process name:reduce_test       Process memory(MB):6656
+

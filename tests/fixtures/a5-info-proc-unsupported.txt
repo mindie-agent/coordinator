@@ -1,0 +1,4 @@
+RC=0
+---OUT---
+This device does not support querying proc info.
+---ERR---

@@ -2,8 +2,14 @@
 
 [Role] Binds actual `proc-mem` PIDs to one admitted remote-dev job marker.
 [Invariants] PID reuse, unknown formats and unavailable process metadata stay
-unknown. A complete empty device process list is a measured empty observation.
-[Timeouts & Locks] 4s per npu-smi call, finite duration, caller outer adds 5s.
+unknown. A complete empty device process list is a measured empty observation,
+which includes A5 (950DT) header-only/empty sections and A2/A3 whole-card
+headers; only exit 0, empty stderr and recognized header/sentinel/process lines
+make that claim. Non-zero exit, stderr, an unrecognized line or a reported NPU
+ID that disagrees with the requested card stays unavailable.
+[Timeouts & Locks] 4s per npu-smi call and at most two calls per sample (A5
+rejects the A2/A3 `-c` selector and is re-read without it); finite duration,
+caller outer timeout adds 5s.
 [Side-Effect Policy] Reads npu-smi and /proc; prints JSONL and never kills work.
 """
 from __future__ import annotations
@@ -17,20 +23,45 @@ from pathlib import Path
 
 
 PROCESS = re.compile(r"^Process id:\s*(\d+)\s+Process name:(.*?)\s+Process memory\(MB\):\s*(\d+)$")
+SENTINEL = "No process in device."
+CARD_HEADER = re.compile(r"^NPU ID\s*:\s*(\d+)$")
+CHIP_COUNT_HEADER = re.compile(r"^Chip Count\s*:\s*\d+$")
+CHIP_HEADER = re.compile(r"^Chip ID\s*:\s*\d+$")
+CHIP_SELECTOR_UNSUPPORTED = "does not support input parameter of -c"
 
 
-def parse_process_memory(output):
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    if lines == ["No process in device."]:
-        return []
+def parse_process_memory(output, *, returncode=0, stderr="", card=None):
+    """Parse one `npu-smi info -t proc-mem` result.
+
+    Exit 0 with no process rows is a measured empty table: A5 prints only
+    `NPU ID : N` (25.1.rc3 adds `No process in device.`) and A2/A3 whole-card
+    queries print `NPU ID`/`Chip Count`/`No process in device.`/`Chip ID`.
+    Anything unrecognized, a non-zero exit, or stderr keeps the observation
+    unavailable rather than turning it into an idle claim.
+    """
+    if returncode != 0:
+        raise ValueError(f"npu-smi proc-mem exited {returncode}")
+    if stderr.strip():
+        raise ValueError("npu-smi proc-mem wrote to stderr: " + stderr.strip()[-300:])
     rows = []
-    for line in lines:
+    observed_cards = set()
+    for line in (line.strip() for line in output.splitlines() if line.strip()):
+        if line == SENTINEL:
+            continue
         match = PROCESS.fullmatch(line)
-        if match is None:
-            raise ValueError("unrecognized npu-smi proc-mem row: " + line)
-        rows.append({"pid": int(match[1]), "name": match[2].strip(), "memory_mb": int(match[3])})
-    if not rows:
-        raise ValueError("empty proc-mem output is not an observed empty process table")
+        if match is not None:
+            rows.append({"pid": int(match[1]), "name": match[2].strip(), "memory_mb": int(match[3])})
+            continue
+        header = CARD_HEADER.fullmatch(line)
+        if header is not None:
+            observed_cards.add(int(header[1]))
+            continue
+        if CHIP_COUNT_HEADER.fullmatch(line) or CHIP_HEADER.fullmatch(line):
+            continue
+        raise ValueError("unrecognized npu-smi proc-mem row: " + line)
+    if card is not None and observed_cards and observed_cards != {int(card)}:
+        raise ValueError(
+            f"npu-smi proc-mem reported NPU {sorted(observed_cards)} for requested card {card}")
     return rows
 
 
@@ -84,18 +115,32 @@ def observe_ownership(pid, marker):
                 "ownership_chain": chain, "error_type": type(exc).__name__}
 
 
+def _query_proc_memory(card, chip):
+    command = ["npu-smi", "info", "-t", "proc-mem", "-i", str(card)]
+    if chip is not None:
+        command += ["-c", str(chip)]
+    return subprocess.run(command, capture_output=True, text=True, timeout=4)
+
+
 def observe_processes(card, chip, marker):
     before = time.time_ns()
-    result = subprocess.run(["npu-smi", "info", "-t", "proc-mem", "-i", str(card), "-c", str(chip)],
-                            capture_output=True, text=True, timeout=4)
+    result = _query_proc_memory(card, chip)
+    selected_chip = chip
+    if result.returncode and CHIP_SELECTOR_UNSUPPORTED in (result.stdout + result.stderr):
+        # A5 (950DT) exposes one process table per card and rejects the A2/A3
+        # `-c` selector. Re-read the per-card table; the result is parsed with
+        # the same exit-code/stderr/row validation, so a failed second query
+        # still cannot become an idle observation.
+        result = _query_proc_memory(card, None)
+        selected_chip = None
     after = time.time_ns()
     sample = {"query_started_at_ns": before, "query_finished_at_ns": after,
               "stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode,
+              "query_card": card, "query_chip": selected_chip,
               "marker_known": True, "processes": [], "resource_interference_detected": None}
-    if result.returncode:
-        return {**sample, "state": "unavailable", "error": "npu-smi exited nonzero"}
     try:
-        processes = parse_process_memory(result.stdout)
+        processes = parse_process_memory(
+            result.stdout, returncode=result.returncode, stderr=result.stderr, card=card)
     except ValueError as exc:
         return {**sample, "state": "unavailable", "error": str(exc)}
     for process in processes:

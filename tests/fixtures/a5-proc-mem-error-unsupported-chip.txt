@@ -1,0 +1,4 @@
+RC=215
+---OUT---
+This device does not support input parameter of -c.
+---ERR---
