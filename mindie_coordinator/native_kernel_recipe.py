@@ -437,7 +437,13 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
         # Wait for every owned compiler even when a sibling fails. The outer
         # preparation process remains the process-family cancellation owner.
         requested_jobs = environment.get('MAX_JOBS', '')
-        workers = int(requested_jobs) if requested_jobs.isdecimal() and int(requested_jobs) > 0 else (os.cpu_count() or 1)
+        if requested_jobs.isdecimal() and int(requested_jobs) > 0:
+            workers = int(requested_jobs)
+        else:
+            from remote_dev.core.host_spec import probe_local_hardware_spec, recommend_worker_count
+            workers = recommend_worker_count(
+                probe_local_hardware_spec(), per_worker_memory_mb=2048, max_workers=os.cpu_count() or 1
+            )
         with ThreadPoolExecutor(max_workers=min(len(scripts), workers)) as executor:
             futures = [executor.submit(compile_one, script) for script in scripts]
             errors = []
