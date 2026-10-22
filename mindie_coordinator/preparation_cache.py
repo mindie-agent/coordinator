@@ -669,7 +669,7 @@ if args['kind'] == 'native':
 else:
     verify(source_root, manifest)
     source_site = Path(sysconfig.get_paths()['purelib'])
-    destination_site = Path(subprocess.check_output([args['python'], '-c', 'import sysconfig; print(sysconfig.get_paths()["purelib"])'], text=True).strip())
+    destination_site = Path(subprocess.check_output([args['python'], '-c', 'import sysconfig; print(sysconfig.get_paths()["purelib"])'], text=True, timeout=30, stdin=subprocess.DEVNULL).strip())
     result = {'kind': 'dependencies', 'source_root': str(source_root),
               'copied_packages': copy_dependencies(source_site, destination_site)}
 receipt = root / '.mindie-runtime/reuse.json'

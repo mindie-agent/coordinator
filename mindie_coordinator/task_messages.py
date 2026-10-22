@@ -1,7 +1,16 @@
 """Host mail integration for the existing local coordinator.
 
-Only hosts already used by this task participate. No fleet scan, scheduler,
-background wakeup or message-driven execution is implemented here.
+[Role] Sends and polls bounded human/agent messages for hosts already used by
+one task.
+
+[Invariants] Only hosts already used by this task participate. No fleet scan,
+scheduler, background wakeup, or message-driven execution is implemented here.
+Message batches are bounded by `MESSAGE_BATCH_SIZE`.
+
+[Timeouts & Locks] Polling uses `MESSAGE_POLL_SECONDS`; transport timeouts are
+owned by `HostQueue`, and no lock is held across a poll.
+
+[Side-Effect Policy] Appends mail records through the existing host queue only.
 """
 from __future__ import annotations
 

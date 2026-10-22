@@ -37,7 +37,7 @@ import subprocess
 def native_tree_entries(repo: Path, patterns, submodule_fingerprint) -> dict[str, tuple[str, str]]:
     """Use the same token and submodule identities as build_inputs."""
     entries = {}
-    output = subprocess.check_output(['git', '-C', str(repo), 'ls-tree', '-r', '-z', 'HEAD'])
+    output = subprocess.check_output(['git', '-C', str(repo), 'ls-tree', '-r', '-z', 'HEAD'], timeout=60, stdin=subprocess.DEVNULL)
     for entry in filter(None, output.decode('utf-8').split('\0')):
         metadata, path = entry.split('\t', 1)
         mode, kind, oid = metadata.split()
@@ -250,7 +250,7 @@ def build_incremental_kernel(root: Path, *, compile_recipe=None) -> dict:
     if compile_recipe is None or not compile_recipe(root, plan, environment):
         command = ['bash', 'build.sh', '--opkernel', '--ops=' + plan['operator'], '--soc=' + plan['unit']]
         print('native-incremental: ' + ' '.join(command), flush=True)
-        subprocess.run(command, cwd=repository / 'csrc', env=environment, check=True)
+        subprocess.run(command, cwd=repository / 'csrc', env=environment, check=True, timeout=1800, stdin=subprocess.DEVNULL)
     changed = merge_kernel_outputs(root, plan)
     result = {**plan, 'status': 'compiled', 'outputs': changed}
     plan_path.write_text(json.dumps(result, sort_keys=True) + '\n')

@@ -75,6 +75,8 @@ from source_native_cpp_probe import (  # noqa: E402
     write_cpp_probe_repos,
 )
 from source_native_evidence import (  # noqa: E402
+    _archive_repo, _cache_names, _cleanup_cache, _clone_readonly, _real_sources,
+    _remote, _source_command, _source_proof,
     cache_facts, epoch_iso, execution_times, normalize_receipt, project_manifest,
 )
 
@@ -229,64 +231,6 @@ def _write_evidence(args, client, *, label: str, execution_id: str, reply: dict,
             "slot_cleanup": ((reply.get("roles") or [{}])[0]).get("slot_cleanup")}
 
 
-def _remote(endpoint, command: str, *, timeout_ms: int = 20000) -> str:
-    from remote_dev.core.endpoint import Endpoint
-    from remote_dev.core.ssh_transport import run_script
-    target = (Endpoint(**endpoint, runtime_env=False) if isinstance(endpoint, dict) else endpoint)
-    result = run_script(target, command, timeout_ms=timeout_ms)
-    if result.returncode:
-        raise RuntimeError("remote command failed: " + result.stderr[-1000:])
-    return result.stdout
-
-
-def _cache_names(endpoint) -> set[str]:
-    code = """import json, pathlib
-root = pathlib.Path('/tmp/mindie-native-cache')
-names = []
-if root.is_dir():
-    names = [p.name for p in root.iterdir()]
-    bundles = root / 'bundles'
-    if bundles.is_dir():
-        names += ['bundles/' + p.name for p in bundles.iterdir()]
-print(json.dumps(sorted(names)))
-"""
-    return set(json.loads(_remote(endpoint, "python3 -c " + shlex.quote(code))))
-
-
-def _cleanup_cache(endpoint, keys: set[str], bundles: set[str]) -> dict:
-    payload = json.dumps({"keys": sorted(keys), "bundles": sorted(bundles)})
-    code = r'''import json, pathlib, re, shutil, sys
-payload = json.loads(sys.argv[1])
-root = pathlib.Path("/tmp/mindie-native-cache")
-removed = {"keys": [], "bundles": [], "indexes": []}
-if not root.is_dir():
-    print(json.dumps(removed))
-    raise SystemExit(0)
-for key in payload["keys"]:
-    if re.fullmatch(r"[0-9a-f]{64}", key) and (root / key).is_dir():
-        shutil.rmtree(root / key)
-        removed["keys"].append(key)
-for bundle in payload["bundles"]:
-    path = root / "bundles" / bundle
-    if not re.fullmatch(r"[0-9a-f]{64}", bundle) or not path.is_dir():
-        continue
-    manifest = json.loads((path / "manifest.json").read_text())
-    if manifest.get("build_key") == bundle:
-        shutil.rmtree(path)
-        removed["bundles"].append(bundle)
-for path in list(root.glob("*.json")):
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        continue
-    if data.get("bundle") in payload["bundles"]:
-        path.unlink()
-        removed["indexes"].append(path.name)
-print(json.dumps(removed))
-'''
-    return json.loads(_remote(endpoint, "python3 - " + shlex.quote(payload) + " <<'PY'\n" + code + "\nPY"))
-
-
 def _assert_slot_cleanup(endpoint, args, row: dict, reply: dict) -> dict:
     roles = reply.get("roles") or []
     slot_id = roles[0].get("slot_id") if roles else None
@@ -319,8 +263,6 @@ def _compile_slots(args) -> tuple[dict, list[dict]]:
     return status, [task for task in status.get("tasks") or []
                     if task.get("requested_count") == 0 and task.get("state") in
                     {"granted", "starting", "active", "orphaned_busy"}]
-
-
 
 
 @contextlib.contextmanager
@@ -381,95 +323,6 @@ def _preflight_donor(args, service) -> list[dict]:
     return matches
 
 
-def _clone_readonly(source: Path, destination: Path) -> Path:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "--quiet", "--shared", str(source), str(destination)],
-                   check=True, capture_output=True, text=True, timeout=120)
-    # Fixed source capture requires populated gitlinks. Populate only this
-    # private clone; the external checkout remains read-only.
-    subprocess.run(["git", "-C", str(destination), "submodule", "update", "--init", "--recursive"],
-                   check=True, capture_output=True, text=True, timeout=300)
-    return destination
-
-
-def _archive_repo(archive: Path, destination: Path) -> tuple[Path, str]:
-    import tarfile
-    destination.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive, "r:gz") as bundle:
-        bundle.extractall(destination)
-    _git(destination, "init")
-    _git(destination, "config", "user.name", "MindIE Acceptance")
-    _git(destination, "config", "user.email", "acceptance@example.invalid")
-    commit = _commit(destination, "frozen vllm-ascend source archive")
-    _git(destination, "tag", "v0.0.1")
-    return destination, commit
-
-
-def _real_sources(args, sandbox: Path) -> dict | None:
-    """Deploy actual existing Git sources read-only, or the frozen archive."""
-    vllm_source = Path(args.real_vllm).expanduser().resolve() if args.real_vllm else None
-    if vllm_source is None or not (vllm_source / ".git").exists():
-        return None
-    base = sandbox / "real-source"
-    vllm = _clone_readonly(vllm_source, base / "vllm-source")
-    if args.real_vllm_ascend:
-        ascend_source = Path(args.real_vllm_ascend).expanduser().resolve()
-        if not (ascend_source / ".git").exists():
-            return None
-        ascend = _clone_readonly(ascend_source, base / "vllm-ascend-source")
-        archive_commit = None
-    elif args.source_archive and Path(args.source_archive).is_file():
-        ascend, created = _archive_repo(Path(args.source_archive), base / "vllm-ascend-source")
-        archive_commit = args.source_archive_commit or None
-    else:
-        return None
-    return {"sources": {"vllm-source": vllm, "vllm-ascend-source": ascend},
-            "vllm_head": _git(vllm, "rev-parse", "HEAD"),
-            "vllm_ascend_head": _git(ascend, "rev-parse", "HEAD"),
-            "archive_commit": archive_commit}
-
-
-def _source_command(archive_commit: str | None) -> str:
-    code = f'''
-import hashlib, json, os, pathlib, subprocess
-root = pathlib.Path.cwd()
-def head(name):
-    return subprocess.check_output(["git", "-C", name, "rev-parse", "HEAD"], text=True).strip()
-files = {{}}
-for name in ("vllm-source", "vllm-ascend-source"):
-    base = root / name
-    for relative in ("README.md", "CMakeLists.txt", "csrc"):
-        path = base / relative
-        if path.is_file():
-            files[name + "/" + relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-        elif path.is_dir():
-            for child in sorted(p for p in path.rglob("*") if p.is_file())[:64]:
-                files[name + "/" + child.relative_to(base).as_posix()] = hashlib.sha256(child.read_bytes()).hexdigest()
-proof = {{
-    "run_id": os.environ["MINDIE_RUN_ID"],
-    "mode": "source-deployment-only",
-    "vllm_head": head("vllm-source"),
-    "vllm_ascend_head": head("vllm-ascend-source"),
-    "archive_commit": {archive_commit!r},
-    "file_sha256": files,
-}}
-(root / "source-deployment-proof.json").write_text(json.dumps(proof, sort_keys=True) + "\\n")
-print("MINDIE_SOURCE_DEPLOYMENT_PROOF " + json.dumps(proof, sort_keys=True))
-'''
-    return '"$MINDIE_PYTHON" - <<\'MINDIE_SOURCE_DEPLOYMENT\'\n' + code + '\nMINDIE_SOURCE_DEPLOYMENT\n'
-
-
-def _source_proof(stdout: str) -> dict:
-    marker = "MINDIE_SOURCE_DEPLOYMENT_PROOF "
-    for line in reversed((stdout or "").splitlines()):
-        if line.startswith(marker):
-            value = json.loads(line[len(marker):])
-            if not isinstance(value, dict):
-                raise RuntimeError("source deployment proof is not an object")
-            return value
-    raise RuntimeError("source deployment proof marker is missing")
-
-
 def _resume(args, pending_path: Path, service) -> int:
     data = json.loads(pending_path.read_text())
     use_local_state(data.get("agent_sessions_dir") or args.agent_sessions_dir)
@@ -518,9 +371,9 @@ def main() -> int:
     parser.add_argument("--user")
     parser.add_argument("--soc", default=os.environ.get("SOC_VERSION"))
     parser.add_argument("--cxx", default=os.environ.get("CXX") or "g++")
-    parser.add_argument("--agent-sessions-dir", default=str(Path.cwd() / ".mindie-003-wave4/state/agent-sessions"))
+    parser.add_argument("--agent-sessions-dir", default="/tmp/mindie-npu-test-wave4/state/agent-sessions")
     parser.add_argument("--output", type=Path,
-                        default=Path(".mindie-003-wave4") / ("source-native-" + uuid.uuid4().hex[:12]))
+                        default=Path("/tmp/mindie-npu-test-wave4") / ("source-native-" + uuid.uuid4().hex[:12]))
     parser.add_argument("--wait-timeout", type=int, default=600)
     parser.add_argument("--business-timeout", type=int, default=300)
     parser.add_argument("--keep-cache", action="store_true")

@@ -21,6 +21,7 @@ and translates host responses into structured coordinator results or
 from __future__ import annotations
 from remote_dev.observability import observed_operation
 
+import ast
 import importlib.util
 import json
 import os
@@ -118,6 +119,60 @@ def host_queue_module_path(path: Path | str | None = None) -> Path:
     return resolved
 
 
+BUNDLED_HOST_MODULES = (
+    "mindie_npu_coordination_probe.py",
+    "mindie_npu_coordination_state.py",
+    "mindie_npu_coordination_leases.py",
+    "mindie_npu_coordination.py",
+)
+
+
+def _is_internal_host_import(node: ast.AST) -> bool:
+    """True for imports between the four files combined into the host program."""
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        if node.level:
+            return node.level == 1 and (not module or module.startswith("mindie_npu_coordination"))
+        return module == "mindie_coordinator.host" or module.startswith("mindie_coordinator.host.")
+    if isinstance(node, ast.Import):
+        return any(
+            alias.name == "mindie_coordinator.host" or alias.name.startswith("mindie_coordinator.host.")
+            for alias in node.names
+        )
+    return False
+
+
+def _strip_internal_imports(source: str, *, keep_future: bool) -> str:
+    """Drop imports satisfied by the shared globals of a concatenated program."""
+    tree = ast.parse(source)
+    removed: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        future = (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module == "__future__"
+        )
+        if _is_internal_host_import(node) or (future and not keep_future):
+            removed.update(range(node.lineno, node.end_lineno + 1))
+    if not removed:
+        return source
+    return "".join(
+        line for number, line in enumerate(source.splitlines(keepends=True), 1) if number not in removed
+    )
+
+
+def bundled_host_source() -> str:
+    """Concatenate probe, state, leases, and public modules into one program."""
+    directory = bundled_host_module_path().parent
+    chunks = []
+    for index, name in enumerate(BUNDLED_HOST_MODULES):
+        source = (directory / name).read_text(encoding="utf-8")
+        chunks.append(_strip_internal_imports(source, keep_future=index == 0).strip())
+    return "\n\n\n".join(chunks) + "\n"
+
+
 def load_host_protocol(path: Path | str | None = None):
     """Import the host protocol (bundled package module, or an override file)."""
     configured = str(path or os.environ.get(HOST_QUEUE_MODULE_ENV, ""))
@@ -146,7 +201,12 @@ class HostQueue:
 
     def source(self) -> str:
         if self._source is None:
-            self._source = host_queue_module_path(self._module_path).read_text(encoding="utf-8")
+            # An explicit module path remains the single-file override. The
+            # bundled authority is four modules concatenated in dependency order.
+            if self._module_path or os.environ.get(HOST_QUEUE_MODULE_ENV):
+                self._source = host_queue_module_path(self._module_path).read_text(encoding="utf-8")
+            else:
+                self._source = bundled_host_source()
         return self._source
 
     def command(self, request: dict[str, Any]) -> str:

@@ -103,11 +103,15 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
             ).stdout.strip()
             if Path(client_path(actual)).resolve() in {Path(client_path(path)).resolve() for path in sources.values()}:
                 return True
+        except TimeoutError:
+            raise
         except (OSError, ValueError, subprocess.SubprocessError):
             pass  # Preserve the original non-Git initialization/outside scope.
     inside = project in cwd.parents
     try:
         common = git_common_directory(project)
+    except TimeoutError:
+        raise
     except (OSError, ValueError, subprocess.SubprocessError):
         # Keep local/non-Git project initialization usable in its own scope.
         return inside
@@ -128,6 +132,8 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
             if parent == current:
                 return False
             current = parent
+    except TimeoutError:
+        raise
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return False
@@ -136,6 +142,8 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
 def bind_native_defaults(store: AgentSessions, context: dict, sources: dict[str, str] | None = None) -> dict:
     try:
         return store.bind_native_sources(context, sources=sources)
+    except TimeoutError:
+        raise
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         # An unborn/non-Git or inaccessible directory still has a local task.
         # attach() clears old automatic sources when the native cwd changes.

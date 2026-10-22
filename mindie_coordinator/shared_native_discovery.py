@@ -56,6 +56,8 @@ for pattern in ('tasks/*/*/*/.mindie-runtime/ready-profile.json','executions/*/*
                 continue
             result.append({'root':str(root),'profile':profile,
                            'exact':previous.get('native') == requested.get('native')})
+        except TimeoutError:
+            raise
         except (ValueError,KeyError,TypeError,OSError):
             continue
 print(json.dumps(sorted(result,key=lambda row:not row['exact'])))

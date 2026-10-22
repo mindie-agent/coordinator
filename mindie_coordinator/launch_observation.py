@@ -1,4 +1,11 @@
-"""Immutable facts from the managed launch's successful runtime attestation."""
+"""Immutable facts from the managed launch's successful runtime attestation.
+
+[Role] Projects a managed binding launch into immutable execution observations.
+[Invariants] Every value comes from the successful attestation; missing facts
+are absent rather than guessed, and source names become stable keys.
+[Timeouts & Locks] Pure in-memory projection; no waits or locks.
+[Side-Effect Policy] Returns a new dictionary and writes nothing.
+"""
 from __future__ import annotations
 
 from mindie_coordinator.runtime_profile import digest

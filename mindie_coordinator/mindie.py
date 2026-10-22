@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""MindIE local context and task facade; the same operations are served by task_server.py over MCP stdio."""
+"""MindIE local context and task facade; the same operations are served by task_server.py over MCP stdio.
+
+[Role] CLI entry point that validates tool arguments and dispatches MindIE
+operations through `ops.mindie_call` and `task_client`.
+
+[Invariants] The facade owns no task state; session identity and execution
+facts remain in `agent_session` and the local task registry.
+
+[Timeouts & Locks] Delegates every bounded wait and lock to the called
+operation; this module adds no background wait.
+
+[Side-Effect Policy] Only the side effects of the delegated operation.
+"""
 from __future__ import annotations
 
 import argparse

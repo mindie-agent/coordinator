@@ -1,7 +1,16 @@
 """Board/SoC and npu-smi HBM parsing owned by the coordinator.
 
-Occupancy HBM parsing is the host protocol's ``parse_npu_smi_hbm``. Board/SoC
-token construction is the same labelled-field contract the machine probe uses.
+[Role] Normalizes board/SoC tokens and parses npu-smi HBM usage rows for the
+host protocol and machine probe.
+
+[Invariants] Occupancy HBM parsing stays in the host protocol's
+``parse_npu_smi_hbm``; labelled-field token construction is shared with the
+machine probe and never guesses an unknown board.
+
+[Timeouts & Locks] Pure in-memory parsing with no I/O, subprocesses, or waits.
+
+[Side-Effect Policy] Read-only projection; this module writes nothing.
+
 npu-top is a separate display service and is not imported here.
 """
 from __future__ import annotations

@@ -1,4 +1,10 @@
-"""Local MindIE coordinator: task stdio MCP and host NPU allocation."""
+"""Local MindIE coordinator: task stdio MCP and host NPU allocation.
+
+[Role] Re-exports the topology-gang public API and package version.
+[Invariants] Importing the package starts no daemon and performs no host I/O.
+[Timeouts & Locks] No waits or locks at import time.
+[Side-Effect Policy] Read-only version lookup; no files are written.
+"""
 
 from __future__ import annotations
 

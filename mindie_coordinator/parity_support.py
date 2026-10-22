@@ -316,7 +316,7 @@ def _materialize_fixed(request):
 
     def git(path, *args, check=True):
         result = subprocess.run(['git', '-C', str(path), *args], capture_output=True,
-                                text=True, encoding='utf-8')
+                                text=True, encoding='utf-8', timeout=120, stdin=subprocess.DEVNULL)
         if check and result.returncode:
             raise RuntimeError(f'git {args[0]} failed in {path}: {result.stderr.strip()}')
         return result
@@ -359,7 +359,7 @@ def _materialize_fixed(request):
                 if git(mirror, 'cat-file', '-e', pack['previous'] + '^{commit}', check=False).returncode:
                     raise ValueError('fixed source pack prerequisite disappeared')
                 received = subprocess.run(['git', '-C', str(mirror), 'index-pack', '--stdin'],
-                                          input=data, capture_output=True)
+                                          input=data, capture_output=True, timeout=60)
                 if received.returncode:
                     raise ValueError('fixed source pack rejected: ' + received.stderr.decode(errors='replace'))
                 if git(mirror, 'rev-parse', row['commit'] + '^{tree}').stdout.strip() != row['tree']:
@@ -370,7 +370,7 @@ def _materialize_fixed(request):
                 refs = ('start\nupdate refs/mindie/snapshots/' + row['commit'] + ' ' + row['commit']
                         + '\nupdate ' + request['carrier_ref'] + ' ' + pack['carrier'] + '\nprepare\ncommit\n')
                 updated = subprocess.run(['git', '-C', str(mirror), 'update-ref', '--stdin'],
-                                         input=refs, text=True, capture_output=True)
+                                         input=refs, text=True, capture_output=True, timeout=30)
                 if updated.returncode:
                     raise ValueError('fixed source refs rejected: ' + updated.stderr)
         tree = git(mirror, 'rev-parse', '--verify', row['commit'] + '^{tree}', check=False)
@@ -379,6 +379,8 @@ def _materialize_fixed(request):
             try:
                 if copy_fixed_objects(shared, mirror, row):
                     tree = git(mirror, 'rev-parse', '--verify', row['commit'] + '^{tree}')
+            except TimeoutError:
+                raise
             except (OSError, ValueError, RuntimeError) as exc:
                 # These are completed local errors, not subprocess timeouts or
                 # cancellation. The exact private input is still missing.
@@ -410,8 +412,12 @@ def _materialize_fixed(request):
                                 git(mirror, 'update-ref', request['carrier_ref'], oid, previous, check=False)
                                 carrier = git(mirror, 'rev-parse', '--verify', request['carrier_ref'], check=False)
                                 break
+                        except TimeoutError:
+                            raise
                         except (OSError, ValueError, RuntimeError) as exc:
                             print(f'shared source negotiation base unavailable: {exc}', file=sys.stderr, flush=True)
+                except TimeoutError:
+                    raise
                 except (OSError, ValueError, RuntimeError) as exc:
                     print(f'shared source negotiation base unavailable: {exc}', file=sys.stderr, flush=True)
             missing.append({'index': index, 'carrier': carrier.stdout.strip() if not carrier.returncode else None})
@@ -428,6 +434,8 @@ def _materialize_fixed(request):
             # this owner's refs/objects or becomes a live alternate dependency.
             try:
                 copy_fixed_objects(mirror, shared, row)
+            except TimeoutError:
+                raise
             except (OSError, ValueError, RuntimeError) as exc:
                 # Cache publication cannot gate a valid private snapshot.
                 # Its checkout and complete source validation still run below.

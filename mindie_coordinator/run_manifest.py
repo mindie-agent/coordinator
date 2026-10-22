@@ -664,6 +664,8 @@ def add_evidence(
 def load_manifest(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except TimeoutError:
+        raise
     except (OSError, json.JSONDecodeError) as exc:
         raise RunManifestError(f"cannot read manifest {path}: {exc}") from exc
     if not isinstance(payload, MutableMapping):

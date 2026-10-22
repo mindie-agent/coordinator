@@ -48,7 +48,7 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         ["git", "-C", str(repo), *args],
         stdin=subprocess.DEVNULL, capture_output=True,
         text=True, encoding="utf-8",
-        check=False,
+        check=False, timeout=30,
     )
     if check and result.returncode != 0:
         message = (result.stderr or result.stdout).strip()
@@ -79,6 +79,8 @@ def _so_tree_mtime_signature(root: Path) -> tuple[str, dict[str, str]]:
         if path.suffix == ".so" or ".so." in path.name:
             try:
                 st = path.stat()
+            except TimeoutError:
+                raise
             except OSError:
                 continue
             rel = path.relative_to(root).as_posix()

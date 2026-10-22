@@ -181,11 +181,15 @@ class CoordinationTests(unittest.TestCase):
         try:
             stat = (root / "stat").read_text()
             state = stat.rsplit(") ", 1)[1].split()[0]
+        except TimeoutError:
+            raise
         except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, IndexError) as exc:
             stat, state = f"<unreadable {type(exc).__name__}: {exc}>", "?"
         try:
             environ = (root / "environ").read_bytes()
             env_note = f"{len(environ)} bytes"
+        except TimeoutError:
+            raise
         except (FileNotFoundError, ProcessLookupError, PermissionError, OSError) as exc:
             environ, env_note = b"", f"unreadable {type(exc).__name__}: {exc}"
         stderr = b""
@@ -194,6 +198,8 @@ class CoordinationTests(unittest.TestCase):
                 if proc.poll() is None:
                     os.set_blocking(proc.stderr.fileno(), False)
                 stderr = proc.stderr.read() or b""
+            except TimeoutError:
+                raise
             except (OSError, ValueError, BlockingIOError, TypeError):
                 pass
         return (
@@ -236,6 +242,8 @@ class CoordinationTests(unittest.TestCase):
                 last = f"stat_state={state} environ_bytes={len(environ)} returncode={proc.poll()}"
                 if state != "Z" and expected in environ.split(b"\0"):
                     return root
+            except TimeoutError:
+                raise
             except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, IndexError) as exc:
                 last = f"{type(exc).__name__}: {exc} returncode={proc.poll()}"
             if proc.poll() is not None:

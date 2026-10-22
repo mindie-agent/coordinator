@@ -1,4 +1,16 @@
-"""Bounded read-only reuse of an already configured fixed-image container."""
+"""Bounded read-only reuse of an already configured fixed-image container.
+
+[Role] Observes one existing container and decides whether it can be reused
+without provisioning another.
+
+[Invariants] Observation is read-only; ambiguous or failed observations fall
+back to the provision owner instead of claiming reuse.
+
+[Timeouts & Locks] The whole inspection is bounded to 8 seconds and each
+subprocess receives `min(3, remaining)` seconds.
+
+[Side-Effect Policy] Runs read-only docker inspection commands only.
+"""
 from __future__ import annotations
 
 import json
@@ -67,7 +79,9 @@ def inspect_existing(request, run=subprocess.run):
                 'image_id': image_id, 'base_image': labels.get('com.mindie.base_image'),
                 'base_image_id': labels.get('com.mindie.base_image_id'), 'ssh_port': port,
                 'listener_pids': sorted(listener_pids), 'observed_at': time.time()}
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, TimeoutError) as exc:
+    except TimeoutError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         return {'status': 'unknown', 'reason': str(exc)[:300]}
 
 

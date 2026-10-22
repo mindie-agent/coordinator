@@ -119,6 +119,8 @@ class NpuTopObservationClient:
                 pass
             raise NpuTopUnavailable(message or f"npu-top API returned HTTP {exc.code}",
                                     status=exc.code) from exc
+        except TimeoutError:
+            raise
         except (OSError, URLError, json.JSONDecodeError, ValueError) as exc:
             raise NpuTopUnavailable(f"npu-top unavailable at {self.base_url}: {exc}") from exc
         if len(body) > MAX_RESPONSE_BYTES:

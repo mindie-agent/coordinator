@@ -35,6 +35,10 @@ class MachineDirectoryUnavailable(RuntimeError):
     """No machine directory document is available for this manager."""
 
 
+class MachineNotFoundError(LookupError, ValueError):
+    """The inventory is readable but does not contain the requested machine."""
+
+
 @contextlib.contextmanager
 def _inventory_lock(path: Path) -> Iterator[None]:
     """Serialize with every other writer of this inventory document.
@@ -69,6 +73,8 @@ def _atomic_write_json(path: Path, document: Mapping[str, Any]) -> None:
     except BaseException:
         try:
             os.unlink(temporary)
+        except TimeoutError:
+            raise
         except OSError:
             pass
         raise
@@ -164,7 +170,9 @@ def _resolve_record(inventory: Mapping[str, Any], alias_or_host: str | None) -> 
         elif len(machines) == 1:
             return dict(machines[0])
         else:
-            raise ValueError("machine alias or host is required when multiple machines are registered")
+            raise MachineNotFoundError(
+                "machine alias or host is required when multiple machines are registered"
+            )
     by_alias = [row for row in machines if row.get("alias") == target]
     if len(by_alias) == 1:
         return dict(by_alias[0])
@@ -175,7 +183,9 @@ def _resolve_record(inventory: Mapping[str, Any], alias_or_host: str | None) -> 
         return dict(by_ip[0])
     if len(by_ip) > 1:
         raise ValueError(f"host IP {target!r} matches multiple machine records; specify alias")
-    raise ValueError(f"unknown machine {target!r}; register it with mindie_hosts(action='upsert', ...)")
+    raise MachineNotFoundError(
+        f"unknown machine {target!r}; register it with mindie_hosts(action='upsert', ...)"
+    )
 
 
 class MachineDirectory:
@@ -204,14 +214,14 @@ class MachineDirectory:
         performed. Individual mutations below use read-merge-atomic-replace.
         """
         if not isinstance(document, Mapping) or not isinstance(document.get("machines"), list):
-            raise MachineDirectoryUnavailable("document is not a machine inventory")
+            raise ValueError("document is not a machine inventory")
         path = self.path().resolve()
         with _inventory_lock(path):
             return self._replace_unlocked(path, document)
 
     def _replace_unlocked(self, path: Path, document: Mapping[str, Any]) -> Path:
         if not isinstance(document, Mapping) or not isinstance(document.get("machines"), list):
-            raise MachineDirectoryUnavailable("document is not a machine inventory")
+            raise ValueError("document is not a machine inventory")
         _atomic_write_json(path, document)
         self._document = dict(document)
         from mindie_coordinator.endpoint_bridge import sync_endpoints_file
@@ -224,14 +234,14 @@ class MachineDirectory:
             inventory = self._document
             path = self._path if self._path is not None else Path("<memory>")
             if not isinstance(inventory.get("machines"), list):
-                raise MachineDirectoryUnavailable("document is not a machine inventory")
+                raise ValueError("document is not a machine inventory")
             return dict(inventory), path
         path = self.path().resolve()
         if not path.is_file():
             if self._document is not None:
                 inventory = self._document
                 if not isinstance(inventory.get("machines"), list):
-                    raise MachineDirectoryUnavailable("document is not a machine inventory")
+                    raise ValueError("document is not a machine inventory")
                 return dict(inventory), path
             raise MachineDirectoryUnavailable(
                 f"machine directory is empty at {path}; pass a document to "
@@ -239,7 +249,7 @@ class MachineDirectory:
             )
         inventory = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(inventory, dict) or not isinstance(inventory.get("machines"), list):
-            raise MachineDirectoryUnavailable(f"{path} is not a machine inventory document")
+            raise ValueError(f"{path} is not a machine inventory document")
         return inventory, path
 
     def machines(self) -> list[dict[str, Any]]:
@@ -268,10 +278,23 @@ class MachineDirectory:
             raise ValueError("machine alias must resolve uniquely in the shared inventory")
         return matches[0]["host"]
 
+    def get(self, target: str) -> dict[str, Any]:
+        """Resolve one named machine, distinguishing a miss from corrupt inventory."""
+        inventory, path = self.load()
+        try:
+            return _resolve_record(inventory, target)
+        except MachineNotFoundError:
+            raise MachineNotFoundError(f"Machine {target!r} is not in {path}") from None
+
     def record(self, alias_or_host: str | None = None) -> dict[str, Any]:
         """Resolve one machine record by alias, host IP, or configured default."""
-        inventory, _ = self.load()
-        return _resolve_record(inventory, alias_or_host)
+        if str(alias_or_host or "").strip():
+            return self.get(str(alias_or_host))
+        inventory, path = self.load()
+        try:
+            return _resolve_record(inventory, None)
+        except MachineNotFoundError as exc:
+            raise MachineNotFoundError(f"Machine {alias_or_host!r} is not in {path}") from exc
 
     def upsert_machine(self, record: Mapping[str, Any], *, set_default: bool = False) -> Path:
         """Insert or merge one host record against the latest on-disk document.

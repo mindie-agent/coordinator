@@ -57,6 +57,8 @@ def stop_test_daemon(root):
                     _lock_daemon(guard)
                     _lock_daemon(guard, release=True)
                 return
+            except TimeoutError:
+                raise
             except OSError:
                 pass
         time.sleep(0.05)

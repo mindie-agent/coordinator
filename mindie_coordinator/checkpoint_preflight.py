@@ -89,6 +89,8 @@ def inspect_safetensors_checkpoint(
     if config_path.is_file():
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
+        except TimeoutError:
+            raise
         except (OSError, json.JSONDecodeError) as exc:
             issues.append({"code": "invalid_config_json", "message": f"Failed to parse config.json: {exc}"})
 
@@ -124,6 +126,8 @@ def inspect_safetensors_checkpoint(
             weight_map = idx_doc.get("weight_map") if isinstance(idx_doc, dict) else {}
             if isinstance(weight_map, dict):
                 expected_shards = sorted({str(v) for v in weight_map.values() if v})
+        except TimeoutError:
+            raise
         except (OSError, json.JSONDecodeError) as exc:
             issues.append({"code": "invalid_safetensors_index", "message": f"Failed to parse model.safetensors.index.json: {exc}"})
 

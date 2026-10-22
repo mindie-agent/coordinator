@@ -19,7 +19,7 @@ CMake configure/build tree.
 [Timeouts & Locks]
 - Parameter generation subprocess (`ascendc_bin_param_build.py`) has `timeout=60`s.
 - Variant `opc` compilations run concurrently via `ThreadPoolExecutor` bounded
-  by `MAX_JOBS` or `os.cpu_count()`.
+  by `MAX_JOBS` or the CPU/RAM recommendation from `_recommend_max_jobs()`.
 
 [Side-Effect Policy]
 - Stages intermediate files in a temporary `.mindie-runtime/kernel-recipe-*`
@@ -69,6 +69,52 @@ def _recipe_child(root: Path, name: str) -> Path:
 
 def _recipe_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _cgroup_cpu_cores() -> int:
+    """CPU budget from the cgroup quota or scheduler affinity."""
+    try:
+        fields = Path('/sys/fs/cgroup/cpu.max').read_text(encoding='utf-8').split()
+        if len(fields) >= 2 and fields[0] != 'max':
+            return max(1, int(fields[0]) // max(1, int(fields[1])))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        pass
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except TimeoutError:
+        raise
+    except (AttributeError, OSError):
+        return 1
+
+
+def _recommend_max_jobs() -> int:
+    """Bound compiler workers by CPU and available RAM, without requiring remote_dev."""
+    try:
+        from remote_dev.core.host_spec import probe_local_hardware_spec, recommend_worker_count
+    except ImportError:
+        cpu_cores = _cgroup_cpu_cores()
+        try:
+            meminfo = Path('/proc/meminfo').read_text(encoding='utf-8')
+        except TimeoutError:
+            raise
+        except OSError:
+            return max(1, min(cpu_cores, 16))
+        available_mb = None
+        for line in meminfo.splitlines():
+            if line.startswith('MemAvailable:'):
+                fields = line.split()
+                if len(fields) >= 2:
+                    available_mb = int(fields[1]) // 1024
+                break
+        if available_mb is None:
+            return max(1, min(cpu_cores, 16))
+        memory_workers = max(1, (available_mb - 2048) // 2048)
+        return max(1, min(cpu_cores, memory_workers, 16))
+    return recommend_worker_count(
+        probe_local_hardware_spec(), per_worker_memory_mb=2048,
+    )
 
 
 def kernel_content_key(plan: dict, environment: dict, *, cann_version: str, soc_version: str,
@@ -154,6 +200,8 @@ def restore_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
         source = _recipe_child(entry, relative)
         try:
             os.link(source, target)
+        except TimeoutError:
+            raise
         except OSError as exc:
             fallback = {getattr(errno, name, None) for name in
                         ('EXDEV', 'EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP', 'EMLINK', 'EINVAL')}
@@ -182,6 +230,8 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
         try:
             existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text())
             observed_files = _kernel_cache_files(destination)
+        except TimeoutError:
+            raise
         except (OSError, ValueError):
             # The entry is incomplete/corrupt; rebuild it from this compile.
             _drop_kernel_content(cache, key)
@@ -200,6 +250,8 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
         (temp / KERNEL_CONTENT_MANIFEST).write_text(json.dumps(candidate, sort_keys=True, indent=2) + '\n')
         try:
             os.rename(temp, destination)
+        except TimeoutError:
+            raise
         except OSError as exc:
             if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
                 raise
@@ -361,6 +413,8 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
                 if restore_kernel_recipe_content(root, plan, content_cache, cache_key, read_recipe=read_recipe):
                     print('native-incremental: kernel content cache hit ' + cache_key, flush=True)
                     return True
+            except TimeoutError:
+                raise
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 # Cache lookup is optional; a miss/corrupt entry never becomes
                 # a compiler result, and the actual compiler still runs.
@@ -380,7 +434,8 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
         info.write_text(ini, encoding='utf-8')
         tools = root / 'vllm-ascend/csrc/cmake/scripts/util'
         result = subprocess.run([sys.executable, str(tools / 'ascendc_bin_param_build.py'),
-                                 str(info), str(generated), plan['unit']], env=environment, timeout=60)
+                                 str(info), str(generated), plan['unit']], env=environment, timeout=60,
+                                stdin=subprocess.DEVNULL)
         if result.returncode:
             if result.returncode < 0:
                 raise subprocess.CalledProcessError(result.returncode, result.args)
@@ -430,7 +485,8 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
                 raise ValueError('generated OPC command is not uniquely observable')
             script.write_text(command, encoding='utf-8')
             subprocess.run(['bash', str(script), str(dynamic_path), str(output)],
-                cwd=generated, env={**environment, 'MINDIE_KERNEL_SOURCE_PROOF': str(proof)}, check=True)
+                cwd=generated, env={**environment, 'MINDIE_KERNEL_SOURCE_PROOF': str(proof)}, check=True,
+                timeout=600, stdin=subprocess.DEVNULL)
             if json.loads(proof.read_text()) != {'source': str(staged_source.resolve()), 'sha256': plan['source_sha256']}:
                 raise ValueError('variant has no successful fixed CPP compiler proof')
         started = True
@@ -440,10 +496,7 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
         if requested_jobs.isdecimal() and int(requested_jobs) > 0:
             workers = int(requested_jobs)
         else:
-            from remote_dev.core.host_spec import probe_local_hardware_spec, recommend_worker_count
-            workers = recommend_worker_count(
-                probe_local_hardware_spec(), per_worker_memory_mb=2048, max_workers=os.cpu_count() or 1
-            )
+            workers = _recommend_max_jobs()
         with ThreadPoolExecutor(max_workers=min(len(scripts), workers)) as executor:
             futures = [executor.submit(compile_one, script) for script in scripts]
             errors = []
@@ -459,7 +512,8 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
                 or any(not path.is_file() for path in output.iterdir())):
             raise ValueError('compiler did not produce every complete variant output')
         subprocess.run([sys.executable, str(tools / 'ascendc_ops_config.py'), '-p', str(binary / 'bin'),
-                        '-s', plan['unit']], env=environment, check=True)
+                        '-s', plan['unit']], env=environment, check=True, timeout=120,
+                        stdin=subprocess.DEVNULL)
         destination = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
         destination.mkdir(parents=True)
         (binary / 'bin').rename(destination / 'bin')
@@ -474,6 +528,8 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
             try:
                 publish_kernel_recipe_content(root, plan, content_cache, cache_key, generated_recipes)
                 print('native-incremental: kernel content cache stored ' + cache_key, flush=True)
+            except TimeoutError:
+                raise
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 # Compilation already succeeded; an optional cache write must
                 # not turn a complete owned build into a failure.

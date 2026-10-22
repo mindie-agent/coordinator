@@ -1,8 +1,17 @@
 """Local state locations for this coordinator (stdlib only).
 
-The scaffold's `mindie_local_state` stays scaffold-owned. Only the path
-resolvers the task registry needs live here. Defaults follow the current
-working tree, not the installed package location.
+[Role] Resolves the shared workspace root, agent-session registry, and
+coordinator state directory from explicit environment overrides or the current
+worktree.
+
+[Invariants] `MINDIE_COORDINATOR_STATE_DIR` wins over the session-adjacent
+default; a linked worktree shares its Git common dir while an unrelated clone
+resolves to itself. The scaffold's `mindie_local_state` stays scaffold-owned.
+
+[Timeouts & Locks] The Git common-dir probe is bounded to 5 seconds.
+
+[Side-Effect Policy] Path resolution only; no state is written and the
+filesystem is not modified.
 """
 
 from __future__ import annotations
@@ -29,6 +38,8 @@ def shared_workspace_root(repo_root: Path | None = None) -> Path:
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", timeout=5, check=False,
         )
+    except TimeoutError:
+        raise
     except (OSError, subprocess.TimeoutExpired):
         return repo_root
     if result.returncode != 0 or not result.stdout.strip():

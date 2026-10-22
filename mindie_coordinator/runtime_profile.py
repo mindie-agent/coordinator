@@ -46,7 +46,6 @@ LAUNCH_PATH_KEYS = (
     "ASCEND_CUSTOM_OPP_PATH", "ATB_HOME_PATH", "TOOLCHAIN_HOME", "SOC_VERSION",
 )
 
-
 def capture_launch_environment(environment: dict[str, str]) -> dict[str, str]:
     """Carry CANN discovery paths into the clean managed-worker environment.
 
@@ -60,7 +59,6 @@ def capture_launch_environment(environment: dict[str, str]) -> dict[str, str]:
         # its preparation plan is built by a Windows client.
         captured["PATH"] = ":".join(part for part in captured["PATH"].split(":") if part != shim)
     return captured
-
 
 def command_launch_environment(environment: dict[str, str], *, roots: list[str] = ()) -> dict[str, str]:
     """Keep image initialization while excluding previous execution overlays."""
@@ -78,10 +76,8 @@ def command_launch_environment(environment: dict[str, str], *, roots: list[str] 
             result[key] = value
     return result
 
-
 def digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
 
 def file_digest(path: Path) -> str:
     result = hashlib.sha256()
@@ -89,7 +85,6 @@ def file_digest(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(block)
     return result.hexdigest()
-
 
 def verified_preparation(preparation: dict, profile: dict) -> dict:
     """Resolve cache keys from measured environment facts, not donor guesses."""
@@ -102,7 +97,6 @@ def verified_preparation(preparation: dict, profile: dict) -> dict:
     result['dependency_key'] = digest({'environment': base, 'dependencies': result.get('dependencies', {})})
     result['native_key'] = digest({'environment': base, 'dependencies': result.get('dependencies', {}), 'native': result.get('native', {})})
     return result
-
 
 def build_toolchain_from_logs(root: Path) -> dict[str, Any]:
     """Read the latest completed package-owned install's build selection.
@@ -125,7 +119,6 @@ def build_toolchain_from_logs(root: Path) -> dict[str, Any]:
     return {"soc": next(iter(socs), None), "compilers": compilers,
             "path": path.relative_to(root).as_posix(), "sha256": file_digest(path)}
 
-
 def checked_file(root: Path, relative: str) -> Path:
     name = PurePosixPath(relative)
     if name.is_absolute() or not name.parts or ".." in name.parts:
@@ -136,7 +129,6 @@ def checked_file(root: Path, relative: str) -> Path:
     if path.name == "CMakeCache.txt":
         raise ValueError("CMakeCache.txt is not a reusable runtime artifact")
     return path
-
 
 def compiled_opc_recipe(script_path):
     """Read one generated literal OPC command; never evaluate its shell code."""
@@ -182,9 +174,10 @@ def compiled_opc_recipe(script_path):
         return {'name': script.name, 'opc_args': args, 'binary': variants[0]['bin_filename'],
                 'parameter_sha256': hashlib.sha256(json.dumps(payload, sort_keys=True,
                     separators=(',', ':')).encode()).hexdigest()}
+    except TimeoutError:
+        raise
     except (OSError, ValueError, TypeError):
         return None
-
 
 def capture_kernel_compile_recipe(root: Path) -> None:
     """Keep actual completed compiler inputs in the existing native bundle.
@@ -204,6 +197,8 @@ def capture_kernel_compile_recipe(root: Path) -> None:
     try:
         hashes = {name: file_digest(checked_file(root, (tools / name).relative_to(root).as_posix()))
                   for name in names}
+    except TimeoutError:
+        raise
     except (OSError, ValueError):
         target.unlink(missing_ok=True)
         return
@@ -222,8 +217,12 @@ def capture_kernel_compile_recipe(root: Path) -> None:
                         try:
                             if all(file_digest(checked_file(root, path)) == sha for path, sha in outputs.items()):
                                 result['variants'].setdefault(unit, {})[op] = entry
+                        except TimeoutError:
+                            raise
                         except (OSError, ValueError, TypeError):
                             pass
+        except TimeoutError:
+            raise
         except (OSError, ValueError, TypeError):
             pass
     vendor = root / 'vllm-ascend/vllm_ascend/_cann_ops_custom/vendors'
@@ -272,6 +271,8 @@ def capture_kernel_compile_recipe(root: Path) -> None:
                             raise ValueError('build and installed compiler outputs differ')
                         outputs[copied.relative_to(root).as_posix()] = sha
                 installed[op] = {'variants': rows, 'outputs': outputs}
+            except TimeoutError:
+                raise
             except (OSError, ValueError, TypeError):
                 continue
         if not installed:
@@ -283,7 +284,6 @@ def capture_kernel_compile_recipe(root: Path) -> None:
     temporary = target.with_suffix('.tmp')
     temporary.write_text(json.dumps(result, sort_keys=True) + '\n', encoding='utf-8')
     os.replace(temporary, target)
-
 
 def installed_native_files(root: Path) -> dict[str, str]:
     """Enumerate the installed editable extension and complete custom-op tree.
@@ -328,7 +328,6 @@ def installed_native_files(root: Path) -> dict[str, str]:
         files[relative] = "library" if path in extensions or path in binaries else "metadata"
     return files
 
-
 def native_vendor_paths(files: dict) -> dict[str, list[str]]:
     """Derive custom-op loader directories from the complete native file set."""
     vendors, libraries = set(), set()
@@ -347,7 +346,6 @@ def native_vendor_paths(files: dict) -> dict[str, list[str]]:
                 libraries.add((vendor / 'op_api/lib').as_posix())
     return {'ASCEND_CUSTOM_OPP_PATH': sorted(vendors), 'LD_LIBRARY_PATH': sorted(libraries)}
 
-
 def native_vendor_launch_environment(root: Path, files: dict, environment: dict[str, str]) -> dict[str, str]:
     """Make owned custom-op APIs visible when the native process is created."""
     result = dict(environment)
@@ -356,7 +354,6 @@ def native_vendor_launch_environment(root: Path, files: dict, environment: dict[
             owned = [(root.resolve() / path).as_posix() for path in paths]
             result[key] = ':'.join(dict.fromkeys([*owned, *filter(None, result.get(key, '').split(':'))]))
     return result
-
 
 def installed_dependency_identity() -> dict[str, Any]:
     """Resolved installed metadata without importing the dependency packages."""
@@ -368,7 +365,6 @@ def installed_dependency_identity() -> dict[str, Any]:
                 packages[name] = distribution.version
                 origins[name] = str(Path(distribution.locate_file('')).resolve())
     return {'packages': packages, 'dependency_origins': origins}
-
 
 def native_import_smoke(root: Path, profile: dict, inputs: dict) -> dict:
     """Import in a new process so the loader sees the final owned environment."""
@@ -392,7 +388,6 @@ print(json.dumps({'python': sys.executable, 'imports': {k: str(v) for k,v in pat
             'profile_key': profile_key(profile), 'build_inputs': inputs,
             'stdout': result.stdout[-4000:], 'stderr': result.stderr[-8000:],
             'elapsed_seconds': time.monotonic() - started}
-
 
 def profile_key(profile: dict[str, Any]) -> str:
     if profile.get('kind') == 'command':
@@ -421,7 +416,6 @@ def profile_key(profile: dict[str, Any]) -> str:
             raise ValueError("system file identity requires an absolute path and SHA256")
     return digest(profile)
 
-
 def launch_preamble(profile: dict[str, Any], python: str | None = None) -> str:
     """Keep image-provided acl/native-compat paths when adding scoped paths."""
     profile_key(profile)
@@ -437,12 +431,10 @@ def launch_preamble(profile: dict[str, Any], python: str | None = None) -> str:
         lines.append(f"export MINDIE_PYTHON={shlex.quote(python)}")
     return "\n".join(lines)
 
-
 def build_key(profile: dict[str, Any], inputs: dict[str, Any]) -> str:
     if not inputs.get("vllm") or not inputs.get("vllm-ascend"):
         raise ValueError("native input fingerprints for both repositories are required")
     return digest({"profile": profile_key(profile), "inputs": inputs})
-
 
 def capture(root: Path, profile: dict[str, Any], inputs: dict[str, Any],
             files: dict[str, str], evidence: dict[str, str]) -> dict[str, Any]:
@@ -466,7 +458,6 @@ def capture(root: Path, profile: dict[str, Any], inputs: dict[str, Any],
         "evidence": {role: {"path": name, "sha256": file_digest(checked_file(root, name))}
                      for role, name in sorted(evidence.items())},
     }
-
 
 def native_compatibility_key(manifest: dict[str, Any]) -> str:
     """Identify the already tested native environment independently of a view.
@@ -523,7 +514,6 @@ def native_compatibility_key(manifest: dict[str, Any]) -> str:
         environment['dependency_origins'] = profile['dependency_origins']
     return digest({'environment': environment, 'inputs': source_inputs, 'files': manifest['files']})
 
-
 def native_import_closure_key(manifest: dict[str, Any]) -> str:
     """Import proof identity; AI-core device payloads are verified separately.
 
@@ -542,7 +532,6 @@ def native_import_closure_key(manifest: dict[str, Any]) -> str:
                       ('/kernel/' in path or '/ascendc/' in path) and
                       PurePosixPath(path).suffix in {'.o', '.json', '.cpp', '.h'})}
     return native_compatibility_key({**manifest, 'build_inputs': inputs, 'files': files})
-
 
 def native_import_receipt(root: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
     try:
@@ -564,7 +553,6 @@ def native_import_receipt(root: Path, manifest: dict[str, Any]) -> dict[str, Any
         raise ValueError('import closure requires an original successful import')
     return {'key': key, 'origin': {'profile_key': manifest['profile_key'],
             'build_key': manifest['build_key'], 'build_inputs': manifest['build_inputs'], 'smoke': smoke}}
-
 
 def native_source_mapping(root: Path) -> dict[str, str]:
     """Resolve the execution overlay without importing business/native code."""
@@ -600,7 +588,6 @@ def native_source_mapping(root: Path) -> dict[str, str]:
     result['extension'] = str(Path(extension.origin).resolve())
     return result
 
-
 def native_compatibility_receipt(root: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
     """Copy an already verified donor's original import proof, without chains."""
     try:
@@ -623,7 +610,6 @@ def native_compatibility_receipt(root: Path, manifest: dict[str, Any]) -> dict[s
                                   'build_key': manifest['build_key'], 'build_inputs': manifest['build_inputs'],
                                   'smoke': smoke}}
 
-
 def verify_native_compatibility(root: Path, manifest: dict[str, Any], smoke: dict[str, Any], *, check_environment: bool):
     certificate = smoke.get('compatibility') or {}
     origin = certificate.get('origin') or {}
@@ -639,7 +625,6 @@ def verify_native_compatibility(root: Path, manifest: dict[str, Any], smoke: dic
         raise ValueError('reused native compatibility evidence does not match this environment and bundle')
     if check_environment and native_source_mapping(root) != smoke.get('source_mapping'):
         raise ValueError('execution source or SCM metadata mapping changed')
-
 
 def verify_environment(root: Path, manifest: dict[str, Any]) -> None:
     """Check mutable environment facts without re-reading native outputs."""
@@ -660,7 +645,6 @@ def verify_environment(root: Path, manifest: dict[str, Any]) -> None:
         if file_digest(Path(row['path'])) != row['sha256']:
             raise ValueError('CANN/driver/runtime support file changed')
 
-
 def verify_execution_view(root: Path, manifest: dict[str, Any]) -> None:
     """Check an owned view at launch, reusing its completed native publication.
 
@@ -677,7 +661,6 @@ def verify_execution_view(root: Path, manifest: dict[str, Any]) -> None:
     if native_source_mapping(root) != smoke.get('source_mapping'):
         raise ValueError('execution source or SCM metadata mapping changed')
 
-
 def verify(root: Path, manifest: dict[str, Any], *, check_environment: bool = True) -> None:
     """Validate independently supplied bytes and their complete runtime proof."""
     if manifest.get('schema_version') == 1:
@@ -685,7 +668,6 @@ def verify(root: Path, manifest: dict[str, Any], *, check_environment: bool = Tr
             if file_digest(checked_file(root, name)) != row['sha256']:
                 raise ValueError(f'artifact hash mismatch: {name}')
     _verify_manifest_proof(root, manifest, check_environment=check_environment)
-
 
 def _verify_manifest_proof(root: Path, manifest: dict[str, Any], *, check_environment: bool = True) -> None:
     """Validate identity/evidence, separately from reading native output bytes.
@@ -728,12 +710,10 @@ def _verify_manifest_proof(root: Path, manifest: dict[str, Any], *, check_enviro
     if check_environment:
         verify_environment(root, manifest)
 
-
 def publish(root: Path, cache: Path, manifest: dict[str, Any]) -> Path:
     """Atomically publish a complete, immutable bundle; no partial cache hits."""
     verify(root, manifest)
     return _publish_captured_bundle(root, cache, manifest)
-
 
 def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], *, timings=None) -> Path:
     """Publish bytes whose source hashes were captured in this operation.
@@ -773,6 +753,8 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
         timings['bundle_verify'] = time.monotonic() - started
         try:
             os.rename(temp, destination)
+        except TimeoutError:
+            raise
         except OSError:
             # Another complete publication may win this immutable key. Never
             # replace it or mistake a failed/partial destination for success.
@@ -787,7 +769,6 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
     finally:
         if temp.exists():
             shutil.rmtree(temp)
-
 
 def restore(root: Path, bundle: Path, expected_build_key: str) -> None:
     """Preparation-only restoration, after owner proves all its workers stopped."""

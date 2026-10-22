@@ -1,8 +1,18 @@
 """Fix execution input once using the existing Git object capture implementation.
 
+[Role] Captures an immutable, Git-identity execution source snapshot and
+resolves the retained object-store paths used by later execution phases.
+
+[Invariants] Capture uses Git object identity, not file-content hashes.
 Worktree paths below locate object stores after capture; no execution phase may
 read their current files. Retained refs keep dirty trees and true SCM ancestry
-reachable without changing the user's HEAD, index, branches or worktree.
+reachable without changing the user's HEAD, index, branches, or worktree.
+
+[Timeouts & Locks] Uses bounded reads and delegates Git operations to the
+existing capture implementation; no unbounded wait is introduced here.
+
+[Side-Effect Policy] Writes retained Git refs and snapshot metadata only; never
+mutates the consumer worktree.
 """
 from __future__ import annotations
 
@@ -84,6 +94,8 @@ are reused. Source-free commands do not import Git/parity or scan anything.
             record.ref = data["ref"]
         try:
             save_cache(*cache, records)
+        except TimeoutError:
+            raise
         except OSError:
             # This rebuildable acceleration is not an admission prerequisite.
             # The immutable source records and retained refs remain authoritative.

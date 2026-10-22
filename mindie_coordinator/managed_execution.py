@@ -67,6 +67,11 @@ def task_preamble(binding, *, slot_id=None):
 
 
 class ManagedExecution:
+    @staticmethod
+    def find(db, kind: str, key: str) -> dict | None:
+        row = db.execute("SELECT data FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
+        return json.loads(row[0]) if row is not None else None
+
     def managed_start(self, owner, binding_id, request_id, snapshots, expected_build_key,
                       devices, npu_count, command, env, timeout_seconds=1800,
                       priority=0, queue_seconds=1800, service_port=None, hold_go=False,
@@ -105,9 +110,9 @@ class ManagedExecution:
                          **({"proof_path": proof_path} if proof_path else {})}
         with self.lock, self.transaction() as db:
             binding = self.owned(db, "binding", binding_id, owner)
-            existing = [row for row in self.rows(db, "job") if row["id"] == key]
+            existing = self.find(db, "job", key)
             if existing:
-                job = existing[0]
+                job = existing
                 if job["request"] != request or job["spec"] != specification:
                     raise ValueError("managed execution request id reused with different arguments")
                 if bool(job.get("hold_go")) != bool(hold_go):
@@ -173,13 +178,13 @@ class ManagedExecution:
                 job = self.get(db, "job", key)
                 binding = self.owned(db, "binding", job["binding_id"], job["owner"])
                 runtime = self.get(db, "runtime", binding["runtime_id"])
-                runs = [row for row in self.rows(db, "run") if row["id"] == key]
+                saved_run = self.find(db, "run", key)
             correlation = bind_context(job.get("diagnostics_context") or {})
             correlation.__enter__()
             if job["state"] in JOB_TERMINAL:
                 return job
             try:
-                if not runs:
+                if not saved_run:
                     if job["cancel_requested"]:
                         job["state"] = "cancelled"
                         job["runtime_returned"] = False
@@ -188,13 +193,13 @@ class ManagedExecution:
                     # locally. A new run can verify inputs immediately before
                     # combined admission/preflight; queue recovery rechecks them.
                     run = self._request_run(job["owner"], **job["request"], check_remote=False, _managed=True)
-                elif runs[0]["state"] in {"active", "orphaned_busy"}:
+                elif saved_run["state"] in {"active", "orphaned_busy"}:
                     # A running job needs one authoritative renewal, below,
                     # after observing its supervisor. Polling the same lease
                     # first repeats a host round trip and an occupancy scan.
                     # Completion goes directly to fenced host release; failed
                     # renewals retain uncertainty and reconcile on the next turn.
-                    run = runs[0]
+                    run = saved_run
                 else:
                     run = self.control(job["owner"], key, "poll", _managed=True)
                 if run.get("preflight_error"):
@@ -210,7 +215,7 @@ class ManagedExecution:
                 # This owner persists a run before its only prepare path. With
                 # no run on entry, no supervisor can have been sent yet. Any
                 # resumed run (even without a saved remote receipt) is observed.
-                known_absent = (not runs and run["state"] in {"pending", "queued", "granted", "starting", "cancelled"}
+                known_absent = (not saved_run and run["state"] in {"pending", "queued", "granted", "starting", "cancelled"}
                                 and not job.get("had_receipt") and not (job.get("remote") or {}).get("receipt"))
                 observed = ({"state": "absent", "quiet": True} if known_absent
                             else _completed_observation if _completed_observation is not None
@@ -417,8 +422,17 @@ class ManagedExecution:
                 if not current.get("hold_go"):
                     job["hold_go"] = False
                 self.put(db, "job", job)
-                runs = [row for row in self.rows(db, "run") if row["id"] == job["id"]]
+                run = self.find(db, "run", job["id"])
                 binding = self.get(db, "binding", job["binding_id"])
+        except TimeoutError as exc:
+            if job.get("state") not in JOB_TERMINAL or not (job.get("remote") or {}).get("quiet"):
+                raise
+            # A local recording timeout cannot turn an observed remote success
+            # into uncertainty. Record the timeout visibly and retain the
+            # launch identity so reconstruction re-observes the same job.
+            job["recording_error"] = {"artifact": "job-state", "error": str(exc)[:500],
+                                      "timeout": True}
+            return job
         except (OSError, sqlite3.Error) as exc:
             if job.get("state") not in JOB_TERMINAL or not (job.get("remote") or {}).get("quiet"):
                 raise
@@ -426,11 +440,11 @@ class ManagedExecution:
             # Retain its observed completion even when the final local update
             # times out; reconstruction re-observes it without another launch.
             job["recording_error"] = {"artifact": "job-state", "error": str(exc)[:500],
-                                      "timeout": isinstance(exc, TimeoutError)}
+                                      "timeout": False}
             return job
-        if runs:
+        if run:
             try:
-                self.export_execution_record(runs[0], binding, job=job)
+                self.export_execution_record(run, binding, job=job)
             except TimeoutError as exc:
                 job["recording_error"] = {"artifact": "managed-run", "error": str(exc)[:500], "timeout": True}
             except (OSError, sqlite3.Error) as exc:

@@ -210,6 +210,8 @@ if args.get('publish_native_cache'):
     print('finalize-runtime: publish native cache', file=sys.stderr, flush=True)
     try:
         cache_result = _store_captured_native(root, Path(SHARED_NATIVE_CACHE), manifest, timings)
+    except TimeoutError:
+        raise
     except OSError as exc:
         # A completed filesystem failure in this optional cache does not undo
         # the owned runtime. Integrity/proof failures still abort finalization.
@@ -263,13 +265,13 @@ print(json.dumps(manifest))
 def require_clean_sources(root: Path):
     for name in ("vllm", "vllm-ascend"):
         for node in iter_postorder(discover_repo_tree(root / name, name)):
-            dirty = subprocess.check_output(["git", "-C", str(node.repo_path), "status", "--porcelain", "--untracked-files=no"], text=True, encoding="utf-8")
+            dirty = subprocess.check_output(["git", "-C", str(node.repo_path), "status", "--porcelain", "--untracked-files=no"], text=True, encoding="utf-8", timeout=60, stdin=subprocess.DEVNULL)
             if dirty.strip():
                 raise ValueError("attest a clean materialized parity snapshot, including child submodules")
             for child in node.children:
                 path = child.repo_path.relative_to(node.repo_path).as_posix()
-                head = subprocess.check_output(["git", "-C", str(child.repo_path), "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
-                entry = subprocess.check_output(["git", "-C", str(node.repo_path), "ls-tree", "HEAD", "--", path], text=True, encoding="utf-8").strip()
+                head = subprocess.check_output(["git", "-C", str(child.repo_path), "rev-parse", "HEAD"], text=True, encoding="utf-8", timeout=60, stdin=subprocess.DEVNULL).strip()
+                entry = subprocess.check_output(["git", "-C", str(node.repo_path), "ls-tree", "HEAD", "--", path], text=True, encoding="utf-8", timeout=60, stdin=subprocess.DEVNULL).strip()
                 if entry != f"160000 commit {head}\t{path}":
                     raise ValueError("native submodule must be tracked at its pinned commit: " + child.relpath)
 

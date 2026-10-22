@@ -100,6 +100,8 @@ def export_existing_objects(request, run=None):
         if exc.returncode < 0 or exc.returncode >= 128:
             return {'status': 'uncertain', 'reason': str(exc)}
         return {'status': 'miss', 'copied': [], 'reason': str(exc)}
+    except TimeoutError:
+        raise
     except (OSError, ValueError) as exc:
         return {'status': 'miss', 'copied': [], 'reason': str(exc)}
     pending = list(request['records'])
@@ -123,6 +125,8 @@ def export_existing_objects(request, run=None):
                         capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired as exc:
             return {'status': 'uncertain', 'reason': str(exc)}
+        except TimeoutError:
+            raise
         except OSError as exc:
             print(f'fixed object donor unavailable: {exc}', file=sys.stderr, flush=True)
             diagnostics.append(str(exc))
@@ -180,6 +184,8 @@ def export_container_objects(request):
                     break
             except subprocess.SubprocessError as exc:
                 return {'status': 'uncertain', 'reason': str(exc)}
+            except TimeoutError:
+                raise
             except (OSError, ValueError, RuntimeError) as exc:
                 print(f'fixed object candidate unavailable: {exc}', file=sys.stderr, flush=True)
                 diagnostics.append(str(exc)[-2000:])

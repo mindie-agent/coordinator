@@ -96,6 +96,7 @@ class AgentSessions:
         with contextlib.closing(sqlite3.connect(self.db_path, timeout=10)) as db:
             with db:
                 db.execute("PRAGMA journal_mode=WAL")
+                db.execute("PRAGMA busy_timeout=5000")
                 db.execute("PRAGMA synchronous=FULL")
                 db.execute("BEGIN IMMEDIATE")
                 yield db
@@ -106,6 +107,11 @@ class AgentSessions:
         if row is None:
             raise ValueError(f"unknown MindIE {kind}")
         return json.loads(row[0])
+
+    @staticmethod
+    def find(db, kind: str, key: str) -> dict | None:
+        row = db.execute("SELECT data FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
+        return json.loads(row[0]) if row is not None else None
 
     @staticmethod
     def put(db, kind, value):
@@ -133,6 +139,8 @@ class AgentSessions:
         def already_published():
             try:
                 return json.loads(path.read_text(encoding="utf-8")) == reference
+            except TimeoutError:
+                raise
             except (OSError, ValueError):
                 return False
 
@@ -176,7 +184,7 @@ class AgentSessions:
         key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         actual_cwd = str(Path(client_path(cwd)).expanduser().resolve())
         with self.transaction() as db:
-            existing = [row for row in self.rows(db, "attachment") if row["id"] == key]
+            existing = self.find(db, "attachment", key)
             if not existing:
                 session_id = parent["session"]["id"] if parent else "mindie-" + uuid.uuid4().hex
                 if parent:
@@ -194,7 +202,7 @@ class AgentSessions:
                     "cwd": actual_cwd, "state": "attached", "created_at": now,
                 })
             else:
-                old = existing[0]
+                old = existing
                 if parent and old["session_id"] != parent["session"]["id"]:
                     raise ValueError("native session already belongs to another task")
                 session = self.get(db, "session", old["session_id"])
@@ -301,6 +309,8 @@ class AgentSessions:
                     if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\\" in name:
                         raise ValueError("source names must be single repository names")
                     references[name] = worktree_reference(path)
+            except TimeoutError:
+                raise
             except (OSError, ValueError, subprocess.SubprocessError):
                 with self.transaction() as db:
                     current = self.get(db, "attachment", attachment["id"])
@@ -369,9 +379,9 @@ class AgentSessions:
         with self.transaction() as db:
             if self.get(db, "session", session_id)["state"] != "open":
                 raise ValueError("task admission is closed; resume the task before starting another execution")
-            existing = [row for row in self.rows(db, "execution") if row["id"] == key]
+            existing = self.find(db, "execution", key)
             if existing:
-                row = existing[0]
+                row = existing
                 if row["spec"] != spec:
                     raise ValueError("execution request id reused with different arguments")
                 if row.get("admitted"):
@@ -389,11 +399,11 @@ class AgentSessions:
     def execution(self, context: dict, request_id: str, spec: dict) -> dict:
         key = hashlib.sha256(json.dumps([context["session"]["id"], request_id]).encode()).hexdigest()
         with self.transaction() as db:
-            matches = [row for row in self.rows(db, "execution") if row["id"] == key]
+            matches = self.find(db, "execution", key)
             if matches:
-                if matches[0]["spec"] != spec:
+                if matches["spec"] != spec:
                     raise ValueError("execution request id reused with different arguments")
-                return matches[0]
+                return matches
             if self.get(db, "session", context["session"]["id"])["state"] != "open":
                 raise ValueError("resume the task before starting another execution")
             row = {"id": key, "session_id": context["session"]["id"], "request_id": request_id,
@@ -458,6 +468,8 @@ def load_context(context_file: str = "", *, allow_native_context: bool = True) -
                                    parent_context=parent, association=association)
             try:
                 return store.bind_native_sources(context)
+            except TimeoutError:
+                raise
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # A local task remains usable before its directory has a Git
                 # commit. Match the normal session hook's source boundary.

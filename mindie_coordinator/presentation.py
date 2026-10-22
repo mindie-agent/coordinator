@@ -109,6 +109,8 @@ def present(result: dict, directory: Path, *, full=False, target=False) -> dict:
         with path.open("x", encoding="utf-8") as stream:
             json.dump(result, stream, ensure_ascii=False, indent=2)
         result = {**result, "record_ref": str(path)}
+    except TimeoutError:
+        raise
     except OSError as exc:
         result = {**result, "warnings": [*result.get("warnings", []), f"Full record write failed: {exc}"]}
     if full:

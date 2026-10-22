@@ -1,4 +1,16 @@
-"""Internal composition of fixed source materialization and native publication."""
+"""Internal composition of fixed source materialization and native publication.
+
+[Role] Publishes one verified fixed native donor view for a bound runtime.
+
+[Invariants] The donor/view pair is fixed before publication; no caller-selected
+remote callback is accepted. Digest and profile verification gate publication.
+
+[Timeouts & Locks] Remote work is delegated to the bounded preparation owner;
+this module adds no unbounded wait.
+
+[Side-Effect Policy] Publishes only the verified native view under the owned
+runtime root.
+"""
 from __future__ import annotations
 
 from pathlib import Path

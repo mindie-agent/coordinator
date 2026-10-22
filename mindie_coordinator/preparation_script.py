@@ -1,4 +1,15 @@
-"""Bound package programs without passing their bodies as a Bash argument."""
+"""Bound package programs without passing their bodies as a Bash argument.
+
+[Role] Encodes preparation programs that exceed the shell command budget into a
+size-checked, compressed transport payload.
+
+[Invariants] Programs are limited to `PROGRAM_BYTES`; the inline path is used
+only when the encoded script fits `COMMAND_BYTES`; decoding verifies hashes.
+
+[Timeouts & Locks] Pure in-memory encoding/decoding with no waits or locks.
+
+[Side-Effect Policy] Returns text only and writes nothing.
+"""
 from __future__ import annotations
 
 import base64

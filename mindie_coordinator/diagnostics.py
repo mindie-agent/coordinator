@@ -1,7 +1,15 @@
 """Public support projection of an already-authorized execution's local facts.
 
-No global log scan, host observation, business output, source path or raw record
-is needed. Missing historical clock/correlation facts remain explicit gaps.
+[Role] Projects one execution's recorded timing, correlation, and outcome
+events into a diagnostics bundle for reporting.
+
+[Invariants] No global log scan, host observation, business output, source path,
+or raw record is read. Missing historical clock/correlation facts remain
+explicit gaps rather than inferred values.
+
+[Timeouts & Locks] Pure in-memory projection; no I/O, subprocesses, or locks.
+
+[Side-Effect Policy] Returns a new dictionary and never mutates the source row.
 """
 from datetime import datetime, timezone
 import time

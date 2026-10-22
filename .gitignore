@@ -12,6 +12,7 @@ venv/
 *.log
 
 # Untracked local coordinator and task-registry state.
+.mindie-*/
 .mindie-local/
 .mindie-runtime/
 state/

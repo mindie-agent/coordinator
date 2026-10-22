@@ -191,6 +191,8 @@ def capture_records(roots, state_dir, *, attempts, build_env):
             cache = {}
         if cache.pop("checksum") != digest(cache) or cache.get("rules") != rules:
             cache = {}
+    except TimeoutError:
+        raise
     except (OSError, ValueError, KeyError):
         cache = {}
     nodes = []
@@ -202,6 +204,8 @@ def capture_records(roots, state_dir, *, attempts, build_env):
         nodes = list(by_name.values())
         if not nodes or topology_key(nodes) != cache["topology"]:
             nodes = []
+    except TimeoutError:
+        raise
     except (OSError, ValueError, KeyError):
         nodes = []
     if not nodes:

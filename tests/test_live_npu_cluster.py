@@ -151,9 +151,9 @@ def test_live_lease_lifecycle_in_isolated_remote_state_dir(alias: str, host: str
 
 @pytest.mark.live_npu
 def test_live_linux_proc_process_guard_busy_on_a3_host():
-    from mindie_coordinator.host import mindie_npu_coordination
+    from mindie_coordinator.host_queue import HostQueue
 
-    coord_src = Path(mindie_npu_coordination.__file__).read_text(encoding="utf-8")
+    coord_src = HostQueue().source()
     coord_src = coord_src.split('if __name__ == "__main__":')[0]
     py_code = f"""{coord_src}
 

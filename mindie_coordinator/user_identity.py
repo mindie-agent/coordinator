@@ -1,10 +1,17 @@
 """Read a consumer-supplied GitHub identity snapshot for local attribution.
 
-Shared-root deployments use this configured user for naming and coordination.
-It is not an authentication token or an authorization boundary. This module
-performs no network requests and never searches for a consumer workspace.
-The confirmed login is sufficient for local attribution. A numeric GitHub ID
-may accompany an authenticated snapshot, but is never required for local use.
+[Role] Reads the configured GitHub identity file for local naming and
+coordination attribution.
+
+[Invariants] Shared-root deployments use this configured user for naming and
+coordination. It is not an authentication token or an authorization boundary.
+The module performs no network requests and never searches for a consumer
+workspace. A numeric GitHub ID may accompany an authenticated snapshot but is
+never required for local use.
+
+[Timeouts & Locks] Bounded local file reads only; no network or wait.
+
+[Side-Effect Policy] Read-only; the identity file is never modified.
 """
 from __future__ import annotations
 
@@ -27,6 +34,8 @@ def load_github_identity(identity_file=None) -> dict | None:
     path = Path(client_path(supplied)).expanduser()
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise ValueError(f"Cannot read configured GitHub identity file {path}: {exc.strerror or exc}") from exc
     except (UnicodeError, json.JSONDecodeError) as exc:

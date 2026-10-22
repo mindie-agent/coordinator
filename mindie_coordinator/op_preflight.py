@@ -1,26 +1,14 @@
-"""Static AST, SoC feature compatibility, and NUMA/CPU binding preflight for Ascend NPU.
-
+"""Static AST, SoC, and NUMA/CPU binding preflight for Ascend NPU.
 [Role]
-Extracts ground-truth operator schemas (`npu::*`, `_C_ascend::*`), validates
-Python source files in sub-second AST preflight, and verifies SoC hardware
-feature compatibility (`validate_model_soc_feature_compatibility`) and NUMA/CPU
-core binding plans (`validate_numa_cpu_binding_plan`) before NPU lease or launch.
-
+Extracts Ascend operator schemas, runs AST contract checks, and validates SoC
+feature compatibility and NUMA/CPU binding plans.
 [Invariants]
-- Stdlib-only so the module can run both locally on coordinator source snapshots
-  and remotely inside container preflight probes without external dependencies.
-- Never executes user code or initializes NPU devices during static preflight.
-- Every violation reports an explicit rule/code, severity, affected target, and
-  concrete remediation hint.
-
+Stdlib-only, read-only, executes no user code; every violation names its
+rule/code, severity, target, and remediation.
 [Timeouts & Locks]
-- Pure in-memory analysis (`< 50ms` per file); zero subprocesses or locks.
-
+Pure in-memory analysis; zero subprocesses or locks.
 [Side-Effect Policy]
-- `check_python_op_contracts`, `check_paths_op_contracts`,
-  `validate_model_soc_feature_compatibility`, and `validate_numa_cpu_binding_plan`
-  are pure read-only functions. `write_runtime_op_catalog` writes
-  `.mindie-runtime/ascend-ops-catalog.json` atomically via `.tmp` + `os.replace`.
+Only `write_runtime_op_catalog` writes (atomically).
 """
 from __future__ import annotations
 
@@ -153,7 +141,6 @@ _UNMIGRATED_CUDA_APIS = frozenset({
     "max_memory_allocated", "reset_peak_memory_stats", "ipc_collect",
 })
 
-
 def extract_live_ascend_op_catalog() -> dict[str, dict[str, Any]]:
     """Extract live JIT operator schemas from torch/torch_npu/_C_ascend when loaded."""
     catalog = {k: dict(v) for k, v in DEFAULT_ASCEND_OP_CATALOG.items()}
@@ -195,7 +182,6 @@ def extract_live_ascend_op_catalog() -> dict[str, dict[str, Any]]:
             }
     return catalog
 
-
 def write_runtime_op_catalog(root: Path) -> Path:
     """Write `.mindie-runtime/ascend-ops-catalog.json` atomically."""
     target = Path(root).resolve() / CATALOG_RELATIVE_PATH
@@ -206,7 +192,6 @@ def write_runtime_op_catalog(root: Path) -> Path:
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, target)
     return target
-
 
 def load_runtime_op_catalog(root: Path | None = None) -> dict[str, dict[str, Any]]:
     """Load `.mindie-runtime/ascend-ops-catalog.json` merged with default contracts."""
@@ -223,10 +208,11 @@ def load_runtime_op_catalog(root: Path | None = None) -> dict[str, dict[str, Any
             for k, v in ops.items():
                 if isinstance(v, dict):
                     catalog[k] = {**catalog.get(k, {}), **v}
+    except TimeoutError:
+        raise
     except (OSError, ValueError):
         pass
     return catalog
-
 
 def _dotted_name(node: ast.AST) -> str | None:
     parts: list[str] = []
@@ -238,7 +224,6 @@ def _dotted_name(node: ast.AST) -> str | None:
         parts.append(curr.id)
         return ".".join(reversed(parts))
     return None
-
 
 def _classify_arg_view_or_copy(
     expr: ast.AST,
@@ -260,7 +245,6 @@ def _classify_arg_view_or_copy(
             return "temporary_copy", f"`{src}` passes a temporary tensor copy whose in-place mutation is discarded"
     return None, None
 
-
 def _is_noncontiguous_expr(expr: ast.AST) -> str | None:
     if isinstance(expr, ast.Attribute) and expr.attr in {"T", "mT"}:
         return ast.unparse(expr) if hasattr(ast, "unparse") else f".{expr.attr}"
@@ -268,7 +252,6 @@ def _is_noncontiguous_expr(expr: ast.AST) -> str | None:
         if expr.func.attr in _NONCONTIGUOUS_VIEW_METHODS:
             return ast.unparse(expr) if hasattr(ast, "unparse") else f".{expr.func.attr}(...)"
     return None
-
 
 def check_python_op_contracts(
     source_text: str,
@@ -481,7 +464,6 @@ def check_python_op_contracts(
             unique.append(item)
     return unique
 
-
 def check_paths_op_contracts(
     root: Path,
     relpaths: Iterable[str],
@@ -502,6 +484,8 @@ def check_paths_op_contracts(
         is_test = any(part.startswith("test") or part == "tests" for part in Path(rel).parts)
         try:
             text = candidate.read_text(encoding="utf-8")
+        except TimeoutError:
+            raise
         except OSError:
             continue
         violations.extend(
@@ -513,7 +497,6 @@ def check_paths_op_contracts(
             )
         )
     return violations
-
 
 def check_snapshot_op_contracts(
     source_snapshot: Mapping[str, Any] | None,
@@ -544,7 +527,6 @@ def check_snapshot_op_contracts(
             violations.append({**item, "file": qualified_file})
     return violations
 
-
 def format_op_violations(violations: Iterable[Mapping[str, Any]]) -> str:
     """Format AST operator contract violations into a concise diagnostic report."""
     items = list(violations)
@@ -559,7 +541,6 @@ def format_op_violations(violations: Iterable[Mapping[str, Any]]) -> str:
         lines.append(f"  ... and {len(items) - 10} more violation(s).")
     return "\n".join(lines)
 
-
 def _normalize_soc_family(soc_version: str) -> str:
     lowered = str(soc_version or "").strip().lower()
     if any(tok in lowered for tok in ("310p", "300i duo", "_310p")):
@@ -571,7 +552,6 @@ def _normalize_soc_family(soc_version: str) -> str:
     if any(tok in lowered for tok in ("910b", "910_91", "910_92")) or lowered in {"a2", "ascenda2"}:
         return "Ascend910B"
     return "unknown"
-
 
 def validate_model_soc_feature_compatibility(
     soc_version: str,
@@ -657,7 +637,6 @@ def validate_model_soc_feature_compatibility(
         "remediation": [v["remediation"] for v in violations],
     }
 
-
 def _parse_cpulist(spec: str | Iterable[int] | None) -> list[int]:
     if spec is None:
         return []
@@ -674,7 +653,6 @@ def _parse_cpulist(spec: str | Iterable[int] | None) -> list[int]:
         else:
             cpus.add(int(token))
     return sorted(cpus)
-
 
 def validate_numa_cpu_binding_plan(
     *,

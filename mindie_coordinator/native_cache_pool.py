@@ -109,6 +109,8 @@ def _link_or_copy(source: Path, target: Path) -> bool:
     try:
         os.link(source, target)
         return True
+    except TimeoutError:
+        raise
     except OSError as exc:
         unsupported = exc.errno in _HARDLINK_FALLBACK_ERRNOS or getattr(exc, 'winerror', None) in _HARDLINK_FALLBACK_WINERRORS
         if not unsupported:
@@ -192,6 +194,8 @@ def publish_native_content(bundle: Path, cache: Path, manifest: dict) -> dict:
         # the entry, so publication does not repeat the whole traversal.
         try:
             os.rename(temp, destination)
+        except TimeoutError:
+            raise
         except OSError as exc:
             if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
                 raise

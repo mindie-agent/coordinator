@@ -129,6 +129,7 @@ def test_combined_cpu_admission_skips_unneeded_npu_and_port_probes(tmp_path):
 
 
 def test_combined_admission_requires_a_previously_observed_epoch(tmp_path):
+    state_dir = tmp_path / "host-state"
     with pytest.raises(CoordinationError, match='previously observed'):
-        handle_request({'action': 'submit-acquire', 'state_dir': str(tmp_path), 'task_id': 'one', 'agent_id': 'owner'})
-    assert not list(tmp_path.iterdir())
+        handle_request({'action': 'submit-acquire', 'state_dir': str(state_dir), 'task_id': 'one', 'agent_id': 'owner'})
+    assert not state_dir.exists()
