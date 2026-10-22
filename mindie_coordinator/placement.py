@@ -18,7 +18,6 @@ from collections.abc import Mapping
 import math
 from typing import Any, Sequence
 
-from remote_dev.core.host_spec import evaluate_placement, normalize_remote_probe_spec
 from mindie_coordinator.topology_gang import (
     POLICY_DISAGGREGATED_PD_PAIR,
     POLICY_MULTI_NODE_ROCE,
@@ -614,6 +613,7 @@ def _row_hardware_matches(row: dict[str, Any], role: dict[str, Any] | None) -> b
     if wanted_hbm > 0:
         have_hbm = _first_present_int(sources, ("hbm_free_mb", "vram_free_mb", "hbm_total_mb", "vram_total_mb", "hbm_mb"))
         if have_hbm is None and isinstance(row.get("npus"), Sequence) and not isinstance(row.get("npus"), (str, bytes)):
+            from remote_dev.core.host_spec import normalize_remote_probe_spec
             have_hbm = int(normalize_remote_probe_spec(row)["vram_free_mb"])
         if have_hbm is not None and have_hbm < wanted_hbm:
             return False
@@ -654,6 +654,7 @@ def select_execution_target(
     prefer_local: bool = True,
 ) -> dict[str, Any]:
     """Select `"local"`, `"remote"` (with `host` and `alias`), or `"reject"` from `fleet_probe` host records and `local_spec`."""
+    from remote_dev.core.host_spec import evaluate_placement
     return evaluate_placement(
         expectation,
         local_spec=local_spec,
