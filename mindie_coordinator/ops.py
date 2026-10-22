@@ -48,7 +48,10 @@ RESOURCE_SCHEMA = {"type": "object", "additionalProperties": False, "properties"
     "devices": {"type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True},
     "npu_count": {"type": "integer", "minimum": 0, "description": "Number of NPUs; defaults to zero. If devices is also supplied, this must equal its length."},
     "allow_external_busy": {"type": "boolean", "default": False, "description": "Explicitly permit external occupancy on exactly one named physical device. Requires devices=[id]; other managed leases, holds and owned process/port cleanup still apply."},
-    "service_port": {"type": "integer", "minimum": 0, "maximum": 65535}}}
+    "service_port": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "cpu_cores": {"type": "integer", "minimum": 0},
+    "memory_mb": {"type": "integer", "minimum": 0},
+    "hbm_mb": {"type": "integer", "minimum": 0}}}
 RESOURCE_SCHEMA["allOf"] = [{
     "if": {"required": ["allow_external_busy"], "properties": {"allow_external_busy": {"const": True}}},
     "then": {"required": ["devices"], "properties": {"devices": {"minItems": 1, "maxItems": 1}}},

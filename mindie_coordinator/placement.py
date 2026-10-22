@@ -14,9 +14,11 @@ to attested host candidates, including observed topology-gang role plans.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import math
 from typing import Any, Sequence
 
+from remote_dev.core.host_spec import evaluate_placement, normalize_remote_probe_spec
 from mindie_coordinator.topology_gang import (
     POLICY_DISAGGREGATED_PD_PAIR,
     POLICY_MULTI_NODE_ROCE,
@@ -30,13 +32,13 @@ from mindie_coordinator.topology_gang import (
 SUPPORTED_RECIPES = {"rc", "main", "stable", "local-latest"}
 RESERVED_ENV = {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", "MINDIE_EXECUTION_OBSERVATION"}
 ENVIRONMENT_KEYS = {"recipe", "image", "python_abi", "cann", "soc", "machine_type"}
-RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy"}
+RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb"}
 TOPOLOGY_GANG_KEYS = {
     "scale", "die_count", "placement_policy", "prefill_die_count",
     "decode_die_count", "node_count", "visible_phy_ids",
 }
 TOPOLOGY_KEYS = {"host", "roles", "distinct_hosts"} | TOPOLOGY_GANG_KEYS
-ROLE_KEYS = {"name", "command", "preflight", "devices", "npu_count", "service_port", "allow_external_busy", "host", "env"}
+ROLE_KEYS = {"name", "command", "preflight", "devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb", "host", "env"}
 
 
 def validate_wait(until, timeout_seconds):
@@ -121,6 +123,9 @@ def normalize_resources(resources: dict[str, Any] | None) -> dict[str, Any]:
             raise ValueError("allow_external_busy must be a boolean")
         if resources["allow_external_busy"] and len(resources.get("devices", [])) != 1:
             raise ValueError("allow_external_busy requires exactly one explicit physical device")
+    for hw_key in ("cpu_cores", "memory_mb", "hbm_mb"):
+        if hw_key in resources and (type(resources[hw_key]) is not int or resources[hw_key] < 0):
+            raise ValueError(f"{hw_key} must be a nonnegative integer")
     return resources
 
 
@@ -211,6 +216,10 @@ def _apply_requested_resources(
         roles[0]["service_port"] = int(resources["service_port"])
     if resources.get("allow_external_busy"):
         roles[0]["allow_external_busy"] = True
+    for hw_key in ("cpu_cores", "memory_mb", "hbm_mb"):
+        if resources.get(hw_key) is not None:
+            for role in roles:
+                role.setdefault(hw_key, int(resources[hw_key]))
     return roles
 
 
@@ -538,6 +547,11 @@ def role_plan(
             item["service_port"] = normalize_resources({"service_port": role["service_port"]})["service_port"]
         elif resources.get("service_port") is not None and len(roles) == 0:
             item["service_port"] = resources["service_port"]
+        for hw_key in ("cpu_cores", "memory_mb", "hbm_mb"):
+            if hw_key in role:
+                item[hw_key] = normalize_resources({hw_key: role[hw_key]})[hw_key]
+            elif hw_key in resources:
+                item[hw_key] = resources[hw_key]
         if "host" in role:
             if not isinstance(role["host"], str) or not role["host"].strip():
                 raise ValueError("role host must be a nonempty hostname or IP address")
@@ -565,6 +579,47 @@ def host_key(row: dict[str, Any]) -> str:
     return str(row.get("host") or (row.get("host_endpoint") or {}).get("host") or "")
 
 
+def _first_present_int(sources: Sequence[Mapping[str, Any]], keys: Sequence[str]) -> int | None:
+    for src in sources:
+        for key in keys:
+            val = src.get(key)
+            if val is not None and not isinstance(val, bool):
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
+def _row_hardware_matches(row: dict[str, Any], role: dict[str, Any] | None) -> bool:
+    if not role:
+        return True
+    wanted_cpu = int(role.get("cpu_cores") or 0)
+    wanted_mem = int(role.get("memory_mb") or 0)
+    wanted_hbm = int(role.get("hbm_mb") or 0)
+    if wanted_cpu <= 0 and wanted_mem <= 0 and wanted_hbm <= 0:
+        return True
+    profile = row.get("profile") if isinstance(row.get("profile"), Mapping) else {}
+    server = row.get("server") if isinstance(row.get("server"), Mapping) else (profile.get("server") if isinstance(profile.get("server"), Mapping) else {})
+    hardware = row.get("hardware") if isinstance(row.get("hardware"), Mapping) else (profile.get("hardware") if isinstance(profile.get("hardware"), Mapping) else {})
+    sources = [row, server, hardware, profile]
+    if wanted_cpu > 0:
+        have_cpu = _first_present_int(sources, ("cpu_cores",))
+        if have_cpu is not None and have_cpu < wanted_cpu:
+            return False
+    if wanted_mem > 0:
+        have_mem = _first_present_int(sources, ("mem_usable_mb", "mem_available_mb", "memory_mb", "mem_total_mb"))
+        if have_mem is not None and have_mem < wanted_mem:
+            return False
+    if wanted_hbm > 0:
+        have_hbm = _first_present_int(sources, ("hbm_free_mb", "vram_free_mb", "hbm_total_mb", "vram_total_mb", "hbm_mb"))
+        if have_hbm is None and isinstance(row.get("npus"), Sequence) and not isinstance(row.get("npus"), (str, bytes)):
+            have_hbm = int(normalize_remote_probe_spec(row)["vram_free_mb"])
+        if have_hbm is not None and have_hbm < wanted_hbm:
+            return False
+    return True
+
+
 def runtime_matches(row: dict[str, Any], environment: dict[str, Any] | None, role: dict[str, Any] | None = None) -> bool:
     environment = environment or {}
     profile = row.get("profile") or {}
@@ -586,7 +641,25 @@ def runtime_matches(row: dict[str, Any], environment: dict[str, Any] | None, rol
         declared = row.get("service_ports") or []
         if int(port) not in declared:
             return False
+    if not _row_hardware_matches(row, role):
+        return False
     return True
+
+
+def select_execution_target(
+    expectation: Mapping[str, Any] | str | None,
+    *,
+    local_spec: Mapping[str, Any] | None = None,
+    fleet_hosts: Sequence[Mapping[str, Any]] = (),
+    prefer_local: bool = True,
+) -> dict[str, Any]:
+    """Select `"local"`, `"remote"` (with `host` and `alias`), or `"reject"` from `fleet_probe` host records and `local_spec`."""
+    return evaluate_placement(
+        expectation,
+        local_spec=local_spec,
+        remote_specs=fleet_hosts,
+        prefer_local=prefer_local,
+    )
 
 
 def _runtime_observation_rank(row: dict[str, Any], order: dict[str, int]) -> int:
@@ -681,4 +754,6 @@ def can_prepare(environment: dict[str, Any] | None, donor: dict[str, Any] | None
         have = donor.get(key) or (donor.get("profile") or {}).get(key)
         if have != wanted:
             return False
+    if not _row_hardware_matches(donor, role):
+        return False
     return True
