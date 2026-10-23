@@ -230,9 +230,9 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                                      for key in ('commit', 'tree')):
                     raise ValueError('native artifact donor registration requires complete matching source records')
         user = safe_id(spec["user"])
-        container_name = user_container_name(user)
-        if spec.get("container_name") not in {None, "", container_name}:
-            raise ValueError(f"container_name must be {container_name}")
+        default_container_name = user_container_name(user)
+        raw_container_name = str(spec.get("container_name") or "").strip()
+        container_name = safe_id(raw_container_name) if raw_container_name else default_container_name
         spec = {"user": user,
                 "python": python_executable(spec["python"]),
                 "recipe": spec.get("recipe"),
@@ -272,7 +272,7 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
             # against fresh state before committing. Sibling roots in the same
             # user container are allowed; overlapping mutable roots are not.
             observed = prepared if prepared is not None else self.backend.inspect(spec, idle=True)
-            if not reuse_only and prepared is None and not spec["endpoint"].get("container"):
+            if not reuse_only and prepared is None and not spec["endpoint"].get("container") and container_name == default_container_name:
                 self.backend.host(spec, {"action": "container-ssh-reserve", "user": user,
                                           "container_name": container_name, "port": spec["endpoint"]["port"]})
             row = {"id": runtime_id, **spec, "state": "ready", "attestation": observed, "draining": False}

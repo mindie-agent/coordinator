@@ -60,6 +60,7 @@ def provision_user_container(
     host_port: int = host_ops.DEFAULT_HOST_PORT,
     ssh_port: int | None = None,
     machine_type: str | None = None,
+    password: str | None = None,
     password_env: str | None = None,
     machines: MachineDirectory | None = None,
     reserve_port=None,
@@ -122,10 +123,10 @@ def provision_user_container(
                 "container_name": container_name,
                 "port": port,
             })
-    if password_env:
+    if password is not None or password_env:
         args = _namespace(
             host=host, user=host_user, host_port=host_port, public_key_file=None,
-            password=None, password_env=password_env, password_stdin=False, print_command=False,
+            password=password, password_env=password_env, password_stdin=False, print_command=False,
         )
         if host_ops.cmd_bootstrap_host_key(args) != 0:
             raise host_ops.MachineManagementError("host key bootstrap failed")

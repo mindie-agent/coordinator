@@ -30,7 +30,7 @@ from mindie_coordinator.topology_gang import (
 
 SUPPORTED_RECIPES = {"rc", "main", "stable", "local-latest"}
 RESERVED_ENV = {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", "MINDIE_EXECUTION_OBSERVATION"}
-ENVIRONMENT_KEYS = {"recipe", "image", "python_abi", "cann", "soc", "machine_type"}
+ENVIRONMENT_KEYS = {"recipe", "image", "python_abi", "cann", "soc", "machine_type", "container_name"}
 RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb"}
 TOPOLOGY_GANG_KEYS = {
     "scale", "die_count", "placement_policy", "prefill_die_count",
@@ -634,6 +634,8 @@ def runtime_matches(row: dict[str, Any], environment: dict[str, Any] | None, rol
         return False
     if environment.get("machine_type") and (row.get("machine_type") or profile.get("machine_type")) != environment["machine_type"]:
         return False
+    if environment.get("container_name") and row.get("container_name") != environment["container_name"]:
+        return False
     if role and role.get("host") and host_key(row) != str(role["host"]):
         return False
     port = (role or {}).get("service_port")
@@ -747,6 +749,8 @@ def can_prepare(environment: dict[str, Any] | None, donor: dict[str, Any] | None
     if recipe and recipe not in SUPPORTED_RECIPES and have_recipe != recipe:
         return False
     if role and role.get("host") and host_key(donor) != str(role["host"]):
+        return False
+    if environment.get("container_name") and donor.get("container_name") and donor.get("container_name") != environment["container_name"]:
         return False
     for key in ("python_abi", "cann", "soc", "machine_type"):
         wanted = environment.get(key)

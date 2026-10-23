@@ -48,6 +48,7 @@ from mindie_coordinator.machine_directory import (
     MachineDirectoryUnavailable,
     MachineNotFoundError,
 )
+from mindie_coordinator.npu_top_bridge import NpuTopObservationClient
 from mindie_coordinator.provision import host_ops, provision_user_container
 from mindie_coordinator.ready_runtime import safe_id
 from mindie_coordinator.state_paths import coordinator_state_dir
@@ -102,6 +103,56 @@ def _resolve_host_target(
         return target, spec, None
 
 
+def _bootstrap_ssh_key_if_requested(
+    host_ip: str, user: str, port: int, args: Mapping[str, Any], *, require_password: bool = False,
+) -> str | None:
+    password, password_env = args.get("password"), args.get("password_env")
+    if not (require_password or args.get("bootstrap_key") or password is not None or password_env):
+        return None
+    if password is None and not password_env:
+        msg = "mindie_hosts(action='bootstrap_key') requires `password` or `password_env`" if require_password else "bootstrap_key requires `password` or `password_env` holding the SSH password"
+        raise caller_error(msg)
+    ns = host_ops._namespace(
+        host=host_ip, user=user, host_port=port, public_key_file=args.get("public_key_file"),
+        password=str(password) if password is not None else None,
+        password_env=str(password_env) if password_env else None,
+        password_stdin=False, print_command=False,
+    )
+    resolved_password, _, _ = host_ops.read_password_value(ns)
+    if host_ops.cmd_bootstrap_host_key(ns) != 0:
+        raise RuntimeError(f"SSH key bootstrap failed for {user}@{host_ip}:{port}")
+    return resolved_password
+
+
+def _sync_host_to_npu_top(
+    *, host: str, port: int, user: str, alias: str, machine_type: str | None = None, password: str | None = None,
+) -> dict[str, Any]:
+    tags = [str(machine_type).strip()] if machine_type else []
+    try:
+        return NpuTopObservationClient().register_host(
+            host=host, port=port, username=user, name=alias, tags=tags, password=password,
+        )
+    except ValueError as exc:
+        return {"source": "npu-top", "status": "unavailable", "error": str(exc)}
+
+
+def _match_discovered_container(containers: list[dict[str, Any]] | None, selector: str) -> dict[str, Any] | None:
+    clean = str(selector or "").strip()
+    if not clean or not containers:
+        return None
+    for item in containers:
+        if isinstance(item, Mapping) and str(item.get("name") or "").strip() == clean:
+            return dict(item)
+    for item in containers:
+        if not isinstance(item, Mapping):
+            continue
+        for key in ("id", "full_id"):
+            cid = str(item.get(key) or "").strip()
+            if cid and (cid == clean or cid.startswith(clean) or clean.startswith(cid)):
+                return dict(item)
+    return None
+
+
 def handle_hosts(
     args: Mapping[str, Any],
     *,
@@ -142,13 +193,7 @@ def handle_hosts(
             except (MachineDirectoryUnavailable, MachineNotFoundError):
                 continue
 
-        if args.get("bootstrap_key") or args.get("password_env"):
-            password_env = args.get("password_env")
-            if not password_env:
-                raise caller_error("bootstrap_key requires `password_env` naming an environment variable that holds the SSH password")
-            ns = host_ops._namespace(host=host_ip, user=user, host_port=port, public_key_file=args.get("public_key_file"), password=None, password_env=str(password_env), password_stdin=False, print_command=False)
-            if host_ops.cmd_bootstrap_host_key(ns) != 0:
-                raise RuntimeError(f"SSH key bootstrap failed for {user}@{host_ip}:{port}")
+        resolved_password = _bootstrap_ssh_key_if_requested(host_ip, user, port, args)
 
         host_entry: dict[str, Any] = {**(existing_rec.get("host") or {}), "ip": host_ip, "port": port, "user": user}
         if machine_type:
@@ -159,15 +204,21 @@ def handle_hosts(
             host_entry["workdir"] = str(args["workdir"])
 
         container_entry = dict(existing_rec.get("container") or {})
-        if args.get("container_name") or args.get("container_ssh_port"):
+        if args.get("container_name") or args.get("container_ssh_port") or args.get("container_mode"):
             if args.get("container_name"):
-                container_entry["name"] = str(args["container_name"]).strip()
+                new_c_name = str(args["container_name"]).strip()
+                if container_entry.get("name") and container_entry.get("name") != new_c_name and not args.get("container_ssh_port"):
+                    container_entry.pop("ssh_port", None)
+                    container_entry.pop("id", None)
+                container_entry["name"] = new_c_name
             if args.get("container_ssh_port"):
                 container_entry["ssh_port"] = int(args["container_ssh_port"])
             container_entry.setdefault("user", str(args.get("container_user") or "root"))
             container_entry.setdefault("workdir", str(args.get("container_workdir") or "/vllm-workspace"))
             if args.get("container_mode"):
                 container_entry["mode"] = str(args["container_mode"])
+                if str(args["container_mode"]).strip().lower() == "docker_exec" and not args.get("container_ssh_port"):
+                    container_entry.pop("ssh_port", None)
 
         record: dict[str, Any] = {**existing_rec, "alias": alias, "host": host_entry}
         if container_entry:
@@ -179,11 +230,34 @@ def handle_hosts(
             probe_summary = {"online": snap.get("online"), "chip_summary": snap.get("chip_summary"), "total_npus": snap.get("total_npus"), "free_npus": snap.get("free_npus"), "driver_version": snap.get("driver_version"), "error": snap.get("error")}
             if snap.get("online"):
                 record["hardware"] = {"chip_summary": snap.get("chip_summary"), "total_npus": snap.get("total_npus"), "driver_version": snap.get("driver_version")}
+                if container_entry.get("name"):
+                    matched = _match_discovered_container(snap.get("containers"), str(container_entry["name"]))
+                    if matched:
+                        container_entry["name"] = str(matched.get("name") or container_entry["name"])
+                        if matched.get("id"):
+                            container_entry["id"] = str(matched["id"])
+                        if matched.get("image"):
+                            container_entry["image"] = str(matched["image"])
+                        if matched.get("ssh_port") and not container_entry.get("ssh_port") and container_entry.get("mode") != "docker_exec":
+                            container_entry["ssh_port"] = int(matched["ssh_port"])
+                            container_entry.setdefault("mode", "ssh")
+                        else:
+                            container_entry.setdefault("mode", "docker_exec")
+                        record["container"] = container_entry
 
         inv_path = store.upsert_machine(record, set_default=bool(args.get("set_default")))
         endpoints_doc = store.endpoints_document()
+        npu_top_sync = _sync_host_to_npu_top(
+            host=host_ip,
+            port=port,
+            user=user,
+            alias=alias,
+            machine_type=host_entry.get("machine_type"),
+            password=resolved_password,
+        )
         return {
             "state": "ready", "action": "upsert", "alias": alias, "record": record, "probe": probe_summary,
+            "npu_top_sync": npu_top_sync,
             "inventory_path": str(inv_path), "endpoints_file": str(endpoints_file_path(inv_path.parent)),
             "default_alias": endpoints_doc.get("default_alias"), "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
@@ -211,14 +285,24 @@ def handle_hosts(
         return {"state": "ready", "action": "set_default", "default_alias": endpoints_doc.get("default_alias"), "inventory_path": str(inv_path), "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get("default")}
 
     if action == "bootstrap_key":
-        alias, host_spec, _ = _resolve_host_target(args, store)
-        password_env = args.get("password_env")
-        if not password_env:
-            raise caller_error("mindie_hosts(action='bootstrap_key') requires `password_env`")
-        ns = host_ops._namespace(host=host_spec["host"], user=host_spec["user"], host_port=host_spec["port"], public_key_file=args.get("public_key_file"), password=None, password_env=str(password_env), password_stdin=False, print_command=False)
-        if host_ops.cmd_bootstrap_host_key(ns) != 0:
-            raise RuntimeError(f"SSH key bootstrap failed for {host_spec['user']}@{host_spec['host']}:{host_spec['port']}")
-        return {"state": "ready", "action": "bootstrap_key", "alias": alias, "host": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]}
+        alias, host_spec, rec = _resolve_host_target(args, store)
+        resolved_password = _bootstrap_ssh_key_if_requested(
+            host_spec["host"], host_spec["user"], host_spec["port"], args, require_password=True,
+        )
+        base_rec = rec if rec is not None else {"alias": alias, "host": {}}
+        updated_rec = {
+            **base_rec, "alias": alias,
+            "host": {**(base_rec.get("host") or {}), "ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]},
+        }
+        inv_path = store.upsert_machine(updated_rec, set_default=bool(args.get("set_default")))
+        npu_top_sync = _sync_host_to_npu_top(
+            host=host_spec["host"], port=host_spec["port"], user=host_spec["user"],
+            alias=alias, machine_type=(updated_rec.get("host") or {}).get("machine_type"), password=resolved_password,
+        )
+        return {
+            "state": "ready", "action": "bootstrap_key", "alias": alias, "host": host_spec["host"],
+            "port": host_spec["port"], "user": host_spec["user"], "inventory_path": str(inv_path), "npu_top_sync": npu_top_sync,
+        }
 
     if action == "mesh":
         alias_a, alias_b = str(args.get("alias") or args.get("host") or "").strip(), str(args.get("peer_alias") or args.get("peer_host") or "").strip()
@@ -349,6 +433,18 @@ def handle_container(
             container_entry["runtime_env"] = bool(args["runtime_env"])
 
         base_rec = rec if rec is not None else {"alias": alias, "host": {"ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]}}
+        if container_name and (runner is not None or bool(args.get("discover")) or str(args.get("probe") or "").lower() in {"1", "true"}):
+            snap = probe_machine_record(base_rec, mode="live", state_dir=base_dir, runner=runner)
+            matched = _match_discovered_container(snap.get("containers"), container_name)
+            if matched:
+                container_entry["name"] = str(matched.get("name") or container_name)
+                if matched.get("id") and not container_entry.get("id"):
+                    container_entry["id"] = str(matched["id"])
+                if matched.get("image"):
+                    container_entry["image"] = str(matched["image"])
+                if matched.get("ssh_port") and not ssh_port and not args.get("mode"):
+                    container_entry["ssh_port"] = int(matched["ssh_port"])
+                    container_entry["mode"] = "ssh"
         updated_rec = {
             **base_rec, "alias": alias,
             "host": {**(base_rec.get("host") or {}), "ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]},
@@ -383,7 +479,9 @@ def handle_container(
             user=args.get("container_user") or args.get("user_namespace") or args.get("user_tag") or args.get("user"),
             host_user=host_spec["user"], host_port=host_spec["port"],
             ssh_port=int(args["ssh_port"]) if args.get("ssh_port") else None,
-            machine_type=machine_type, password_env=args.get("password_env"),
+            machine_type=machine_type,
+            password=args.get("password"),
+            password_env=args.get("password_env"),
             machines=store, reserve_port=_reserve_port, alias=alias,
         )
         if args.get("set_default"):
@@ -661,3 +759,12 @@ def handle_lease(
         }
 
     raise caller_error(f"unsupported mindie.lease action: {action!r}")
+
+
+__all__ = [
+    "handle_container",
+    "handle_hosts",
+    "handle_lease",
+    "handle_probe",
+    "validate_vllm_ascend_runtime_env",
+]

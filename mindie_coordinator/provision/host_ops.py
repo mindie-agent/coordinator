@@ -103,7 +103,7 @@ from mindie_coordinator.provision.image_resolver import (
     validate_explicit_image_for_machine,
 )
 from remote_dev.core.endpoint import Endpoint, resolve_endpoint
-from remote_dev.core.ssh_transport import run_stream, ssh_base_cmd
+from remote_dev.core.ssh_transport import interactive_ssh_command, run_stream, ssh_base_cmd
 
 DEFAULT_WORKDIR = "/vllm-workspace"
 DEFAULT_PORT_RANGE = "46000:46999"
@@ -479,6 +479,22 @@ def find_public_key(explicit: str | None = None) -> pathlib.Path:
     for path in candidates:
         if path.exists():
             return path.resolve()
+    ssh_keygen = shutil.which("ssh-keygen")
+    if ssh_keygen:
+        default_pub = candidates[0]
+        default_priv = default_pub.with_suffix("")
+        try:
+            default_pub.parent.mkdir(parents=True, exist_ok=True)
+            proc = subprocess.run(
+                [ssh_keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(default_priv)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if proc.returncode == 0 and default_pub.exists():
+                return default_pub.resolve()
+        except (OSError, subprocess.SubprocessError):
+            pass
     raise MachineManagementError(
         "no local public key found; pass --public-key-file or create ~/.ssh/id_ed25519.pub"
     )
@@ -533,7 +549,18 @@ def build_bootstrap_host_key_command(
 ) -> tuple[str, list[str]]:
     del key_path
     remote_cmd = build_authorized_keys_remote_command(public_key)
-    command = ssh_command(target, identity_file=None) + [remote_cmd]
+    endpoint = resolve_endpoint(
+        {
+            "host": target.host,
+            "port": int(target.port),
+            "user": target.user,
+            "root": "/",
+            "cwd": "/",
+            "ssh_mux": False,
+            "runtime_env": False,
+        }
+    )
+    command = interactive_ssh_command(endpoint, [remote_cmd])
     return "ssh", command
 
 
