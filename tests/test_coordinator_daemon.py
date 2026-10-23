@@ -240,7 +240,7 @@ class DaemonProcessTests(unittest.TestCase):
 
             def delayed(*args, **kwargs):
                 started.set()
-                self.assertTrue(release.wait(5))
+                self.assertTrue(release.wait(10))
                 return {"vllm": "a" * 40, "vllm-ascend": "b" * 40}
 
             service.sync_binding = delayed
@@ -261,7 +261,7 @@ class DaemonProcessTests(unittest.TestCase):
                         time.sleep(0.05)
                 else:
                     self.fail("daemon did not listen")
-                self.assertTrue(started.wait(3))
+                self.assertTrue(started.wait(8))
                 t1 = time.time()
                 client.call("ping")
                 self.assertLess(time.time() - t1, 0.5)

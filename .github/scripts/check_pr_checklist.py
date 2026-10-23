@@ -3,7 +3,7 @@
 
 [Role]
 Verifies that a Pull Request description completes all required Pre-PR Checklist
-items (`1–8`, `9`, `10–11`, `12–13`, `14`) and provides substantive Summary,
+items (`1–8`, `9`, `10–11`, `12–13`, `14`, `15`) and provides substantive Summary,
 Review Evidence (`自查结论与证据`), and Verification sections before merge.
 
 [Invariants]
@@ -32,6 +32,7 @@ REQUIRED_CHECKBOX_PREFIXES = (
     "10–11.",
     "12–13.",
     "14.",
+    "15.",
 )
 
 PLACEHOLDERS = frozenset({"todo", "tbd", "n/a", "na", "none", "null", "无", "略", "待补充"})

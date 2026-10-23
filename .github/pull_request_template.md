@@ -15,6 +15,7 @@
   - **性能与并发纪律**：热循环内无 `deepcopy` / 起子进程 / 逐行 Commit；并行 Worker 数同时受可用 CPU 核数与可用安全内存双重约束（$\min(\text{CPU}, \lfloor\text{可用内存}/\text{单 Worker 内存}\rfloor)$）。
   - **显存（HBM/VRAM）安全**：控制与元数据路径保持“零权重、零设备上下文”；上卡操作启动前完成静态显存预算核验（`vram_free_mb >= Expected VRAM`）。
   - **跨平台规格分流（Windows / macOS / Linux）**：无 `sys.platform == "darwin"` 等操作系统硬编码特判；重计算/重内存/需显存任务声明 `WorkloadExpectation`，按本机与远端（`fleet_probe.py`）的真实可用硬件规格自动分流（本机规格充裕则本地跑，不足则分流远端）。
+- [ ] **15. 仓库工程与文件格式规范（PR Format Hygiene）**：全仓文本文件严格使用 Unix `LF`（`\n`）换行格式（严禁 Windows `CRLF` `\r\n` 或混合换行，Python 跨平台写文本/脚本显式指定 `newline="\n"`），并通过 `python3 .github/scripts/check_lf_eol.py` 校验。
 - **自查结论与证据**：
 
 ## 验证结果 (Verification)
