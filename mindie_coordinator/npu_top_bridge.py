@@ -1,9 +1,10 @@
-"""Observation-only bridge to the local `npu-top` agent API.
+"""Observation and host-inventory bridge to the local `npu-top` agent API.
 
 [Role]
 Reads `npu-top` capacity observations and task-window hardware telemetry over
-the loopback HTTP API, normalizes C2 capacity kwargs/fields, and ranks eligible
-hosts. It never allocates, reserves, or leases a device.
+the loopback HTTP API, normalizes C2 capacity kwargs/fields, ranks eligible
+hosts, and synchronizes newly onboarded hosts to `npu-top` (`/api/servers/batch`).
+It never allocates, reserves, or leases a device.
 
 [Invariants]
 - `npu-top` observations rank eligible hosts only. The host-side NPU queue
@@ -12,15 +13,16 @@ hosts. It never allocates, reserves, or leases a device.
   `status`/`measurement_limitations`; it never becomes an empty successful
   observation or masks an already successful remote execution.
 - Explicit host requests are not rewritten by observation ranking.
-- Capacity/telemetry queries use bounded HTTP timeouts and bypass environment
-  proxies (`ProxyHandler({})`), matching the local-only npu-top client contract.
+- Capacity/telemetry/registration requests use bounded HTTP timeouts and bypass
+  environment proxies (`ProxyHandler({})`), matching the local-only npu-top client contract.
 
 [Timeouts & Locks]
-- Capacity read timeout defaults to 2.0s; telemetry to 3.0s. Both are clamped
-  to `0.1..10.0s`; no unbounded network wait and no locks.
+- Capacity read timeout defaults to 2.0s; telemetry to 3.0s; host registration
+  to 5.0s. All are clamped to `0.1..10.0s`; no unbounded network wait and no locks.
 
 [Side-Effect Policy]
-- Loopback HTTP GET requests only; no local or remote writes.
+- Loopback HTTP GET/POST requests to the local `npu-top` service only; never
+  persists or logs passwords.
 """
 from __future__ import annotations
 
@@ -36,11 +38,13 @@ from urllib.request import ProxyHandler, Request, build_opener
 DEFAULT_URL = "http://127.0.0.1:8788"
 DEFAULT_CAPACITY_TIMEOUT = 2.0
 DEFAULT_TELEMETRY_TIMEOUT = 3.0
+DEFAULT_REGISTER_TIMEOUT = 5.0
 MIN_TIMEOUT = 0.1
 MAX_TIMEOUT = 10.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 CAPACITY_PATH = "/api/agent/capacity"
 TELEMETRY_PATH = "/api/agent/telemetry-window"
+SERVERS_BATCH_PATH = "/api/servers/batch"
 CAPACITY_KWARGS = ("min_weight_mount_avail_gb", "prefer_same_package", "exclude_throttled")
 
 
@@ -132,6 +136,91 @@ class NpuTopObservationClient:
         if not isinstance(payload, dict):
             raise NpuTopUnavailable("npu-top returned a non-object observation")
         return payload
+
+    def _post(self, path: str, body: Mapping[str, Any], *, timeout: float | None = None) -> dict:
+        url = f"{self.base_url}{path}"
+        encoded = json.dumps(dict(body)).encode("utf-8")
+        request = Request(
+            url,
+            data=encoded,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with self.opener.open(request, timeout=_bounded_timeout(timeout, self.timeout)) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except HTTPError as exc:
+            message = None
+            try:
+                message = json.loads(exc.read()).get("error")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+            raise NpuTopUnavailable(
+                message or f"npu-top API returned HTTP {exc.code}",
+                status=exc.code,
+            ) from exc
+        except (OSError, URLError, json.JSONDecodeError, ValueError) as exc:
+            raise NpuTopUnavailable(f"npu-top unavailable at {self.base_url}: {exc}") from exc
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise NpuTopUnavailable("npu-top response exceeded the bounded observation size")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise NpuTopUnavailable("npu-top returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise NpuTopUnavailable("npu-top returned a non-object response")
+        return payload
+
+    def register_host(
+        self,
+        *,
+        host: str,
+        port: int = 22,
+        username: str = "root",
+        name: str | None = None,
+        tags: list[str] | None = None,
+        password: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Synchronize an onboarded host (and optional in-memory bootstrap password) to `npu-top`."""
+        clean_host = str(host or "").strip()
+        if not clean_host:
+            raise ValueError("host must be a nonempty string")
+        body: dict[str, Any] = {
+            "servers": [
+                {
+                    "name": str(name or clean_host).strip() or clean_host,
+                    "host": clean_host,
+                    "port": int(port),
+                    "username": str(username or "root").strip() or "root",
+                    "tags": [str(tag).strip() for tag in (tags or []) if str(tag).strip()],
+                }
+            ],
+            "passwords": [password] if password else [],
+            "sync_coordinator": False,
+        }
+        try:
+            payload = self._post(
+                SERVERS_BATCH_PATH,
+                body,
+                timeout=timeout or (DEFAULT_REGISTER_TIMEOUT if password else 0.25),
+            )
+        except NpuTopUnavailable as exc:
+            return {
+                "source": "npu-top",
+                "status": "unavailable",
+                "error": str(exc),
+                "http_status": exc.status,
+            }
+        created = payload.get("created") or []
+        errors = payload.get("errors") or []
+        return {
+            "source": "npu-top",
+            "status": "registered" if created and not errors else ("partial" if created else "failed"),
+            "server": created[0] if created else None,
+            "auth": payload.get("auth") or {},
+            "errors": errors,
+        }
 
     def capacity(self, *, min_idle_npus: int = 1, max_age_seconds: int = 300,
                  tags: list[str] | None = None, include_disabled: bool = False,

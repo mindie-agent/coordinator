@@ -395,3 +395,55 @@ def test_checkpoint_preflight_detects_unquantized_experts_truncation_and_unalign
         "truncated_or_corrupt_shard",
         "unquantized_routed_experts_in_quant_checkpoint",
     }
+
+
+def test_register_host_posts_to_npu_top_and_surfaces_outage_visibly():
+    requests_seen = []
+
+    class FakeResponse:
+        def __init__(self, body: dict):
+            self._raw = json.dumps(body).encode("utf-8")
+
+        def read(self, _limit=None):
+            return self._raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeOpener:
+        def __init__(self, fail: bool = False):
+            self.fail = fail
+
+        def open(self, request, timeout=None):
+            requests_seen.append((request.full_url, request.get_method(), json.loads(request.data.decode("utf-8")), timeout))
+            if self.fail:
+                raise OSError("connection refused")
+            return FakeResponse({
+                "created": [{"id": 1, "name": "a3-165", "host": "192.168.13.165", "port": 22, "username": "root"}],
+                "errors": [],
+                "auth": {"ready": 1, "failed": 0},
+            })
+
+    client = NpuTopObservationClient("http://127.0.0.1:8788", opener=FakeOpener())
+    ok = client.register_host(
+        host="192.168.13.165",
+        port=22,
+        username="root",
+        name="a3-165",
+        tags=["A3"],
+        password="secret",
+    )
+    assert ok["status"] == "registered"
+    assert ok["server"]["host"] == "192.168.13.165"
+    assert requests_seen[0][0] == "http://127.0.0.1:8788/api/servers/batch"
+    assert requests_seen[0][1] == "POST"
+    assert requests_seen[0][2]["passwords"] == ["secret"]
+    assert requests_seen[0][2]["sync_coordinator"] is False
+
+    offline_client = NpuTopObservationClient("http://127.0.0.1:8788", opener=FakeOpener(fail=True))
+    outage = offline_client.register_host(host="192.168.13.165", port=22, username="root")
+    assert outage["status"] == "unavailable"
+    assert "connection refused" in outage["error"]

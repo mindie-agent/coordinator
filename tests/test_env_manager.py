@@ -562,6 +562,154 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
         recorded = calls_log.read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(recorded, ["timed:10 npu-smi info"])
 
+    def test_upsert_with_in_memory_password_bootstraps_key_syncs_npu_top_and_discovers_existing_container(self):
+        from mindie_coordinator import provision
+
+        pubkey = self.root / "id_ed25519.pub"
+        privkey = self.root / "id_ed25519"
+        pubkey.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey user@local\n", encoding="utf-8")
+        privkey.write_text("PRIVATE\n", encoding="utf-8")
+
+        tool_name, ssh_cmd = provision.host_ops.build_bootstrap_host_key_command(
+            provision.host_ops.SshTarget(host="192.168.13.165", user="root", port=22),
+            key_path=pubkey,
+            public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey user@local",
+        )
+        self.assertEqual(tool_name, "ssh")
+        self.assertIn("BatchMode=no", ssh_cmd)
+        self.assertIn("PreferredAuthentications=password,keyboard-interactive", ssh_cmd)
+
+        askpass_calls = []
+        npu_top_calls = []
+
+        def fake_askpass(cmd, *, password, env_name="MINDIE_SSH_PASSWORD"):
+            askpass_calls.append((cmd, password, env_name))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        def fake_register_host(self_client, **kwargs):
+            npu_top_calls.append(kwargs)
+            return {"source": "npu-top", "status": "registered", "server": {"host": kwargs["host"]}, "auth": {"ready": 1}}
+
+        check_results = [{"ok": False, "returncode": 255, "stdout": "", "stderr": "Permission denied"}, {"ok": True, "returncode": 0, "stdout": "ok", "stderr": ""}]
+
+        probe_output = (
+            SAMPLE_910C_PROBE_OUTPUT.split("===SECTION:CONTAINERS===")[0]
+            + "===SECTION:CONTAINERS===\n"
+            + "f6327a9012bc|vllm_debug_c0|swr.cn-south-1.myhuaweicloud.com/ascendhub/vllm-ascend:v0.13.0-a3|Up 3 days|0.0.0.0:32222->22/tcp\n"
+            + "===SECTION:SYSTEM===\nHOSTNAME:atlas-a3-165\n"
+        )
+
+        with mock.patch.object(provision.host_ops, "find_public_key", return_value=pubkey), \
+             mock.patch.object(provision.host_ops, "check_direct_ssh", side_effect=check_results), \
+             mock.patch.object(provision.host_ops, "run_with_askpass", side_effect=fake_askpass), \
+             mock.patch("mindie_coordinator.npu_top_bridge.NpuTopObservationClient.register_host", fake_register_host):
+            res = handle_hosts(
+                {
+                    "action": "upsert",
+                    "alias": "a3-165",
+                    "host": "192.168.13.165",
+                    "port": 22,
+                    "user": "root",
+                    "password": "in-memory-secret-pw",
+                    "machine_type": "A3",
+                    "container_name": "f6327a90",
+                    "probe_hardware": True,
+                    "set_default": True,
+                },
+                state_dir=self.root,
+                runner=lambda _target, _script: probe_output,
+            )
+
+        self.assertEqual(res["state"], "ready")
+        self.assertEqual(len(askpass_calls), 1)
+        self.assertEqual(askpass_calls[0][1], "in-memory-secret-pw")
+        self.assertEqual(len(npu_top_calls), 1)
+        self.assertEqual(npu_top_calls[0]["host"], "192.168.13.165")
+        self.assertEqual(npu_top_calls[0]["password"], "in-memory-secret-pw")
+        self.assertEqual(res["npu_top_sync"]["status"], "registered")
+        # Container matched by ID prefix and populated with full container name + published ssh_port
+        self.assertEqual(res["record"]["container"]["name"], "vllm_debug_c0")
+        self.assertEqual(res["record"]["container"]["id"], "f6327a9012bc")
+        self.assertEqual(res["record"]["container"]["ssh_port"], 32222)
+        # Password is never written to machines.json or remote_dev_endpoints.json
+        machines_raw = (self.root / "machines.json").read_text(encoding="utf-8")
+        endpoints_raw = Path(res["endpoints_file"]).read_text(encoding="utf-8")
+        self.assertNotIn("in-memory-secret-pw", machines_raw)
+        self.assertNotIn("in-memory-secret-pw", endpoints_raw)
+
+    def test_existing_container_reuse_in_service_and_runtime_pool(self):
+        from mindie_coordinator.service import CoordinatorService
+        from mindie_coordinator.ready_runtime import RuntimePool
+
+        handle_hosts(
+            {
+                "action": "upsert",
+                "alias": "a2-194",
+                "host": "173.125.1.2",
+                "port": 22,
+                "user": "root",
+                "machine_type": "A2",
+            },
+            state_dir=self.root,
+        )
+        handle_container(
+            {
+                "action": "bind",
+                "alias": "a2-194",
+                "container_name": "existing_user_container",
+                "mode": "docker_exec",
+                "workdir": "/workspace",
+            },
+            state_dir=self.root,
+        )
+
+        backend = mock.MagicMock()
+        backend.machines = MachineDirectory(path=self.root / "machines.json")
+        backend.inspect.return_value = {"container_id": "cid-existing-123", "profile": {"soc": "Ascend910B2"}}
+        pool = RuntimePool(self.root / "pool", backend=backend)
+        service = CoordinatorService(self.root, pool=pool, backend=backend)
+
+        # 1. Reuses bound docker_exec container without recipe or mindie-<user> port reservation
+        donor = service._ensure_user_container("alice", {}, {"name": "worker"}, set())
+        self.assertIsNotNone(donor)
+        self.assertEqual(donor["container_name"], "existing_user_container")
+        self.assertEqual(donor["endpoint"]["container"], "existing_user_container")
+        self.assertEqual(donor["endpoint"]["port"], 22)
+        backend.host.assert_not_called()
+
+        # 2. Explicit environment={"container_name": "other_debug_box"} overrides bound container
+        override = service._ensure_user_container(
+            "alice",
+            {"container_name": "other_debug_box"},
+            {"name": "worker", "host": "a2-194"},
+            set(),
+        )
+        self.assertIsNotNone(override)
+        self.assertEqual(override["container_name"], "other_debug_box")
+        self.assertEqual(override["endpoint"]["container"], "other_debug_box")
+
+        # 3. RuntimePool.register accepts non-mindie-<user> container names
+        registered = pool.register(
+            "rt-existing",
+            {
+                "user": "alice",
+                "python": "/usr/bin/python3",
+                "container_name": "existing_user_container",
+                "endpoint": {
+                    "host": "173.125.1.2",
+                    "port": 22,
+                    "user": "root",
+                    "container": "existing_user_container",
+                    "root": "/workspace/tasks/t1",
+                    "cwd": "/workspace/tasks/t1",
+                },
+                "host_endpoint": {"host": "173.125.1.2", "port": 22, "user": "root"},
+            },
+        )
+        self.assertEqual(registered["container_name"], "existing_user_container")
+        self.assertEqual(registered["state"], "ready")
+        backend.host.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

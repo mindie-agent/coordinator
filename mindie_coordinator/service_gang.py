@@ -467,24 +467,61 @@ class ServiceGangMixin:
         if recipe and not provisionable_recipe(recipe):
             return None
         wanted_host = str(role["host"]) if role.get("host") else None
-        for record in self._configured_machines():
+        wanted_container = str(environment.get("container_name") or "").strip() or None
+        records = list(self._configured_machines())
+        if wanted_container:
+            records.sort(key=lambda r: 0 if str((r.get("container") or {}).get("name") or "").strip() == wanted_container else 1)
+        for record in records:
             host_info = record.get("host") or {}
             host_ip = host_info.get("ip")
             if not host_ip or (require_distinct and host_ip in used_hosts):
                 continue
-            if wanted_host and host_ip != wanted_host:
+            if wanted_host and host_ip != wanted_host and record.get("alias") != wanted_host:
                 continue
             machine_type = host_info.get("machine_type")
             if environment.get("machine_type") and machine_type != environment["machine_type"]:
                 continue
             configured = record.get("container") or {}
-            owned = record.get("user") in (None, user) and configured.get("name") == user_container_name(user)
-            ssh_port = configured.get("ssh_port") if owned else None
+            cfg_name = str(configured.get("name") or "").strip() or None
+            cfg_mode = str(configured.get("mode") or "").strip().lower()
             host_endpoint = {
                 "host": host_ip,
                 "port": int(host_info.get("port") or 22),
                 "user": host_info.get("user") or "root",
             }
+            if not recipe and (
+                wanted_container
+                or (
+                    record.get("user") in (None, user)
+                    and cfg_name
+                    and (cfg_name != user_container_name(user) or cfg_mode == "docker_exec" or not configured.get("ssh_port"))
+                )
+            ):
+                target_container = wanted_container or cfg_name
+                if cfg_name == target_container and configured.get("ssh_port") and cfg_mode != "docker_exec":
+                    c_port = int(configured["ssh_port"])
+                    c_endpoint = {"host": host_ip, "port": c_port, "user": str(configured.get("user") or "root")}
+                else:
+                    c_port = int(host_endpoint["port"])
+                    c_endpoint = {
+                        "host": host_ip,
+                        "port": c_port,
+                        "user": host_endpoint["user"],
+                        "container": target_container,
+                    }
+                return {
+                    "user": user,
+                    "host": host_ip,
+                    "host_endpoint": host_endpoint,
+                    "ssh_port": c_port,
+                    "endpoint": c_endpoint,
+                    "container_name": target_container,
+                    "recipe": recipe,
+                    "machine_type": machine_type,
+                    "service_ports": [],
+                }
+            owned = record.get("user") in (None, user) and cfg_name == user_container_name(user)
+            ssh_port = configured.get("ssh_port") if owned else None
             if not ssh_port or recipe:
                 if not recipe:
                     # An existing configured container needs no image choice.

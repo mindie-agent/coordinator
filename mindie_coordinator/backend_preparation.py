@@ -399,8 +399,10 @@ class BackendPreparationMixin:
                 return json.loads(self.bash(spec['endpoint'], command))
             from mindie_coordinator.parity_support import SshEndpoint, ssh_exec_stream
             endpoint = spec['endpoint']
-            result = ssh_exec_stream(SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user']),
-                                     command, stream_progress=False, process=process)
+            result = ssh_exec_stream(
+                SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user'], container=endpoint.get('container')),
+                command, stream_progress=False, process=process,
+            )
             return json.loads(result.stdout)
         except (PreparationCancelled, PreparationUncertain):
             raise
@@ -454,8 +456,10 @@ class BackendPreparationMixin:
                   + ', globals())\nexec(' + repr(cache_source) + ', globals())\n'
                   + REMOTE_NATIVE_VIEW_SUFFIX + '\nMINDIE_NATIVE_VIEW\n')
         endpoint = spec['endpoint']
-        completed = ssh_exec_stream(SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user']),
-                                   script, stream_progress=False, process=process, log_path=log_path)
+        completed = ssh_exec_stream(
+            SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user'], container=endpoint.get('container')),
+            script, stream_progress=False, process=process, log_path=log_path,
+        )
         reply = json.loads(completed.stdout)
         manifest = {**reply['manifest'], 'files': donor['files']}
         if (reply.get('manifest_digest') != digest(manifest)
@@ -550,8 +554,10 @@ class BackendPreparationMixin:
         else:
             from mindie_coordinator.parity_support import SshEndpoint, ssh_exec_stream
             endpoint = spec["endpoint"]
-            completed = ssh_exec_stream(SshEndpoint(endpoint["host"], int(endpoint["port"]), endpoint["user"]),
-                                        command, stream_progress=False, process=process, log_path=log_path)
+            completed = ssh_exec_stream(
+                SshEndpoint(endpoint["host"], int(endpoint["port"]), endpoint["user"], container=endpoint.get("container")),
+                command, stream_progress=False, process=process, log_path=log_path,
+            )
             output = completed.stdout
         if native_recipe:
             manifest = _captured_manifest(output)
