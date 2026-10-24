@@ -8,6 +8,9 @@ to attested host candidates, including observed topology-gang role plans.
 - Optional `npu-top` observations may only reorder matching ready roots. An
   explicit role/topology host still filters by identity and is never rewritten;
   the host queue remains the allocation authority.
+- Explicit `cpu_cores`/`memory_mb`/`hbm_mb` floors are decided only against
+  `host_specs` snapshots the caller observed; a prepared-root row carries no
+  capacity, so an unobserved host is a gap and total HBM is never free HBM.
 [Timeouts & Locks] Pure in-memory evaluation; zero I/O or locks.
 [Side-Effect Policy] Side-effect free.
 """
@@ -32,6 +35,7 @@ SUPPORTED_RECIPES = {"rc", "main", "stable", "local-latest"}
 RESERVED_ENV = {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", "MINDIE_EXECUTION_OBSERVATION"}
 ENVIRONMENT_KEYS = {"recipe", "image", "python_abi", "cann", "soc", "machine_type", "container_name"}
 RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb"}
+HARDWARE_KEYS = ("cpu_cores", "memory_mb", "hbm_mb")
 TOPOLOGY_GANG_KEYS = {
     "scale", "die_count", "placement_policy", "prefill_die_count",
     "decode_die_count", "node_count", "visible_phy_ids",
@@ -578,49 +582,64 @@ def host_key(row: dict[str, Any]) -> str:
     return str(row.get("host") or (row.get("host_endpoint") or {}).get("host") or "")
 
 
-def _first_present_int(sources: Sequence[Mapping[str, Any]], keys: Sequence[str]) -> int | None:
-    for src in sources:
-        for key in keys:
-            val = src.get(key)
-            if val is not None and not isinstance(val, bool):
-                try:
-                    return int(val)
-                except (TypeError, ValueError):
-                    continue
-    return None
+def requested_hardware(role: Mapping[str, Any] | None) -> dict[str, int]:
+    """The role's explicit host hardware floor, if it declared one."""
+    return {key: int(role[key]) for key in HARDWARE_KEYS
+            if role and int(role.get(key) or 0) > 0}
 
 
-def _row_hardware_matches(row: dict[str, Any], role: dict[str, Any] | None) -> bool:
-    if not role:
-        return True
-    wanted_cpu = int(role.get("cpu_cores") or 0)
-    wanted_mem = int(role.get("memory_mb") or 0)
-    wanted_hbm = int(role.get("hbm_mb") or 0)
-    if wanted_cpu <= 0 and wanted_mem <= 0 and wanted_hbm <= 0:
-        return True
-    profile = row.get("profile") if isinstance(row.get("profile"), Mapping) else {}
-    server = row.get("server") if isinstance(row.get("server"), Mapping) else (profile.get("server") if isinstance(profile.get("server"), Mapping) else {})
-    hardware = row.get("hardware") if isinstance(row.get("hardware"), Mapping) else (profile.get("hardware") if isinstance(profile.get("hardware"), Mapping) else {})
-    sources = [row, server, hardware, profile]
-    if wanted_cpu > 0:
-        have_cpu = _first_present_int(sources, ("cpu_cores",))
-        if have_cpu is not None and have_cpu < wanted_cpu:
-            return False
-    if wanted_mem > 0:
-        have_mem = _first_present_int(sources, ("mem_usable_mb", "mem_available_mb", "memory_mb", "mem_total_mb"))
-        if have_mem is not None and have_mem < wanted_mem:
-            return False
-    if wanted_hbm > 0:
-        have_hbm = _first_present_int(sources, ("hbm_free_mb", "vram_free_mb", "hbm_total_mb", "vram_total_mb", "hbm_mb"))
-        if have_hbm is None and isinstance(row.get("npus"), Sequence) and not isinstance(row.get("npus"), (str, bytes)):
-            from remote_dev.core.host_spec import normalize_remote_probe_spec
-            have_hbm = int(normalize_remote_probe_spec(row)["vram_free_mb"])
-        if have_hbm is not None and have_hbm < wanted_hbm:
-            return False
-    return True
+def hardware_shortfall(
+    row: dict[str, Any], role: dict[str, Any] | None,
+    host_specs: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Compare one role's hardware floor with its host's observed headroom.
+
+    `host_specs` carries `HostHardwareSpec` snapshots keyed by host, taken
+    once per placement decision from the fleet probe. A requested floor with
+    no snapshot is a gap, never a pass: a prepared-root catalog row carries no
+    capacity of its own. `hbm_mb` is checked against aggregate free HBM across
+    free Dies; the host queue remains the per-device allocation authority.
+    """
+    wanted = requested_hardware(role)
+    if not wanted:
+        return None
+    host = host_key(row)
+    spec = (host_specs or {}).get(host)
+    if spec is None:
+        return {"host": host, "unobserved": sorted(wanted), "requested": wanted}
+    available = {
+        "cpu_cores": int(spec.get("cpu_cores") or 0),
+        "memory_mb": int(spec.get("mem_usable_mb") if spec.get("mem_usable_mb") is not None
+                         else (spec.get("mem_available_mb") or 0)),
+        "hbm_mb": int(spec.get("vram_free_mb") or 0),
+    }
+    gaps = {key: {"required": req, "available": available[key]}
+            for key, req in wanted.items() if req > available[key]}
+    if gaps and "hbm_mb" in gaps and not spec.get("vram_free_observed", True):
+        gaps["hbm_mb"]["observed"] = False
+    return {"host": host, "gaps": gaps} if gaps else None
 
 
-def runtime_matches(row: dict[str, Any], environment: dict[str, Any] | None, role: dict[str, Any] | None = None) -> bool:
+def shortfall_reason(shortfalls: Sequence[Mapping[str, Any]]) -> str:
+    """One human/agent readable sentence for refused hardware placements.
+
+    Several prepared roots can share one host, so gaps are reported once per
+    host and resource rather than once per catalog row.
+    """
+    parts: dict[str, None] = {}
+    for item in shortfalls:
+        if item.get("unobserved"):
+            parts[f"{item['host']}: capacity not observed for {', '.join(item['unobserved'])}"] = None
+            continue
+        for key, gap in (item.get("gaps") or {}).items():
+            detail = (f"{gap['available']} measured free, probe did not measure every Die"
+                      if gap.get("observed") is False else f"{gap['available']} available")
+            parts[f"{item['host']}: {key} needs {gap['required']}, {detail}"] = None
+    return "requested host hardware is not available: " + "; ".join(parts or ["no candidate host was observed"])
+
+
+def runtime_matches(row: dict[str, Any], environment: dict[str, Any] | None, role: dict[str, Any] | None = None,
+                    host_specs: Mapping[str, Mapping[str, Any]] | None = None) -> bool:
     environment = environment or {}
     profile = row.get("profile") or {}
     recipe = environment.get("recipe") or environment.get("image")
@@ -643,7 +662,7 @@ def runtime_matches(row: dict[str, Any], environment: dict[str, Any] | None, rol
         declared = row.get("service_ports") or []
         if int(port) not in declared:
             return False
-    if not _row_hardware_matches(row, role):
+    if hardware_shortfall(row, role, host_specs) is not None:
         return False
     return True
 
@@ -682,6 +701,7 @@ def select_runtimes(
     busy_runtime_ids: set[str] | None = None,
     topology: dict[str, Any] | None = None,
     observation: dict[str, Any] | None = None,
+    host_specs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Pick one matching ready root per role.
 
@@ -710,7 +730,7 @@ def select_runtimes(
             rid = row["runtime_id"]
             if rid in chosen:
                 continue
-            if not runtime_matches(row, environment, role):
+            if not runtime_matches(row, environment, role, host_specs):
                 continue
             host = host_key(row)
             if require_distinct_hosts and host and host in seen_hosts:
@@ -718,15 +738,19 @@ def select_runtimes(
             match = row
             break
         if match is None:
-            return {"runtime_ids": [], "reason": _gap(roles, ready, environment, topology)}
+            return {"runtime_ids": [], "reason": _gap(roles, ready, environment, topology, host_specs)}
         chosen.append(match["runtime_id"])
         if host_key(match):
             seen_hosts.add(host_key(match))
     return {"runtime_ids": chosen, "reason": None}
 
 
-def _gap(roles, ready, environment, topology=None) -> str:
+def _gap(roles, ready, environment, topology=None, host_specs=None) -> str:
     environment = environment or {}
+    shortfalls = [gap for role in roles for row in ready
+                  if (gap := hardware_shortfall(row, role, host_specs)) is not None]
+    if shortfalls and all(runtime_matches(row, environment) for row in ready):
+        return shortfall_reason(shortfalls)
     recipe = environment.get("recipe") or environment.get("image")
     if recipe and not provisionable_recipe(recipe) and not any(runtime_matches(row, environment) for row in ready):
         return f"unsupported environment recipe {recipe!r}; no matching prepared root"
@@ -738,7 +762,8 @@ def _gap(roles, ready, environment, topology=None) -> str:
 
 
 def can_prepare(environment: dict[str, Any] | None, donor: dict[str, Any] | None,
-                role: dict[str, Any] | None = None) -> bool:
+                role: dict[str, Any] | None = None,
+                host_specs: Mapping[str, Mapping[str, Any]] | None = None) -> bool:
     if donor is None:
         return False
     environment = environment or {}
@@ -759,6 +784,6 @@ def can_prepare(environment: dict[str, Any] | None, donor: dict[str, Any] | None
         have = donor.get(key) or (donor.get("profile") or {}).get(key)
         if have != wanted:
             return False
-    if not _row_hardware_matches(donor, role):
+    if hardware_shortfall(donor, role, host_specs) is not None:
         return False
     return True
