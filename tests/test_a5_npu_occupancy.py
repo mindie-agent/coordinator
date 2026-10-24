@@ -72,9 +72,17 @@ def test_a5_idle_summary_exposes_all_cards_as_free():
     assert card["phy_ids"] == [0]
     assert card["die_count"] == 1
     assert card["power_w"] is not None and card["temp_c"] is not None
-    # A5's static ~4.7 GiB reservation is firmware baseline, not workload usage.
-    assert card["hbm_used_mb"] == 0
+    # An idle A5 card still reports used HBM. The capture's measured total used
+    # value is kept verbatim (`4778 / 98304` on card 0) rather than rewritten to
+    # zero; this test does not attribute it to firmware, driver or runtime.
+    # Occupancy stays with the process table: every card above is still free.
+    assert card["hbm_used_mb"] == 4778
     assert card["hbm_total_mb"] == 98304
+    assert card["dies"] == [
+        {"chip_id": 0, "phy_id": 0, "bus_id": "NA", "aicore_pct": 0.0,
+         "hbm_used_mb": 4778, "hbm_total_mb": 98304, "busy": False}
+    ]
+    assert [c["hbm_used_mb"] for c in parsed["npus"]] == [4778, 4785, 4778, 4782, 4779, 4783, 4778, 4784]
 
 
 def test_a5_occupied_summary_marks_every_card_busy():

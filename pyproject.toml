@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
     "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@fba07e8607ddadde14cea315c9dbda23726c1c79",
-    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@b3020b91434e7b0d8682fde6a3b139d47d97562e",
+    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@69a9b51f7bafc9cbc668e5c76cea5c77224061ec",
     "setuptools-scm>=8",
 ]
 

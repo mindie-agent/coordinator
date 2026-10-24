@@ -15,7 +15,7 @@ from pathlib import Path
 
 EXECUTION_KEYS = ("execution_id", "run_id", "state", "service", "error", "error_ref", "error_details", "recording_error", "reason", "progress",
                   "source_snapshot_id", "sources", "role_progress",
-                  "observed_at", "cancel_requested", "service_port", "provisioning_started",
+                  "observed_at", "cancel_requested", "service_port", "provisioning_started", "host_observations",
                   "worktrees_preserved", "resources_released", "stdout", "stderr", "tail", "preparation_logs", "observation_freshness",
                   "runtime_update", "active_executions", "wait_until", "wait_timed_out", "wait_error", "logs_pending", "tail_error", "evidence")
 ROLE_KEYS = ("name", "state", "runtime_id", "host", "root", "service_port", "error", "error_details", "lease_state",

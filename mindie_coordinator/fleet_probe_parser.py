@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 BUSY_HBM_THRESHOLD_MB = 8192
 BUSY_AICORE_THRESHOLD_PCT = 5.0
@@ -103,6 +103,33 @@ def is_npu_busy(
     return False
 
 
+def device_occupancy_inventory(npus: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Card and physical-Die free/busy inventory for one parsed `npus` list.
+
+    Both the raw `npu-smi info` parse and the `-t usages` supplement derive
+    their card counts and physical-Die lists from these same observed rows.
+    """
+    cards = list(npus)
+    dies = [
+        die
+        for card in cards
+        for die in (card.get("dies") or [{"phy_id": pid, "busy": card.get("busy")}
+                                         for pid in (card.get("phy_ids") or [card["npu_id"]])])
+    ]
+    free_ids = [card["npu_id"] for card in cards if not card.get("busy")]
+    busy_ids = [card["npu_id"] for card in cards if card.get("busy")]
+    return {
+        "total_npus": len(cards),
+        "free_npus": len(free_ids),
+        "busy_npus": len(busy_ids),
+        "free_npu_ids": free_ids,
+        "busy_npu_ids": busy_ids,
+        "total_phy_devices": len(dies),
+        "free_phy_ids": [int(die["phy_id"]) for die in dies if not die.get("busy")],
+        "busy_phy_ids": [int(die["phy_id"]) for die in dies if die.get("busy")],
+    }
+
+
 def parse_npu_smi_usages(raw: str, current: dict[str, Any]) -> dict[str, Any]:
     """Enrich an NPU card dict with `npu-smi info -t usages -i <id>` output."""
     updated = dict(current)
@@ -110,16 +137,41 @@ def parse_npu_smi_usages(raw: str, current: dict[str, Any]) -> dict[str, Any]:
     rate_match = _RE_USAGE_RATE.search(raw)
     aic_match = _RE_USAGE_AICORE.search(raw)
 
-    if cap_match and rate_match:
+    # `-t usages` reports one card-wide HBM figure. Applying it is only sound
+    # when it maps to exactly one leasable unit: a single-Die card, or a legacy
+    # card row with no `dies` at all. A multi-Die card is left unmeasured
+    # rather than split across Dies or left with card/Die occupancy disagreeing;
+    # downstream already treats unmeasured HBM as no headroom.
+    dies = updated.get("dies")
+    attributable = not isinstance(dies, list) or len(dies) <= 1
+    if cap_match and rate_match and attributable:
         cap = int(cap_match.group(1))
         rate = int(rate_match.group(1))
         if cap > 0 and int(updated.get("hbm_total_mb") or 0) == 0:
-            used = round(cap * rate / 100)
             updated["hbm_total_mb"] = cap
-            updated["hbm_used_mb"] = used
-    if aic_match and float(updated.get("aicore_pct") or 0.0) == 0.0:
+            updated["hbm_used_mb"] = round(cap * rate / 100)
+    if aic_match and attributable and float(updated.get("aicore_pct") or 0.0) == 0.0:
         updated["aicore_pct"] = float(aic_match.group(1))
-    updated["busy"] = is_npu_busy(
+    if not attributable:
+        return updated
+
+    if isinstance(dies, list) and len(dies) == 1:
+        die = dict(dies[0])
+        if int(die.get("hbm_total_mb") or 0) == 0 and int(updated.get("hbm_total_mb") or 0) > 0:
+            die.update(hbm_total_mb=int(updated["hbm_total_mb"]),
+                       hbm_used_mb=int(updated["hbm_used_mb"]))
+        if float(die.get("aicore_pct") or 0.0) == 0.0:
+            die["aicore_pct"] = float(updated.get("aicore_pct") or 0.0)
+        # A compute observation is useful even when the supplement could not
+        # recover HBM. Capacity enrichment never clears process-derived busy.
+        die["busy"] = bool(die.get("busy")) or is_npu_busy(
+            hbm_used_mb=int(die.get("hbm_used_mb") or 0),
+            aicore_pct=float(die.get("aicore_pct") or 0.0))
+        updated["dies"] = [die]
+    # Same card aggregation as the raw parse: any busy Die, or card-wide
+    # occupancy evidence.
+    updated["busy"] = bool(current.get("busy")) or any(
+        die.get("busy") for die in (updated.get("dies") or [])) or is_npu_busy(
         hbm_used_mb=int(updated.get("hbm_used_mb") or 0),
         aicore_pct=float(updated.get("aicore_pct") or 0.0),
         processes=updated.get("processes") or [],
@@ -334,9 +386,15 @@ def parse_npu_smi_info(
                 "aicore_pct": aicore_pct,
                 "memory_used_mb": mem_used_mb,
                 "memory_total_mb": mem_total_mb,
-                # A5's ~4.7 GiB figure at idle is a firmware reservation, not
-                # workload usage; occupancy there comes from the process table.
-                "hbm_used_mb": 0 if a5_layout else hbm_used_mb,
+                # Measured total used HBM, kept factual for allocation headroom.
+                # On an idle A5 card this is nonzero (firmware/driver/runtime
+                # reservations and anything else resident); how much belongs to
+                # each is not established here and varies by machine, so no
+                # baseline is attributed or subtracted. Occupancy is a separate
+                # question: A5 decides it from the process table
+                # (`process_presence_is_busy`), so an idle A5 card stays idle
+                # and free for leasing while its used HBM is reported as used.
+                "hbm_used_mb": hbm_used_mb,
                 "hbm_total_mb": hbm_total_mb,
             }
         )
@@ -557,21 +615,7 @@ def parse_fleet_probe_output(
         pid_wchans=pid_wchans,
     )
     npus = npu_parsed["npus"]
-    total_npus = len(npus)
-    busy_ids = [card["npu_id"] for card in npus if card.get("busy")]
-    free_ids = [card["npu_id"] for card in npus if not card.get("busy")]
-    free_phy_ids = [
-        int(die["phy_id"])
-        for card in npus
-        for die in (card.get("dies") or [{"phy_id": pid, "busy": card.get("busy")} for pid in (card.get("phy_ids") or [card["npu_id"]])])
-        if not die.get("busy")
-    ]
-    busy_phy_ids = [
-        int(die["phy_id"])
-        for card in npus
-        for die in (card.get("dies") or [{"phy_id": pid, "busy": card.get("busy")} for pid in (card.get("phy_ids") or [card["npu_id"]])])
-        if die.get("busy")
-    ]
+    inventory = device_occupancy_inventory(npus)
 
     hostname = ""
     uptime_str = ""
@@ -664,14 +708,7 @@ def parse_fleet_probe_output(
         "driver_version": npu_parsed["driver_version"],
         "npu_smi_version": npu_parsed["npu_smi_version"],
         "chip_summary": ", ".join(chip_names) if chip_names else "Unknown",
-        "total_npus": total_npus,
-        "free_npus": len(free_ids),
-        "busy_npus": len(busy_ids),
-        "free_npu_ids": free_ids,
-        "busy_npu_ids": busy_ids,
-        "total_phy_devices": len(free_phy_ids) + len(busy_phy_ids),
-        "free_phy_ids": free_phy_ids,
-        "busy_phy_ids": busy_phy_ids,
+        **inventory,
         "npus": npus,
         "server": {
             "hostname": hostname,

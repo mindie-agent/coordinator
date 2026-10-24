@@ -15,8 +15,12 @@ preparation, and managed-lease start/stop orchestration to `CoordinatorService`.
 - `GANG_PLAN_RETRY_SECONDS` gates retryable topology wait retries.
 - `_topology_probe_lock` serializes fleet probes; `_map_roles` is bounded to
   four workers. Preparation runs in at most four workers.
-- `STOP_WAIT_SECONDS` is read lazily from `service.py` so callers patching the
-  public service module retain control of stop waits.
+- Up to eight candidate hosts are sampled serially. Each main remote call
+  has a 30s budget, plus optional HBM enrichment and cache/cleanup work.
+  Daemon admission schedules this in background; persisted status stays
+  non-blocking. Synchronous in-process admission waits for sampling.
+- Sampling has no aggregate deadline here. The 30s cache dampens retries;
+  hardware-floor cache misses reuse the existing topology retry window.
 
 [Side-Effect Policy]
 - Persists execution progress/preparation/lease facts through the coordinator
@@ -36,12 +40,16 @@ from remote_dev.processes import control as preparation_control
 
 from mindie_coordinator.machine_directory import MachineDirectoryUnavailable
 from mindie_coordinator.placement import (
+    HARDWARE_KEYS,
     can_prepare,
     distinct_hosts_required,
+    hardware_shortfall,
     host_key,
     plan_gang_placement,
     provisionable_recipe,
+    requested_hardware,
     runtime_matches,
+    shortfall_reason,
 )
 from mindie_coordinator.preparation_process import (
     PreparationCancelled,
@@ -174,60 +182,6 @@ class ServiceGangMixin:
             # observation failure remains visible if SSH cannot reach them.
             add({"alias": wanted, "host": {"ip": wanted, "port": 22, "user": "root"}})
         return records
-
-    def _observe_host_topologies(self, user, topology):
-        """Probe real fleet snapshots for the bounded gang candidate set.
-
-        Fleet probe output is the production schema; its `npus` rows are
-        adapted by `topology_from_fleet_snapshot`. Probe failures are reported
-        per host and never replaced with an assumed topology.
-        """
-        from mindie_coordinator.topology_gang_observation import (
-            topology_from_fleet_snapshot,
-        )
-
-        records = self._topology_host_records(user, topology)
-        wanted = str((topology or {}).get("host") or "").strip()
-        limit = len(records) if wanted else MAX_GANG_PROBE_HOSTS
-        observations = []
-        reports: list[dict[str, Any]] = []
-        for index, record in enumerate(records):
-            host = str((record.get("host") or {}).get("ip") or "").strip()
-            if index >= limit:
-                reports.append({
-                    "host": host, "state": "skipped",
-                    "error": f"not probed: bounded observation window of {limit} hosts",
-                })
-                continue
-            try:
-                with self._topology_probe_lock:
-                    snapshot = self._probe_host_record(record)
-            except Exception as exc:
-                reports.append({
-                    "host": host, "state": "unavailable",
-                    "error": f"{type(exc).__name__}: {exc}"[:500],
-                })
-                continue
-            try:
-                observation = topology_from_fleet_snapshot(snapshot, host=host)
-            except GangLeaseError as exc:
-                reports.append({
-                    "host": host, "state": "unavailable",
-                    "code": exc.code, "error": exc.message[:500],
-                })
-                continue
-            observations.append(observation)
-            reports.append({
-                "host": host,
-                "state": "observed",
-                **({"cache_hit": bool(snapshot.get("cache_hit"))}
-                   if isinstance(snapshot, dict) else {}),
-                **({"cache_age_seconds": snapshot.get("cache_age_seconds")}
-                   if isinstance(snapshot, dict) else {}),
-                "free_phy_ids": list(observation.free_phy_ids),
-                "free_dual_die_pairs": [list(pair) for pair in observation.free_dual_die_pairs],
-            })
-        return observations, reports
 
     def _record_topology_wait(self, store, row, planned):
         row["phase"] = "waiting"
@@ -377,15 +331,26 @@ class ServiceGangMixin:
                 return {"status": "cache_miss", "reason":
                         "not enough distinct hosts with a matching prepared environment for this topology",
                         "provisioning_started": False}
+        # Explicit cpu_cores/memory_mb/hbm_mb floors need real host capacity.
+        # One snapshot per decision is taken here and reused by donor
+        # selection, provisioning and the post-preparation check below.
+        host_specs, spec_reports = self._observe_host_specs(user, roles, topology)
         placements = []
         used_hosts: set[str] = set()
         for role in roles:
-            donor = self._donor_for_role(user, environment, role, used_hosts, need_distinct)
+            shortfalls = []
+            donor = self._donor_for_role(user, environment, role, used_hosts, need_distinct,
+                                         host_specs, hardware_shortfalls=shortfalls)
             if donor is None:
                 donor = self._ensure_user_container(user, environment, role, used_hosts, need_distinct,
-                    on_progress=lambda event, role=role: self._save_container_progress(store, row, role['name'], event))
+                    on_progress=lambda event, role=role: self._save_container_progress(store, row, role['name'], event),
+                    host_specs=host_specs, hardware_shortfalls=shortfalls)
             if donor is None:
-                return {"status": "cache_miss", "reason": "no allowed host provides the requested environment",
+                hardware_gap = bool(shortfalls) or (bool(requested_hardware(role)) and not host_specs)
+                return {"status": "cache_miss",
+                        "reason": shortfall_reason(shortfalls) if hardware_gap
+                                  else "no allowed host provides the requested environment",
+                        "host_observations": spec_reports or None,
                         "provisioning_started": False}
             host = host_key(donor)
             if need_distinct and host:
@@ -420,7 +385,7 @@ class ServiceGangMixin:
                 return {"status": "waiting", "reason": "execution cancellation requested during preparation"}
             catalog = {item["runtime_id"]: item for item in self.pool.catalog()}
             item = catalog.get(prepared["id"])
-            if item is None or not runtime_matches(item, environment, role):
+            if item is None or not runtime_matches(item, environment, role, host_specs):
                 return {"status": "cache_miss",
                         "reason": "prepared environment does not match requested constraints",
                         "provisioning_started": True}
@@ -433,16 +398,23 @@ class ServiceGangMixin:
                 snapshots[prepared["id"]] = {record["relpath"]: record["commit"]
                                              for record in row["spec"]["source_snapshot"]["records"]}
         return {"runtime_ids": ids, "bindings": bindings, "snapshots": snapshots,
-                "reason": None, "provisioning_started": True}
+                "host_specs": host_specs, "reason": None, "provisioning_started": True}
 
-    def _donor_for_role(self, user, environment, role, used_hosts, require_distinct=False):
+    def _donor_for_role(self, user, environment, role, used_hosts, require_distinct=False,
+                        host_specs=None, *, hardware_shortfalls=None):
         catalog = self.pool.catalog()
+        preparation_role = {key: value for key, value in role.items() if key not in HARDWARE_KEYS}
         for item in catalog:
             if item.get("user") != user or not item.get("host"):
                 continue
             if require_distinct and item["host"] in used_hosts:
                 continue
-            if not can_prepare(environment, item, role):
+            if not can_prepare(environment, item, preparation_role):
+                continue
+            gap = hardware_shortfall(item, role, host_specs)
+            if gap is not None:
+                if hardware_shortfalls is not None:
+                    hardware_shortfalls.append(gap)
                 continue
             return item
         return None
@@ -463,7 +435,8 @@ class ServiceGangMixin:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
 
-    def _ensure_user_container(self, user, environment, role, used_hosts, require_distinct=False, *, on_progress=None):
+    def _ensure_user_container(self, user, environment, role, used_hosts, require_distinct=False, *,
+                               on_progress=None, host_specs=None, hardware_shortfalls=None):
         recipe = environment.get("recipe") or environment.get("image")
         if recipe and not provisionable_recipe(recipe):
             return None
@@ -481,6 +454,13 @@ class ServiceGangMixin:
                 continue
             machine_type = host_info.get("machine_type")
             if environment.get("machine_type") and machine_type != environment["machine_type"]:
+                continue
+            # Provisioning a container cannot add CPU, RAM or HBM: an
+            # undersized host stays undersized, so skip it before any work.
+            gap = hardware_shortfall({"host": host_ip}, role, host_specs)
+            if gap is not None:
+                if hardware_shortfalls is not None:
+                    hardware_shortfalls.append(gap)
                 continue
             configured = record.get("container") or {}
             cfg_name = str(configured.get("name") or "").strip() or None

@@ -48,6 +48,7 @@ from mindie_coordinator.fleet_probe_parser import (
     _parse_float,
     _parse_int,
     _split_row,
+    device_occupancy_inventory,
     is_disk_io_wait,
     is_npu_busy,
     parse_fleet_probe_output,
@@ -273,10 +274,10 @@ def probe_machine_record(
                         card = parse_npu_smi_usages("\n".join(by_id[nid]), card)
                     updated_npus.append(card)
                 snapshot["npus"] = updated_npus
-                snapshot["free_npu_ids"] = [c["npu_id"] for c in updated_npus if not c.get("busy")]
-                snapshot["busy_npu_ids"] = [c["npu_id"] for c in updated_npus if c.get("busy")]
-                snapshot["free_npus"] = len(snapshot["free_npu_ids"])
-                snapshot["busy_npus"] = len(snapshot["busy_npu_ids"])
+                # Rebuild card *and* physical-Die inventory from the same
+                # derivation, so a supplement can never leave a busy card with
+                # its Phy-ID still listed free.
+                snapshot.update(device_occupancy_inventory(updated_npus))
             except Exception as exc:
                 snapshot["usage_parse_error"] = f"{type(exc).__name__}: {exc}"[:500]
         cache[alias] = snapshot
