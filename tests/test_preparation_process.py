@@ -185,6 +185,30 @@ def test_restarted_service_stops_persisted_preparation_before_marking_cancelled(
     assert latest["preparation_jobs"]["worker"]["prepare-retained"]["quiet"] is quiet
 
 
+def test_status_refresh_observes_running_preparation_job(tmp_path, monkeypatch):
+    # A running (non-quiet) preparation job must be observed through
+    # `_refresh_preparation_jobs`. A missing import there would swallow the
+    # NameError into a fake "uncertain" status instead of the real remote state.
+    store = AgentSessions(tmp_path / "sessions")
+    context = store.attach("codex", "task", str(tmp_path))
+    row = store.execution(context, "build", {"command": "build"})
+    row.update(user="user", admitted=True, phase="preparing", preparation_jobs={"worker": {
+        "prepare-running": {"endpoint": ENDPOINT, "job_id": "prepare-running",
+                            "step": "install", "quiet": False}}})
+    store.save_execution(row)
+    service = CoordinatorService(tmp_path / "coordinator", pool=MagicMock())
+    observed = {"state": "running", "quiet": False, "receipt": {"pid": 321}}
+    control = Mock(return_value=observed)
+    monkeypatch.setattr("mindie_coordinator.service_gang.preparation_control", control)
+    service.advance(str(tmp_path / "sessions"), "user", row["id"], action="status", refresh=True)
+    control.assert_called_once_with(ENDPOINT, "prepare-running", "status")
+    with store.transaction() as db:
+        latest = store.get(db, "execution", row["id"])
+    record = latest["preparation_jobs"]["worker"]["prepare-running"]
+    assert record["state"] == "running" and record["receipt"] == {"pid": 321}
+    assert "not defined" not in str(record.get("error") or "")
+
+
 def test_retained_preparation_never_replaces_sources(tmp_path):
     service = CoordinatorService(tmp_path / "coordinator", pool=MagicMock())
     with pytest.raises(PreparationUncertain, match="retained preparation"):
