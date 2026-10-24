@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from mindie_diagnostics import get_recorder
+from remote_dev.processes import control as preparation_control
 
 from mindie_coordinator.machine_directory import MachineDirectoryUnavailable
 from mindie_coordinator.placement import (
