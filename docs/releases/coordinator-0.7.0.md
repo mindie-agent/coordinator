@@ -8,6 +8,8 @@ coordinator 不再维护自己的 askpass、密码传递或公钥安装实现。
 
 与 npu-top 的同步读取实际 HTTP 207 逐台回执。认证尚未就绪或本地引用记录失败会明确报告为部分成功，同时保留已完成的主机登记事实。已有公钥及清单元数据继续保留，普通远端操作不会因认证恢复而被重放。
 
-发布依赖须先闭环：remote-dev 0.11.0 正式发布后，将候选版本范围替换为其正式 Release 对应的完整 Git 提交，再发布本组件。mindie-diagnostics 继续固定 0.5.4（`5ae643e19223f2181ecdbaa3edaf464137c4805e`）。发布流水线校验安装来源、正式依赖 Release、源码与 Tag 对齐，并随包提供 benchmark 报告。
+本组件锁定 remote-dev 0.11.0 正式 Release 的完整 Git 提交 `153813703a3cc64c695dd8e5f19e8a173e144dda`，并继续固定 mindie-diagnostics 0.5.4（`5ae643e19223f2181ecdbaa3edaf464137c4805e`）。发布流水线校验安装来源、正式依赖 Release、源码与 Tag 对齐，并随包提供 benchmark 报告。
 
-验收状态：共享认证、HTTP 207 回执和本地消费者合同已验证，固定调度与运行清单 benchmark 工作负载各完成 5 次本地兼容性检查。原生 Windows PowerShell 和真实 WSL 的最终实测仍待完成；最终发布说明须补齐平台、源码 SHA 和结果，不能将本地候选检查视为三平台验收。
+共享认证已通过三平台真实 SSH 验收：macOS 的安装后三组件 wheel 与 Kimi 候选共 7 项通过（34.58 秒）；原生 Windows PowerShell 4 项通过（14.186 秒），真实 WSL2 Ubuntu 24.04 4 项通过（12.694 秒），后两者均无失败或跳过。[验收运行 40774308378](https://github.com/mindie-agent/remote-dev/actions/runs/40774308378) 使用与 remote-dev 候选 `a7564f49b1ff106e59f72961c851b7b11eb81130` 相同的源码树。
+
+实际消费者路径覆盖 coordinator 主机接入、Kimi 两个会话和两个虚拟环境、npu-top 数据库重开后的连接与采集，共用隔离 `REMOTE_DEV_AUTH_DIR` 中默认的 `credentials.json`。同时验证自动安装公钥、禁用公钥的密码登录及撤销公钥后的修复，业务操作仅执行一次。Codex、Claude Code 和 DSH 的覆盖范围为 endpoint profile，未声称完整原生宿主验收。HTTP 207 回执与本地消费者合同通过；固定调度与运行清单 benchmark 工作负载各完成 5 次本地兼容性检查，正式报告由 Tag 流水线生成。
