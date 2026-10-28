@@ -2,7 +2,8 @@
 
 [Role]
 `ServiceEvidenceMixin` supplies bounded wait/observe/tail reads, evidence and
-status projection, error reporting, and finish-session reporting to
+status projection, explicit placement capacity/topology observations, error and
+finish-session reporting to
 `CoordinatorService`.
 
 [Invariants]
@@ -15,6 +16,8 @@ status projection, error reporting, and finish-session reporting to
 [Timeouts & Locks]
 - Wait deadlines are bounded by `STATUS_CACHE_SECONDS` wakeups and the caller's
   timeout; execution locks are non-blocking for reads.
+- Placement alone probes at most eight hosts serially under `_topology_probe_lock`;
+  per-probe budgets apply, without an aggregate sampling deadline.
 - `DONE`, `LIVE`, `STATUS_CACHE_SECONDS`, and `PERMANENT_ERRORS` are read
   lazily from `service.py` to keep module import acyclic.
 
@@ -39,7 +42,7 @@ from mindie_diagnostics import get_recorder
 from remote_dev.core.errors import error_details
 
 from mindie_coordinator.parity_support import RemoteCommandError
-from mindie_coordinator.placement import validate_wait
+from mindie_coordinator.placement import requested_hardware, validate_wait
 from mindie_coordinator.topology_gang_common import GangLeaseError
 
 
@@ -51,6 +54,105 @@ def _service_module():
 
 
 class ServiceEvidenceMixin:
+    def _observe_host_topologies(self, user, topology):
+        """Probe real fleet snapshots for the bounded gang candidate set.
+
+        Fleet probe output is the production schema; its `npus` rows are
+        adapted by `topology_from_fleet_snapshot`. Probe failures are reported
+        per host and never replaced with an assumed topology.
+        """
+        from mindie_coordinator.topology_gang_observation import (
+            topology_from_fleet_snapshot,
+        )
+
+        limit = _service_module().MAX_GANG_PROBE_HOSTS
+        records = self._topology_host_records(user, topology)
+        wanted = str((topology or {}).get("host") or "").strip()
+        limit = len(records) if wanted else limit
+        observations = []
+        reports: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            host = str((record.get("host") or {}).get("ip") or "").strip()
+            if index >= limit:
+                reports.append({
+                    "host": host, "state": "skipped",
+                    "error": f"not probed: bounded observation window of {limit} hosts",
+                })
+                continue
+            try:
+                with self._topology_probe_lock:
+                    snapshot = self._probe_host_record(record)
+            except Exception as exc:
+                reports.append({
+                    "host": host, "state": "unavailable",
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                })
+                continue
+            try:
+                observation = topology_from_fleet_snapshot(snapshot, host=host)
+            except GangLeaseError as exc:
+                reports.append({
+                    "host": host, "state": "unavailable",
+                    "code": exc.code, "error": exc.message[:500],
+                })
+                continue
+            observations.append(observation)
+            reports.append({
+                "host": host,
+                "state": "observed",
+                **({"cache_hit": bool(snapshot.get("cache_hit"))}
+                   if isinstance(snapshot, dict) else {}),
+                **({"cache_age_seconds": snapshot.get("cache_age_seconds")}
+                   if isinstance(snapshot, dict) else {}),
+                "free_phy_ids": list(observation.free_phy_ids),
+                "free_dual_die_pairs": [list(pair) for pair in observation.free_dual_die_pairs],
+            })
+        return observations, reports
+
+    def _observe_host_specs(self, user, roles, topology):
+        """Snapshot candidate host capacity once for explicit hardware floors.
+
+        Reuses the gang candidate ordering and the same `_probe_host_record`
+        seam, so one placement decision probes each host at most once and the
+        result is carried downstream instead of re-proved. Returns
+        `({host: HostHardwareSpec}, reports)`; a host whose probe fails is
+        absent from the map and keeps its error in `reports`.
+
+        These are point-in-time feasibility checks, not reservations: nothing
+        here holds CPU, RAM or HBM, and per-Die allocation stays with the host
+        queue. Probes are serial and bounded only by their own per-call budgets
+        (see the module timeout note), so this runs only for roles that
+        actually declared a hardware floor.
+        """
+        from remote_dev.core.host_spec import normalize_remote_probe_spec
+
+        if not any(requested_hardware(role) for role in roles):
+            return {}, []
+        specs: dict[str, dict[str, Any]] = {}
+        reports: list[dict[str, Any]] = []
+        probe_limit = _service_module().MAX_GANG_PROBE_HOSTS
+        records = self._topology_host_records(user, topology)
+        for record in records[:probe_limit]:
+            host = str((record.get("host") or {}).get("ip") or "").strip()
+            try:
+                with self._topology_probe_lock:
+                    snapshot = self._probe_host_record(record)
+            except Exception as exc:
+                reports.append({"host": host, "state": "unavailable", "error": f"{type(exc).__name__}: {exc}"[:500]})
+                continue
+            if snapshot.get("online") is False:
+                reports.append({"host": host, "state": "unavailable",
+                                "error": str(snapshot.get("error") or "host is offline")[:500]})
+                continue
+            specs[host] = normalize_remote_probe_spec(snapshot)
+            reports.append({"host": host, "state": "observed",
+                            "cache_hit": bool(snapshot.get("cache_hit"))})
+        if len(records) > probe_limit:
+            reports.extend({"host": str((record.get("host") or {}).get("ip") or "").strip(), "state": "skipped",
+                            "error": f"not probed: bounded observation window of {probe_limit} hosts"}
+                           for record in records[probe_limit:])
+        return specs, reports
+
     def wait(self, sessions_dir, user, execution_id, *, until="released", timeout_seconds=30, role=None):
         service_module = _service_module()
         validate_wait(until, timeout_seconds)
@@ -321,7 +423,9 @@ class ServiceEvidenceMixin:
         if row.get("topology_plan"):
             payload["topology"] = row["topology_plan"]
         if row.get("placement") and state == "waiting_for_runtime":
-            payload.update({k: row["placement"].get(k) for k in ("reason", "provisioning_started") if k in (row["placement"] or {})})
+            payload.update({k: row["placement"].get(k)
+                            for k in ("reason", "provisioning_started", "host_observations")
+                            if k in (row["placement"] or {})})
         roles = row.get("roles") or []
         from mindie_coordinator.ready_runtime import TERMINAL
         payload["resources_released"] = state in service_module.DONE and all(

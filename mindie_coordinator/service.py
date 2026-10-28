@@ -55,7 +55,7 @@ from mindie_coordinator.client_paths import client_path
 from mindie_coordinator.execution_sources import source_paths, validate_source_snapshot
 from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERMINAL
 from mindie_coordinator.parity import materialize_command
-from mindie_coordinator.placement import extract_topology_spec, role_plan, runtime_matches
+from mindie_coordinator.placement import extract_topology_spec, requested_hardware, role_plan, runtime_matches
 from mindie_coordinator.provision.task_environment import TaskRootBusy
 from mindie_coordinator.ready_runtime import RuntimePool
 from mindie_coordinator.task_messages import TaskMessages
@@ -452,10 +452,10 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                 row["error"] = "retained preparation jobs require stop/quiet cleanup before a new execution"
                 self._save_execution(store, row)
                 return self._reply(row)
+            retry_at = row.get("topology_retry_at")
+            if isinstance(retry_at, (int, float)) and time.time() < retry_at:
+                return self._reply(row)
             if gang_requested:
-                retry_at = row.get("topology_retry_at")
-                if isinstance(retry_at, (int, float)) and time.time() < retry_at:
-                    return self._reply(row)
                 planned = self._plan_gang_roles(store, user, row, spec)
                 if planned.get("status") == "waiting":
                     return self._record_topology_wait(store, row, planned)
@@ -481,15 +481,22 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             if placed.get("status") == "cache_miss":
                 row["phase"] = "waiting_for_runtime"
                 row["placement"] = placed
+                if any(requested_hardware(role) for role in roles):
+                    # A failed fleet probe has no reusable success cache. Reuse
+                    # the existing placement retry window instead of SSH per tick.
+                    row["topology_retry_at"] = time.time() + GANG_PLAN_RETRY_SECONDS
                 self._save_execution(store, row)
                 return self._reply(row)
             role_rows = []
             existing_bindings = placed.get("bindings") or []
             catalog = {item["runtime_id"]: item for item in self.pool.catalog()}
+            # Reuse the placement decision's host snapshot; an accepted
+            # placement is never re-proved with a second probe.
+            host_specs = placed.get("host_specs") or {}
             for index, role in enumerate(roles):
                 runtime_id = placed["runtime_ids"][index]
                 catalog_item = catalog.get(runtime_id)
-                if catalog_item is None or not runtime_matches(catalog_item, environment, role):
+                if catalog_item is None or not runtime_matches(catalog_item, environment, role, host_specs):
                     row["phase"] = "waiting_for_runtime"
                     row["placement"] = {
                         "reason": "prepared environment does not match requested constraints",

@@ -244,7 +244,7 @@ def test_four_allowed_hosts_prepare_concurrently_and_preserve_role_progress(clie
 
     with patch.object(client.pool, "catalog", return_value=catalog), \
          patch.object(client.coordinator, "_configured_machines", return_value=[]), \
-         patch.object(client.coordinator, "_donor_for_role", side_effect=lambda user, env, role, *args: {"host": role["host"]}), \
+         patch.object(client.coordinator, "_donor_for_role", side_effect=lambda user, env, role, *args, **kwargs: {"host": role["host"]}), \
          patch.object(client.coordinator, "_prepare_role", side_effect=prepare):
         result = client.coordinator._place_or_prepare(client.store, "alice", row, roles, {})
     assert result["runtime_ids"] == [role["name"] for role in roles]
