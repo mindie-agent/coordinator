@@ -132,7 +132,8 @@ class BackendPreparationMixin:
                     from mindie_coordinator.native_publication import NativeViewPublication
                     publication = NativeViewPublication(spec, reuse['runtime'], versions)
         container = SshEndpoint(host=endpoint["host"], port=int(endpoint["port"]), user=endpoint["user"],
-                                container=endpoint.get("container"))
+                                container=endpoint.get("container"), identity_file=endpoint.get("identity_file"),
+                                auth_ref=endpoint.get("auth_ref"))
         pending_setup = []
         def owned_process(step):
             nonlocal pending_setup
@@ -400,7 +401,8 @@ class BackendPreparationMixin:
             from mindie_coordinator.parity_support import SshEndpoint, ssh_exec_stream
             endpoint = spec['endpoint']
             result = ssh_exec_stream(
-                SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user'], container=endpoint.get('container')),
+                SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user'], container=endpoint.get('container'), identity_file=endpoint.get('identity_file'),
+                            auth_ref=endpoint.get('auth_ref')),
                 command, stream_progress=False, process=process,
             )
             return json.loads(result.stdout)
@@ -457,7 +459,8 @@ class BackendPreparationMixin:
                   + REMOTE_NATIVE_VIEW_SUFFIX + '\nMINDIE_NATIVE_VIEW\n')
         endpoint = spec['endpoint']
         completed = ssh_exec_stream(
-            SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user'], container=endpoint.get('container')),
+            SshEndpoint(endpoint['host'], int(endpoint['port']), endpoint['user'], container=endpoint.get('container'), identity_file=endpoint.get('identity_file'),
+                            auth_ref=endpoint.get('auth_ref')),
             script, stream_progress=False, process=process, log_path=log_path,
         )
         reply = json.loads(completed.stdout)
@@ -555,7 +558,8 @@ class BackendPreparationMixin:
             from mindie_coordinator.parity_support import SshEndpoint, ssh_exec_stream
             endpoint = spec["endpoint"]
             completed = ssh_exec_stream(
-                SshEndpoint(endpoint["host"], int(endpoint["port"]), endpoint["user"], container=endpoint.get("container")),
+                SshEndpoint(endpoint["host"], int(endpoint["port"]), endpoint["user"], container=endpoint.get("container"), identity_file=endpoint.get("identity_file"),
+                                auth_ref=endpoint.get("auth_ref")),
                 command, stream_progress=False, process=process, log_path=log_path,
             )
             output = completed.stdout

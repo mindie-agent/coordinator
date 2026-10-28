@@ -195,6 +195,12 @@ run = client.run(
 | `mindie_container` | `mindie container` / `mindie-coordinator container` | 绑定已有容器（支持 `docker exec` 直连与独立 `ssh_port` 两种模式）、一键开通用户专属昇腾容器（`mindie-<user>`）、枚举或解绑容器，并实时同步 `remote-dev` 端点别名 |
 | `mindie_lease` | `mindie lease` / `mindie-coordinator lease` | 轻量级宿主机 NPU 卡与服务端口租约申请（`acquire`）、续期（`heartbeat`）、查询（`status`）与释放（`release`），直接返回 `ASCEND_RT_VISIBLE_DEVICES` 供 `remote-dev` 使用 |
 
+SSH 认证统一由 `remote-dev` 管理。首次可用 `remote-dev auth setup --host HOST --port 22 --user USER --prompt` 录入一次密码，或在 `mindie_hosts(action="bootstrap_key")` 中传 `password_env`。默认尝试安装公钥并用实际密钥验证；如果密码已验证可用而公钥安装失败，保留密码认证并返回失败原因。后续聊天、coordinator 和 remote-dev 共享同一用户级凭据，不需要再次把密码交给 Agent。
+
+密码默认保存在共享的 `~/.mindie/ssh/credentials.json`；`REMOTE_DEV_AUTH_DIR` 可调整认证目录，`REMOTE_DEV_CREDENTIAL_FILE` 可指定凭据文件。此流程不调用系统钥匙串，也不请求系统账户密码。
+
+`machines.json` 和 `endpoints.json` 仅保存 `auth_ref` 与验证后的 `identity_file`。宿主机上的 `docker exec` 使用宿主机认证；独立容器 SSH 端口使用自己的认证范围，可在绑定时指定 `container_auth_ref` / `container_identity_file`。同步 npu-top 时只传认证引用，npu-top 必须能够访问同一个用户级凭据库；监控注册失败不会改变已经成功的 SSH 认证结果。
+
 ### 2. 受管源码快照与任务执行生命周期
 
 | MCP 工具名 | 对应的 CLI / Python 方法 | 它能帮你做什么 |
@@ -249,9 +255,11 @@ run = client.run(
 
 ## 本地开发与测试
 
+共享认证开发版本需要同级目录的 remote-dev 源码；一起交给依赖解析器安装，不跳过依赖检查。
+
 ```bash
 uv venv
-uv pip install -e ".[test]"
+uv pip install -e ../remote-dev -e ".[test]"
 HOME="$(mktemp -d)" .venv/bin/python -m pytest
 ```
 

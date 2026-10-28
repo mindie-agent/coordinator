@@ -119,8 +119,7 @@ def provision_fixture(monkeypatch):
         calls.append((target, script, kwargs))
         return RemoteResult(target, 0, '', '', {'success': True, 'free_port': 46000})
     monkeypatch.setattr(provision.host_ops, 'run_remote_script', remote)
-    monkeypatch.setattr(provision.host_ops, 'find_public_key', lambda _: 'fixture-key')
-    monkeypatch.setattr(provision.host_ops, 'load_public_key', lambda _: 'ssh-ed25519 fixture')
+    monkeypatch.setattr(provision.host_ops, "ensure_key", lambda _: ('fixture-key', 'ssh-ed25519 fixture'))
     return calls
 
 

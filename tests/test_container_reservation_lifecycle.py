@@ -151,8 +151,7 @@ def test_provision_default_callback_uses_real_host_authority(tmp_path, monkeypat
                         lambda *a, **k: RemoteResult(None, 0, "", "", {"success": True, "free_port": 46000}))
     monkeypatch.setattr(provision.host_ops, "assert_remote_success",
                         Mock(side_effect=[{"free_port": 46000}, {}, {}]))
-    monkeypatch.setattr(provision.host_ops, "find_public_key", lambda _: "fixture-key")
-    monkeypatch.setattr(provision.host_ops, "load_public_key", lambda _: "ssh-ed25519 fixture")
+    monkeypatch.setattr(provision.host_ops, "ensure_key", lambda _: ("fixture-key", "ssh-ed25519 fixture"))
     result = provision.provision_user_container(host="fixture", image="main", user="alice", machines=Mock())
     assert result["ssh_port"] == 46000
     with sqlite3.connect(state / "coordinator.sqlite3") as connection:

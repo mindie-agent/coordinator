@@ -428,12 +428,8 @@ if [ -z "${ASCEND_HOME_PATH:-}" ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
   fi
 fi
-install -d -m 700 /root/.ssh
-[ -f /root/.ssh/authorized_keys ] || touch /root/.ssh/authorized_keys
-if ! grep -qxF "$pubkey" /root/.ssh/authorized_keys 2>/dev/null; then
-  printf '%s\n' "$pubkey" >> /root/.ssh/authorized_keys
-fi
-chmod 600 /root/.ssh/authorized_keys
+__INSTALL_PUBLIC_KEY_SH__
+remote_dev_install_public_key "$pubkey" /root/.ssh
 install -d -m 0755 /run/sshd /etc/profile.d /etc/mindie
 _mindie_python_dir=""
 for _d in $(ls -1d /usr/local/python*/bin 2>/dev/null | sort -V -r); do

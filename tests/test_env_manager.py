@@ -427,12 +427,8 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
             side_effect=[{"free_port": 46000}, {}, {}],
         ), mock.patch.object(
             provision.host_ops,
-            "find_public_key",
-            return_value=self.root / "key.pub",
-        ), mock.patch.object(
-            provision.host_ops,
-            "load_public_key",
-            return_value="ssh-ed25519 test",
+            "ensure_key",
+            return_value=(str(self.root / "key"), "ssh-ed25519 test"),
         ), mock.patch.object(
             provision.host_ops,
             "fetch_release_catalog",
@@ -522,6 +518,7 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
                         "cmd": "npu-smi info",
                         "workdir": "/vllm-workspace",
                     },
+                    profile="codex",
                 )
                 ep_host = mock_bash.call_args.args[0]
                 self.assertEqual((ep_host.host, ep_host.port, ep_host.container), ("10.0.0.88", 22, None))
@@ -565,32 +562,18 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
     def test_upsert_with_in_memory_password_bootstraps_key_syncs_npu_top_and_discovers_existing_container(self):
         from mindie_coordinator import provision
 
-        pubkey = self.root / "id_ed25519.pub"
-        privkey = self.root / "id_ed25519"
-        pubkey.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey user@local\n", encoding="utf-8")
-        privkey.write_text("PRIVATE\n", encoding="utf-8")
-
-        tool_name, ssh_cmd = provision.host_ops.build_bootstrap_host_key_command(
-            provision.host_ops.SshTarget(host="192.168.13.165", user="root", port=22),
-            key_path=pubkey,
-            public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey user@local",
-        )
-        self.assertEqual(tool_name, "ssh")
-        self.assertIn("BatchMode=no", ssh_cmd)
-        self.assertIn("PreferredAuthentications=password,keyboard-interactive", ssh_cmd)
-
-        askpass_calls = []
+        identity_file = str(self.root / "managed-key")
+        setup_calls = []
         npu_top_calls = []
 
-        def fake_askpass(cmd, *, password, env_name="MINDIE_SSH_PASSWORD"):
-            askpass_calls.append((cmd, password, env_name))
-            return mock.Mock(returncode=0, stdout="", stderr="")
+        def shared_setup(endpoint, **kwargs):
+            setup_calls.append((endpoint, kwargs))
+            return {"auth_ref": "shared-host-profile", "auth_method": "publickey",
+                    "identity_file": identity_file, "bootstrap": {"status": "completed"}}
 
         def fake_register_host(self_client, **kwargs):
             npu_top_calls.append(kwargs)
             return {"source": "npu-top", "status": "registered", "server": {"host": kwargs["host"]}, "auth": {"ready": 1}}
-
-        check_results = [{"ok": False, "returncode": 255, "stdout": "", "stderr": "Permission denied"}, {"ok": True, "returncode": 0, "stdout": "ok", "stderr": ""}]
 
         probe_output = (
             SAMPLE_910C_PROBE_OUTPUT.split("===SECTION:CONTAINERS===")[0]
@@ -599,9 +582,7 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
             + "===SECTION:SYSTEM===\nHOSTNAME:atlas-a3-165\n"
         )
 
-        with mock.patch.object(provision.host_ops, "find_public_key", return_value=pubkey), \
-             mock.patch.object(provision.host_ops, "check_direct_ssh", side_effect=check_results), \
-             mock.patch.object(provision.host_ops, "run_with_askpass", side_effect=fake_askpass), \
+        with mock.patch.object(provision.host_ops, "setup_access", side_effect=shared_setup), \
              mock.patch("mindie_coordinator.npu_top_bridge.NpuTopObservationClient.register_host", fake_register_host):
             res = handle_hosts(
                 {
@@ -621,11 +602,14 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(res["state"], "ready")
-        self.assertEqual(len(askpass_calls), 1)
-        self.assertEqual(askpass_calls[0][1], "in-memory-secret-pw")
+        self.assertEqual(len(setup_calls), 1)
+        self.assertEqual(setup_calls[0][1]["password"], "in-memory-secret-pw")
+        self.assertEqual(res["record"]["host"]["identity_file"], identity_file)
+        self.assertEqual(res["record"]["host"]["auth_ref"], "shared-host-profile")
         self.assertEqual(len(npu_top_calls), 1)
         self.assertEqual(npu_top_calls[0]["host"], "192.168.13.165")
-        self.assertEqual(npu_top_calls[0]["password"], "in-memory-secret-pw")
+        self.assertEqual(npu_top_calls[0]["auth_ref"], "shared-host-profile")
+        self.assertNotIn("password", npu_top_calls[0])
         self.assertEqual(res["npu_top_sync"]["status"], "registered")
         # Container matched by ID prefix and populated with full container name + published ssh_port
         self.assertEqual(res["record"]["container"]["name"], "vllm_debug_c0")

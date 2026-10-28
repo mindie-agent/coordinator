@@ -43,6 +43,10 @@ def _host_endpoint_spec(row: Mapping[str, Any]) -> dict[str, Any] | None:
     }
     if host.get("identity_file"):
         spec["identity_file"] = str(host["identity_file"])
+    if host.get("auth_ref"):
+        spec["auth_ref"] = str(host["auth_ref"])
+    if host.get("known_hosts_file"):
+        spec["known_hosts_file"] = str(host["known_hosts_file"])
     if host.get("python"):
         spec["python"] = str(host["python"])
     if host.get("runtime_env") is not None:
@@ -84,8 +88,13 @@ def _primary_endpoint_spec(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "root": c_workdir,
             "cwd": c_workdir,
         }
-        if host_spec.get("identity_file"):
-            spec["identity_file"] = host_spec["identity_file"]
+        # A published container SSH port is a distinct authentication scope.
+        if container.get("identity_file"):
+            spec["identity_file"] = str(container["identity_file"])
+        if container.get("auth_ref"):
+            spec["auth_ref"] = str(container["auth_ref"])
+        if container.get("known_hosts_file"):
+            spec["known_hosts_file"] = str(container["known_hosts_file"])
         if container.get("python"):
             spec["python"] = str(container["python"])
         _apply_container_runtime_env(spec, container)
@@ -268,6 +277,8 @@ def _merge_overrides(base: Mapping[str, Any], overrides: Mapping[str, Any]) -> d
         "control_path",
         "strict_host_key_checking",
         "identity_file",
+        "auth_ref",
+        "known_hosts_file",
         "ssh_options",
         "ssh_mux",
         "runtime_env",

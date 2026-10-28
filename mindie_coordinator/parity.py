@@ -119,7 +119,8 @@ def materialize_fixed_sources(*, workspace_id: str, endpoint: dict, source_snaps
             if str(PurePosixPath(record.relpath) / child_path) not in seen:
                 raise ValueError('fixed source descriptor is missing a submodule')
     container = SshEndpoint(host=endpoint['host'], port=int(endpoint['port']), user=endpoint['user'],
-                            container=endpoint.get('container'))
+                            container=endpoint.get('container'), identity_file=endpoint.get('identity_file'),
+                            auth_ref=endpoint.get('auth_ref'))
     request = {'root': root, 'source_id': source_snapshot['id'],
                'carrier_ref': f'refs/parity/{workspace_id}/transport-carrier',
                'records': [{'relpath': row.relpath, 'commit': row.commit, 'tree': row.tree,
@@ -258,21 +259,25 @@ def git_push_url(container: SshEndpoint, mirror_path: str) -> str:
     if not container.container:
         return git_remote_url(container, mirror_path)
     path = validate_absolute_posix_path(mirror_path, label='mirror path')
-    prefix = ["ssh", "-T", "-p", str(container.port), "-o", "BatchMode=yes",
-              "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-              f"{container.user}@{container.host}", "docker", "exec", "-i",
-              container.container, "git", "receive-pack", path]
-    return 'ext::' + shlex.join(prefix)
+    from remote_dev.core.endpoint import Endpoint
+    from remote_dev.core.ssh_transport import ssh_launch
+
+    endpoint = Endpoint(host=container.host, port=container.port, user=container.user,
+                        identity_file=container.identity_file, auth_ref=container.auth_ref)
+    command = shlex.join(["docker", "exec", "-i", container.container, "git", "receive-pack", path])
+    prefix = ssh_launch(endpoint, command).argv
+    # git-remote-ext splits its own arguments; shell quotes are literal there.
+    return 'ext::' + ' '.join(token.replace('%', '%%').replace(' ', '% ') for token in prefix)
 
 def git_ssh_environment(container: SshEndpoint) -> dict[str, str]:
     from remote_dev.core.endpoint import Endpoint
-    from remote_dev.core.ssh_transport import ssh_base_cmd
+    from remote_dev.core.ssh_transport import ssh_launch
 
-    env = os.environ.copy()
+    plan = ssh_launch(Endpoint(host=container.host, port=container.port, user=container.user,
+                              identity_file=container.identity_file, auth_ref=container.auth_ref))
+    env = (plan.env or os.environ).copy()
     env['GIT_TERMINAL_PROMPT'] = '0'
-    cmd = list(
-        ssh_base_cmd(Endpoint(host=container.host, port=container.port, user=container.user))
-    )
+    cmd = list(plan.argv)
     # Git appends host and the remote git command. ssh_base_cmd already
     # includes `-- host`; keep the builder's options as the ssh prefix.
     if '--' in cmd:

@@ -70,6 +70,9 @@ def endpoint(value: dict[str, Any], *, container: bool = False) -> dict[str, Any
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.:-]*", host) or not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", user) or not 0 < port < 65536:
         raise ValueError("invalid endpoint")
     result = {"host": host, "port": port, "user": user}
+    for key in ("auth_ref", "identity_file"):
+        if value.get(key):
+            result[key] = str(value[key])
     if value.get("container"):
         result["container"] = str(value["container"])
     if container:
