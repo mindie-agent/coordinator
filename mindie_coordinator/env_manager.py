@@ -116,7 +116,7 @@ def _setup_access_if_requested(
         return None
     endpoint = resolve_endpoint({
         "host": host_ip, "user": user, "port": port, "root": "/", "cwd": "/",
-        **({"auth_ref": args["auth_ref"]} if args.get("auth_ref") else {}),
+        **{key: args[key] for key in ("auth_ref", "known_hosts_file") if args.get(key)},
     })
     return host_ops.setup_access(
         endpoint, password=password, password_env=password_env,
