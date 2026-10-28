@@ -31,8 +31,7 @@ def setup(monkeypatch, *, match=False, failure=None):
         return RemoteResult(TARGET, 0, '', '', {'success': True, 'free_port': 2201})
     calls = Mock(side_effect=remote)
     monkeypatch.setattr(provision.host_ops, 'run_remote_script', calls)
-    monkeypatch.setattr(provision.host_ops, 'find_public_key', lambda _: 'fixture-key')
-    monkeypatch.setattr(provision.host_ops, 'load_public_key', lambda _: 'ssh-ed25519 SECRET')
+    monkeypatch.setattr(provision.host_ops, "ensure_key", lambda _: ('fixture-key', 'ssh-ed25519 SECRET'))
     class AuthorityQueue:
         def request(self, target, payload):
             return {'status': 'reserved', 'port': 2201, 'reused': False}

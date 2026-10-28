@@ -62,6 +62,8 @@ def provision_user_container(
     machine_type: str | None = None,
     password: str | None = None,
     password_env: str | None = None,
+    auth_ref: str | None = None,
+    identity_file: str | None = None,
     machines: MachineDirectory | None = None,
     reserve_port=None,
     on_progress=None,
@@ -98,6 +100,10 @@ def provision_user_container(
         return result
 
     def remote(phase, target, script, *, require_payload=True, **options):
+        if (target.host, target.port, target.user) == (host, host_port, host_user):
+            for key in ("auth_ref", "identity_file"):
+                if authentication.get(key):
+                    options.setdefault(key, authentication[key])
         return measured(phase, lambda: host_ops.assert_remote_success(
             host_ops.run_remote_script(target, script, **options), require_payload=require_payload))
 
@@ -123,13 +129,14 @@ def provision_user_container(
                 "container_name": container_name,
                 "port": port,
             })
+    authentication = {key: value for key, value in
+                      (("auth_ref", auth_ref), ("identity_file", identity_file)) if value}
     if password is not None or password_env:
-        args = _namespace(
-            host=host, user=host_user, host_port=host_port, public_key_file=None,
-            password=password, password_env=password_env, password_stdin=False, print_command=False,
+        authentication = host_ops.setup_access(
+            host_ops.resolve_endpoint({"host": host, "port": host_port, "user": host_user,
+                                       **authentication}),
+            password=password, password_env=password_env, identity_file=identity_file,
         )
-        if host_ops.cmd_bootstrap_host_key(args) != 0:
-            raise host_ops.MachineManagementError("host key bootstrap failed")
     image_request = host_ops.image_request_payload(image, machine_type=machine_type)
     if ssh_port and image_request['policy'] == 'explicit' and len(image_request['candidates']) == 1:
         from mindie_coordinator.provision.existing_container import observe_existing
@@ -147,7 +154,8 @@ def provision_user_container(
                 if int(reserved.get('port') or chosen_port) != chosen_port:
                     raise host_ops.MachineManagementError('reserved SSH port differs from the verified existing listener')
             return {**_record_ready_container(host, image, user, host_user, host_port,
-                                             chosen_port, machine_type, machines, alias=alias),
+                                             chosen_port, machine_type, machines, alias=alias,
+                                             authentication=authentication),
                     'image_verification': existing}
     probe_payload = remote('host-probe',
         host_target,
@@ -170,8 +178,7 @@ def provision_user_container(
             raise host_ops.MachineManagementError("reserved SSH port differs from the requested fixed port")
     if chosen_port <= 0:
         raise host_ops.MachineManagementError("host did not reserve or offer a container SSH port")
-    key_path = host_ops.find_public_key(None)
-    public_key = host_ops.load_public_key(key_path)
+    container_identity, public_key = host_ops.ensure_key(authentication.get("identity_file"))
     remote('container-bootstrap',
         host_target,
         host_ops.render_bootstrap_host_script(),
@@ -198,22 +205,28 @@ def provision_user_container(
         stream_progress=False,
         reuse_connection=True,
         require_payload=True,
+        identity_file=container_identity,
     )
     return _record_ready_container(host, image, user, host_user, host_port,
-                                   chosen_port, machine_type, machines, alias=alias)
+                                   chosen_port, machine_type, machines, alias=alias,
+                                   authentication=authentication, container_identity=container_identity)
 
 
-def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines, alias=None):
+def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines,
+                            alias=None, authentication=None, container_identity=None):
     container = user_container_name(user)
     record = {
         "alias": alias or host,
-        "host": {"ip": host, "port": host_port, "user": host_user, "machine_type": machine_type},
+        "host": {"ip": host, "port": host_port, "user": host_user, "machine_type": machine_type,
+                 **{key: value for key, value in (authentication or {}).items()
+                    if key in {"auth_ref", "identity_file"} and value}},
         "container": {
             "name": container,
             "ssh_port": chosen_port,
             "user": "root",
             "workdir": DEFAULT_WORKDIR,
             "runtime_env_file": "/etc/profile.d/mindie-ascend-env.sh",
+            **({"identity_file": container_identity} if container_identity else {}),
         },
         "image": {"requested": image},
         "user": user,

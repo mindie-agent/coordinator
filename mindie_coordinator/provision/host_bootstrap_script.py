@@ -6,9 +6,8 @@ placeholders to produce the bash/Python script that creates, reuses, and
 configures a managed Ascend container on a host.
 
 [Invariants]
-- The rendered text is byte-identical to the original single-template renderer.
-- Only `__SENTINEL__`, `__PROGRESS__`, `__LOCAL_IMAGE_DISCOVERY_PY__`, and
-  `__LOCAL_IMAGE_DISCOVERY_POLICY__` are substituted.
+- Public-key installation uses the same remote-dev primitive as host onboarding.
+- Template placeholders are substituted literally without evaluating shell input.
 
 [Timeouts & Locks]
 - Rendering is pure; the outer bootstrap timeout is owned by `host_ops`
@@ -19,6 +18,8 @@ configures a managed Ascend container on a host.
 """
 
 from __future__ import annotations
+
+from remote_dev.auth import INSTALL_PUBLIC_KEY_SH
 
 from mindie_coordinator.provision._host_bootstrap_template_a import (
     _BOOTSTRAP_TEMPLATE_HEAD,
@@ -42,4 +43,5 @@ def render_bootstrap_host_script() -> str:
         .replace("__PROGRESS__", PROGRESS_SENTINEL)
         .replace("__LOCAL_IMAGE_DISCOVERY_PY__", LOCAL_IMAGE_DISCOVERY_PY)
         .replace("__LOCAL_IMAGE_DISCOVERY_POLICY__", IMAGE_POLICY_LOCAL_LATEST)
+        .replace("__INSTALL_PUBLIC_KEY_SH__", INSTALL_PUBLIC_KEY_SH)
     )

@@ -69,6 +69,8 @@ class SshEndpoint:
     port: int
     user: str
     container: str | None = None
+    identity_file: str | None = None
+    auth_ref: str | None = None
 
     def destination(self) -> str:
         return f'{self.user}@{self.host}'
@@ -172,9 +174,10 @@ def _remote_endpoint(endpoint: SshEndpoint, *, long_stream: bool = False):
 
     if long_stream:
         return Endpoint.for_long_stream(host=endpoint.host, port=endpoint.port, user=endpoint.user,
-                                         container=endpoint.container)
+                                         container=endpoint.container, identity_file=endpoint.identity_file,
+                                         auth_ref=endpoint.auth_ref)
     return Endpoint(host=endpoint.host, port=endpoint.port, user=endpoint.user,
-                    container=endpoint.container)
+                    container=endpoint.container, identity_file=endpoint.identity_file, auth_ref=endpoint.auth_ref)
 
 
 class RemoteCommandError(RuntimeError):

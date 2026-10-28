@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from remote_dev.core.errors import caller_error
+from remote_dev.core.endpoint import resolve_endpoint
 
 from mindie_coordinator.endpoint_bridge import (
     build_endpoints_document,
@@ -86,6 +87,8 @@ def _resolve_host_target(
         }
         if args.get("identity_file") or host_info.get("identity_file"):
             spec["identity_file"] = str(args.get("identity_file") or host_info["identity_file"])
+        if args.get("auth_ref") or host_info.get("auth_ref"):
+            spec["auth_ref"] = str(args.get("auth_ref") or host_info["auth_ref"])
         return alias, spec, rec
     except (MachineDirectoryUnavailable, MachineNotFoundError):
         if not target:
@@ -94,43 +97,42 @@ def _resolve_host_target(
             )
         # Allow direct ad-hoc host IP/hostname when explicitly provided
         spec = {
-            "host": target,
+            "host": str(args.get("host") or target).strip(),
             "port": int(args.get("port") or 22),
             "user": str(args.get("user") or "root").strip() or "root",
         }
         if args.get("identity_file"):
             spec["identity_file"] = str(args["identity_file"])
+        if args.get("auth_ref"):
+            spec["auth_ref"] = str(args["auth_ref"])
         return target, spec, None
 
 
-def _bootstrap_ssh_key_if_requested(
-    host_ip: str, user: str, port: int, args: Mapping[str, Any], *, require_password: bool = False,
-) -> str | None:
+def _setup_access_if_requested(
+    host_ip: str, user: str, port: int, args: Mapping[str, Any], *, required: bool = False,
+) -> dict[str, Any] | None:
     password, password_env = args.get("password"), args.get("password_env")
-    if not (require_password or args.get("bootstrap_key") or password is not None or password_env):
+    if not (required or args.get("bootstrap_key") or password is not None or password_env):
         return None
-    if password is None and not password_env:
-        msg = "mindie_hosts(action='bootstrap_key') requires `password` or `password_env`" if require_password else "bootstrap_key requires `password` or `password_env` holding the SSH password"
-        raise caller_error(msg)
-    ns = host_ops._namespace(
-        host=host_ip, user=user, host_port=port, public_key_file=args.get("public_key_file"),
-        password=str(password) if password is not None else None,
-        password_env=str(password_env) if password_env else None,
-        password_stdin=False, print_command=False,
+    endpoint = resolve_endpoint({
+        "host": host_ip, "user": user, "port": port, "root": "/", "cwd": "/",
+        **({"auth_ref": args["auth_ref"]} if args.get("auth_ref") else {}),
+    })
+    return host_ops.setup_access(
+        endpoint, password=password, password_env=password_env,
+        identity_file=args.get("identity_file") or args.get("public_key_file"),
+        install_key=bool(args.get("install_key", True)),
+        timeout_ms=int(args.get("timeout_ms") or 30000),
     )
-    resolved_password, _, _ = host_ops.read_password_value(ns)
-    if host_ops.cmd_bootstrap_host_key(ns) != 0:
-        raise RuntimeError(f"SSH key bootstrap failed for {user}@{host_ip}:{port}")
-    return resolved_password
 
 
 def _sync_host_to_npu_top(
-    *, host: str, port: int, user: str, alias: str, machine_type: str | None = None, password: str | None = None,
+    *, host: str, port: int, user: str, alias: str, machine_type: str | None = None, auth_ref: str | None = None,
 ) -> dict[str, Any]:
     tags = [str(machine_type).strip()] if machine_type else []
     try:
         return NpuTopObservationClient().register_host(
-            host=host, port=port, username=user, name=alias, tags=tags, password=password,
+            host=host, port=port, username=user, name=alias, tags=tags, auth_ref=auth_ref,
         )
     except ValueError as exc:
         return {"source": "npu-top", "status": "unavailable", "error": str(exc)}
@@ -193,13 +195,18 @@ def handle_hosts(
             except (MachineDirectoryUnavailable, MachineNotFoundError):
                 continue
 
-        resolved_password = _bootstrap_ssh_key_if_requested(host_ip, user, port, args)
+        authentication = _setup_access_if_requested(host_ip, user, port, args)
 
         host_entry: dict[str, Any] = {**(existing_rec.get("host") or {}), "ip": host_ip, "port": port, "user": user}
         if machine_type:
             host_entry["machine_type"] = machine_type
         if args.get("identity_file"):
             host_entry["identity_file"] = str(args["identity_file"])
+        if args.get("auth_ref"):
+            host_entry["auth_ref"] = str(args["auth_ref"])
+        if authentication:
+            host_entry.update({key: authentication[key] for key in ("auth_ref", "identity_file")
+                               if authentication.get(key)})
         if args.get("workdir"):
             host_entry["workdir"] = str(args["workdir"])
 
@@ -253,11 +260,12 @@ def handle_hosts(
             user=user,
             alias=alias,
             machine_type=host_entry.get("machine_type"),
-            password=resolved_password,
+            auth_ref=host_entry.get("auth_ref"),
         )
         return {
             "state": "ready", "action": "upsert", "alias": alias, "record": record, "probe": probe_summary,
             "npu_top_sync": npu_top_sync,
+            **({"authentication": authentication} if authentication else {}),
             "inventory_path": str(inv_path), "endpoints_file": str(endpoints_file_path(inv_path.parent)),
             "default_alias": endpoints_doc.get("default_alias"), "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
@@ -286,22 +294,26 @@ def handle_hosts(
 
     if action == "bootstrap_key":
         alias, host_spec, rec = _resolve_host_target(args, store)
-        resolved_password = _bootstrap_ssh_key_if_requested(
-            host_spec["host"], host_spec["user"], host_spec["port"], args, require_password=True,
+        authentication = _setup_access_if_requested(
+            host_spec["host"], host_spec["user"], host_spec["port"],
+            {**host_spec, **args}, required=True,
         )
         base_rec = rec if rec is not None else {"alias": alias, "host": {}}
         updated_rec = {
             **base_rec, "alias": alias,
-            "host": {**(base_rec.get("host") or {}), "ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]},
+            "host": {**(base_rec.get("host") or {}), "ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"],
+                     **{key: authentication[key] for key in ("auth_ref", "identity_file") if authentication.get(key)}},
         }
         inv_path = store.upsert_machine(updated_rec, set_default=bool(args.get("set_default")))
         npu_top_sync = _sync_host_to_npu_top(
             host=host_spec["host"], port=host_spec["port"], user=host_spec["user"],
-            alias=alias, machine_type=(updated_rec.get("host") or {}).get("machine_type"), password=resolved_password,
+            alias=alias, machine_type=(updated_rec.get("host") or {}).get("machine_type"),
+            auth_ref=authentication["auth_ref"],
         )
         return {
             "state": "ready", "action": "bootstrap_key", "alias": alias, "host": host_spec["host"],
             "port": host_spec["port"], "user": host_spec["user"], "inventory_path": str(inv_path), "npu_top_sync": npu_top_sync,
+            "authentication": authentication,
         }
 
     if action == "mesh":
@@ -431,6 +443,10 @@ def handle_container(
             container_entry["runtime_env_file"] = str(args.get("runtime_env_file") or args.get("env_file")).strip()
         if args.get("runtime_env") is not None:
             container_entry["runtime_env"] = bool(args["runtime_env"])
+        if args.get("container_auth_ref"):
+            container_entry["auth_ref"] = str(args["container_auth_ref"])
+        if args.get("container_identity_file"):
+            container_entry["identity_file"] = str(args["container_identity_file"])
 
         base_rec = rec if rec is not None else {"alias": alias, "host": {"ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]}}
         if container_name and (runner is not None or bool(args.get("discover")) or str(args.get("probe") or "").lower() in {"1", "true"}):
@@ -447,7 +463,8 @@ def handle_container(
                     container_entry["mode"] = "ssh"
         updated_rec = {
             **base_rec, "alias": alias,
-            "host": {**(base_rec.get("host") or {}), "ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"]},
+            "host": {**(base_rec.get("host") or {}), "ip": host_spec["host"], "port": host_spec["port"], "user": host_spec["user"],
+                     **{key: host_spec[key] for key in ("auth_ref", "identity_file") if host_spec.get(key)}},
             "container": container_entry,
         }
         inv_path = store.upsert_machine(updated_rec, set_default=bool(args.get("set_default")))
@@ -482,6 +499,8 @@ def handle_container(
             machine_type=machine_type,
             password=args.get("password"),
             password_env=args.get("password_env"),
+            auth_ref=host_spec.get("auth_ref"),
+            identity_file=host_spec.get("identity_file"),
             machines=store, reserve_port=_reserve_port, alias=alias,
         )
         if args.get("set_default"):

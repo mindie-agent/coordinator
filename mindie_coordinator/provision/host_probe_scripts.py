@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 
+from remote_dev.auth import INSTALL_PUBLIC_KEY_SH
+
 from mindie_coordinator.provision.image_resolver import (
     IMAGE_POLICY_LOCAL_LATEST,
     LOCAL_IMAGE_DISCOVERY_PY,
@@ -625,13 +627,9 @@ set -euo pipefail
 peer_key="$1"
 peer_host="$2"
 peer_port="$3"
-install -d -m 700 /root/.ssh
-[ -f /root/.ssh/authorized_keys ] || touch /root/.ssh/authorized_keys
+__INSTALL_PUBLIC_KEY_SH__
+remote_dev_install_public_key "$peer_key" /root/.ssh
 [ -f /root/.ssh/known_hosts ] || touch /root/.ssh/known_hosts
-if ! grep -qxF "$peer_key" /root/.ssh/authorized_keys 2>/dev/null; then
-  printf '%s\n' "$peer_key" >> /root/.ssh/authorized_keys
-fi
-chmod 600 /root/.ssh/authorized_keys
 ssh-keyscan -p "$peer_port" "$peer_host" >> /root/.ssh/known_hosts 2>/dev/null || true
 python3 - <<'PY' "$peer_host" "$peer_port" "$peer_key"
 import json
@@ -646,7 +644,8 @@ print("__SENTINEL__" + json.dumps({
 }, ensure_ascii=False))
 PY
 """
-    return template.replace("__SENTINEL__", SENTINEL)
+    return (template.replace("__SENTINEL__", SENTINEL)
+            .replace("__INSTALL_PUBLIC_KEY_SH__", INSTALL_PUBLIC_KEY_SH))
 
 
 def render_remove_container_host_script() -> str:

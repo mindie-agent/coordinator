@@ -125,6 +125,7 @@ def _default_ssh_runner(host_spec: Mapping[str, Any], script: str, timeout_ms: i
             "user": str(host_spec.get("user") or "root"),
             "root": "/",
             "cwd": "/",
+            **({"auth_ref": host_spec["auth_ref"]} if host_spec.get("auth_ref") else {}),
             **(
                 {"identity_file": str(host_spec["identity_file"])}
                 if host_spec.get("identity_file")
@@ -239,6 +240,7 @@ def probe_machine_record(
         "port": port,
         "user": user,
         **({"identity_file": host_info["identity_file"]} if host_info.get("identity_file") else {}),
+        **({"auth_ref": host_info["auth_ref"]} if host_info.get("auth_ref") else {}),
     }
     try:
         raw_output = exec_runner(host_spec, REMOTE_FLEET_PROBE_SCRIPT)

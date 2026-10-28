@@ -170,8 +170,7 @@ def test_uncertain_read_returns_to_original_non_replacing_provision(monkeypatch)
                               RemoteResult(TARGET, 0, '', '', {'success': True}),
                               RemoteResult(TARGET, 0, '', '', {'success': True})])
     monkeypatch.setattr(provision.host_ops, 'run_remote_script', remote)
-    monkeypatch.setattr(provision.host_ops, 'find_public_key', lambda _: 'unused')
-    monkeypatch.setattr(provision.host_ops, 'load_public_key', lambda _: 'ssh-ed25519 test')
+    monkeypatch.setattr(provision.host_ops, "ensure_key", lambda _: ('unused', 'ssh-ed25519 test'))
     result = provision.provision_user_container(host=TARGET.host, image=IMAGE, user='alice',
                                                ssh_port=2201, machines=Mock(),
                                                reserve_port=Mock(return_value={'port': 2201}))

@@ -400,8 +400,7 @@ def test_existing_container_image_mismatch_cannot_be_relabelled_as_requested_ima
                      "error": "existing container image does not match the requested selector"}),
     ])
     monkeypatch.setattr(provision.host_ops, "run_remote_script", remote)
-    monkeypatch.setattr(provision.host_ops, "find_public_key", lambda _: "unused-fixture-key")
-    monkeypatch.setattr(provision.host_ops, "load_public_key", lambda _: "ssh-ed25519 test")
+    monkeypatch.setattr(provision.host_ops, "ensure_key", lambda _: ("unused-fixture-key", "ssh-ed25519 test"))
     with pytest.raises(MachineManagementError, match="existing container image does not match"):
         service._ensure_user_container("alice", {"image": "registry.example/ascend:new"}, {}, set())
     assert record["image"]["requested"] == "registry.example/ascend:old"

@@ -41,6 +41,10 @@ def local_top():
     state = {"requests": [], "responses": {}, "statuses": {}}
 
     class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            state.setdefault("posted", []).append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.do_GET()
+
         def do_GET(self):  # noqa: N802
             parsed = urlparse(self.path)
             state["requests"].append(parsed)
@@ -397,53 +401,52 @@ def test_checkpoint_preflight_detects_unquantized_experts_truncation_and_unalign
     }
 
 
-def test_register_host_posts_to_npu_top_and_surfaces_outage_visibly():
-    requests_seen = []
-
-    class FakeResponse:
-        def __init__(self, body: dict):
-            self._raw = json.dumps(body).encode("utf-8")
-
-        def read(self, _limit=None):
-            return self._raw
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-    class FakeOpener:
-        def __init__(self, fail: bool = False):
-            self.fail = fail
-
-        def open(self, request, timeout=None):
-            requests_seen.append((request.full_url, request.get_method(), json.loads(request.data.decode("utf-8")), timeout))
-            if self.fail:
-                raise OSError("connection refused")
-            return FakeResponse({
-                "created": [{"id": 1, "name": "a3-165", "host": "192.168.13.165", "port": 22, "username": "root"}],
-                "errors": [],
-                "auth": {"ready": 1, "failed": 0},
-            })
-
-    client = NpuTopObservationClient("http://127.0.0.1:8788", opener=FakeOpener())
-    ok = client.register_host(
+@pytest.mark.parametrize("auth,failure,status", [
+    ({"ok": True, "state": "ready", "auth_ref": "shared-host-profile"}, None, "registered"),
+    ({"ok": False, "state": "not_ready", "category": "credential_unavailable",
+      "error": "shared credential reference was not found"}, None, "partial"),
+    ({"ok": True, "state": "ready", "auth_ref": "shared-host-profile"},
+     {"stage": "record_auth_ref", "error_type": "OperationalError",
+      "error": "database is locked", "diagnostic_ref": "test-diagnostic"}, "partial"),
+])
+def test_register_host_preserves_real_multistatus_receipts(local_top, auth, failure, status):
+    url, state = local_top
+    server = {"id": "server-1", "name": "a3-165", "host": "192.168.13.165",
+              "port": 22, "username": "root"}
+    receipt = {"input_index": 0, "server": server, "registration": "completed", "auth": auth,
+               **({"failure": failure} if failure else {})}
+    state["responses"]["/api/servers/batch"] = {"results": [receipt]}
+    state["statuses"]["/api/servers/batch"] = 207
+    client = NpuTopObservationClient(url)
+    result = client.register_host(
         host="192.168.13.165",
         port=22,
         username="root",
         name="a3-165",
         tags=["A3"],
-        password="secret",
+        auth_ref="shared-host-profile",
     )
-    assert ok["status"] == "registered"
-    assert ok["server"]["host"] == "192.168.13.165"
-    assert requests_seen[0][0] == "http://127.0.0.1:8788/api/servers/batch"
-    assert requests_seen[0][1] == "POST"
-    assert requests_seen[0][2]["passwords"] == ["secret"]
-    assert requests_seen[0][2]["sync_coordinator"] is False
+    assert result["status"] == status
+    assert result["registration"] == "completed"
+    assert result["server"] == server
+    assert result["auth"] == auth
+    assert result.get("failure") == failure
+    if failure:
+        assert failure in result["errors"]
+    if not auth["ok"]:
+        assert result["errors"][0]["error"] == auth["error"]
+    assert state["requests"][0].path == "/api/servers/batch"
+    assert state["posted"][0]["servers"][0]["auth_ref"] == "shared-host-profile"
+    assert "passwords" not in state["posted"][0]
+    assert state["posted"][0]["sync_coordinator"] is False
 
-    offline_client = NpuTopObservationClient("http://127.0.0.1:8788", opener=FakeOpener(fail=True))
+
+def test_register_host_surfaces_outage_visibly():
+    class OfflineOpener:
+        def open(self, request, timeout=None):
+            raise OSError("connection refused")
+
+    offline_client = NpuTopObservationClient("http://127.0.0.1:8788", opener=OfflineOpener())
     outage = offline_client.register_host(host="192.168.13.165", port=22, username="root")
     assert outage["status"] == "unavailable"
     assert "connection refused" in outage["error"]

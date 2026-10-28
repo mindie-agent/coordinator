@@ -160,8 +160,7 @@ def test_provision_uses_configured_user_with_shared_root_transport(tmp_path, mon
     monkeypatch.setattr(provision.host_ops, "run_remote_script", calls)
     monkeypatch.setattr(provision.host_ops, "assert_remote_success",
                         Mock(side_effect=[{"free_port": 2222}, {}, {}]))
-    monkeypatch.setattr(provision.host_ops, "find_public_key", lambda _: tmp_path / "key.pub")
-    monkeypatch.setattr(provision.host_ops, "load_public_key", lambda _: "ssh-ed25519 test")
+    monkeypatch.setattr(provision.host_ops, "ensure_key", lambda _: (tmp_path / "key.pub", "ssh-ed25519 test"))
     # Keep release selection and image payload construction real, without public HTTP.
     monkeypatch.setattr(provision.host_ops, "fetch_release_catalog", lambda **_: [
         {"tag_name": "v0.13.0", "draft": False, "prerelease": False},

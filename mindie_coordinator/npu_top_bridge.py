@@ -179,10 +179,10 @@ class NpuTopObservationClient:
         username: str = "root",
         name: str | None = None,
         tags: list[str] | None = None,
-        password: str | None = None,
+        auth_ref: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Synchronize an onboarded host (and optional in-memory bootstrap password) to `npu-top`."""
+        """Register a host with a reference to the shared remote-dev auth store."""
         clean_host = str(host or "").strip()
         if not clean_host:
             raise ValueError("host must be a nonempty string")
@@ -194,16 +194,16 @@ class NpuTopObservationClient:
                     "port": int(port),
                     "username": str(username or "root").strip() or "root",
                     "tags": [str(tag).strip() for tag in (tags or []) if str(tag).strip()],
+                    **({"auth_ref": auth_ref} if auth_ref else {}),
                 }
             ],
-            "passwords": [password] if password else [],
             "sync_coordinator": False,
         }
         try:
             payload = self._post(
                 SERVERS_BATCH_PATH,
                 body,
-                timeout=timeout or (DEFAULT_REGISTER_TIMEOUT if password else 0.25),
+                timeout=timeout or (DEFAULT_REGISTER_TIMEOUT if auth_ref else 0.25),
             )
         except NpuTopUnavailable as exc:
             return {
@@ -212,14 +212,27 @@ class NpuTopObservationClient:
                 "error": str(exc),
                 "http_status": exc.status,
             }
-        created = payload.get("created") or []
-        errors = payload.get("errors") or []
+        receipts = payload.get("results") or []
+        receipt = next((row for row in receipts if row.get("input_index") == 0), None)
+        if receipt is None:
+            return {"source": "npu-top", "status": "failed", "server": None,
+                    "errors": [{"error": "npu-top returned no registration receipt for the host"}]}
+        registration = receipt["registration"]
+        auth = receipt["auth"]
+        failure = receipt.get("failure")
+        complete = registration == "completed"
+        errors = [failure] if failure else []
+        if not auth.get("ok"):
+            errors.append({"stage": "bootstrap", "state": auth.get("state"), "error": auth.get("error")})
         return {
             "source": "npu-top",
-            "status": "registered" if created and not errors else ("partial" if created else "failed"),
-            "server": created[0] if created else None,
-            "auth": payload.get("auth") or {},
+            "status": ("registered" if not errors else "partial") if complete else (
+                "unknown" if registration == "unknown" else "failed"),
+            "registration": registration,
+            "server": receipt["server"],
+            "auth": auth,
             "errors": errors,
+            **({"failure": failure} if failure else {}),
         }
 
     def capacity(self, *, min_idle_npus: int = 1, max_age_seconds: int = 300,
