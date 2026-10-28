@@ -8,7 +8,9 @@ coordinator 不再维护自己的 askpass、密码传递或公钥安装实现。
 
 与 npu-top 的同步读取实际 HTTP 207 逐台回执。认证尚未就绪或本地引用记录失败会明确报告为部分成功，同时保留已完成的主机登记事实。已有公钥及清单元数据继续保留，普通远端操作不会因认证恢复而被重放。
 
-本组件锁定 remote-dev 0.11.0 正式 Release 的完整 Git 提交 `153813703a3cc64c695dd8e5f19e8a173e144dda`，并继续固定 mindie-diagnostics 0.5.4（`5ae643e19223f2181ecdbaa3edaf464137c4805e`）。发布流水线校验安装来源、正式依赖 Release、源码与 Tag 对齐，并随包提供 benchmark 报告。
+本组件锁定 remote-dev 0.11.1 正式 Release 的完整 Git 提交 `2a750ec8c74d7f053410d48dd820aeb542e7d3b1`，并继续固定 mindie-diagnostics 0.5.4（`5ae643e19223f2181ecdbaa3edaf464137c4805e`）。发布流水线校验安装来源、正式依赖 Release、源码与 Tag 对齐，并随包提供 benchmark 报告。
+
+remote-dev 0.11.1 补齐 Git for Windows 2.56 的 `ucrt64/bin` 路径识别，使 Git Bash 启动的 Python 与 PowerShell 一样能找到同一安装目录内的 SSH。
 
 共享认证已通过三平台真实 SSH 验收：macOS 的安装后三组件 wheel 与 Kimi 候选共 7 项通过（34.58 秒）；原生 Windows PowerShell 4 项通过（14.186 秒），真实 WSL2 Ubuntu 24.04 4 项通过（12.694 秒），后两者均无失败或跳过。[验收运行 40774308378](https://github.com/mindie-agent/remote-dev/actions/runs/40774308378) 使用与 remote-dev 候选 `a7564f49b1ff106e59f72961c851b7b11eb81130` 相同的源码树。
 
