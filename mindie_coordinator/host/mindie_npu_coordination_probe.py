@@ -7,7 +7,7 @@ helpers used by the state, lease, and public coordination modules.
 
 [Invariants]
 - Physical NPU identity comes from `npu-smi` device/chip tables, never guessed.
-- A5 static HBM reservation is not workload occupancy; process rows decide.
+- A5 busy state comes from process rows; measured HBM usage remains capacity evidence.
 - Probe helpers never reclaim a lease; `busy=None` means unobserved.
 
 [Timeouts & Locks]
@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _DIAGNOSTIC_PHASES = ContextVar("host_diagnostic_phases", default=None)
 _DIAGNOSTIC_PROCESS = uuid.uuid4().hex
 
@@ -65,52 +65,10 @@ DEFAULT_ESTIMATED_DURATION_SECONDS = 3600
 DEFAULT_MAX_COMPILE_SLOTS = 4
 
 
-COMPILE_WORKER_MEMORY_MB = 2048
-
-
-def _cgroup_cpu_cores() -> int:
-    """CPU budget from the cgroup quota, scheduler affinity, then os.cpu_count."""
-    try:
-        fields = Path("/sys/fs/cgroup/cpu.max").read_text(encoding="utf-8").split()
-        if len(fields) >= 2 and fields[0] != "max":
-            quota, period = int(fields[0]), int(fields[1])
-            if quota > 0 and period > 0:
-                return max(1, quota // period)
-    except TimeoutError:
-        raise
-    except (OSError, ValueError):
-        pass
-    try:
-        return max(1, len(os.sched_getaffinity(0)))
-    except TimeoutError:
-        raise
-    except (AttributeError, OSError):
-        return max(1, os.cpu_count() or 1)
-
-
-def _available_memory_mb() -> int | None:
-    """Linux MemAvailable in MiB, or None when /proc/meminfo is unavailable."""
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-            if line.startswith("MemAvailable:"):
-                fields = line.split()
-                if len(fields) >= 2:
-                    return int(fields[1]) // 1024
-                break
-    except TimeoutError:
-        raise
-    except (OSError, ValueError):
-        pass
-    return None
-
-
-def host_worker_cap() -> int:
-    """Compile-slot cap from both CPU budget and ~2 GiB per worker of RAM."""
-    cpu_workers = _cgroup_cpu_cores()
-    available_mb = _available_memory_mb()
-    if available_mb is None:
-        return cpu_workers
-    return max(1, min(cpu_workers, available_mb // COMPILE_WORKER_MEMORY_MB))
+from .mindie_npu_coordination_resources import (
+    COMPILE_WORKER_MEMORY_MB, _available_memory_mb, _cgroup_cpu_cores, host_worker_cap,
+    compile_slot_budget, hbm_eligible_devices,
+)
 
 
 _AUTHORITY_MODULE = ".".join(("mindie_coordinator", "host", "mindie_npu_coordination"))
@@ -493,11 +451,10 @@ def _parse_npu_smi_device_table(
             chip_devices[(current_npu, chip_id)] = dev_id
             dev_ids.add(dev_id)
             single_id_details.add(dev_id)
-            # Every otherwise-idle A5 card reports a static ~4.7 GiB HBM
-            # reservation.  Counting that baseline as workload usage would
-            # mark all cards busy at HBM_BUSY_THRESHOLD_MB, so A5 occupancy
-            # comes from its process table while capacity is retained.
-            hbm[dev_id] = {"used_mb": 0, "total_mb": int(metrics.group("hbm_total"))}
+            # HBM remains measured even when the process table reports idle;
+            # these observations do not identify the source of existing usage.
+            hbm[dev_id] = {"used_mb": int(metrics.group("hbm_used")),
+                           "total_mb": int(metrics.group("hbm_total"))}
             continue
         if (len(cells) >= 3 and cells[0].isdigit() and cells[1]
                 and not cells[1].isdigit() and ":" not in cells[1]):
@@ -621,7 +578,7 @@ def parse_npu_smi_info(output: str) -> dict[str, Any]:
     for device in sorted(dev_ids):
         reasons = list(process_busy.get(device, []))
         usage = hbm.get(device)
-        if usage and usage["used_mb"] >= HBM_BUSY_THRESHOLD_MB and not reasons:
+        if usage and usage["used_mb"] >= HBM_BUSY_THRESHOLD_MB and not reasons and not single_id_layout:
             reasons.append(
                 {
                     "kind": "hbm_threshold",

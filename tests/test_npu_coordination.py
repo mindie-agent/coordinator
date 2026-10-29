@@ -645,9 +645,10 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(parsed["busy"], {})
         self.assertEqual(parsed["busy_devices"], [])
         self.assertEqual(parsed["active_pids"], [])
-        # A5's static ~4.7 GiB HBM reservation is not workload occupancy.
+        # Idle is independent from the measured used HBM in this capture.
         self.assertEqual(parse_npu_smi_hbm(output), {
-            device: {"used_mb": 0, "total_mb": 98304} for device in range(8)
+            device: {"used_mb": used, "total_mb": 98304}
+            for device, used in enumerate((4761, 4756, 4758, 4758, 4756, 4757, 4756, 4760))
         })
         dev_ids, _hbm, chip_devices, layout_error = _parse_npu_smi_device_table(output)
         self.assertEqual(dev_ids, set(range(8)))

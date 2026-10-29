@@ -406,3 +406,28 @@ def test_first_run_reports_the_configured_hosts_actual_hardware_gap(tmp_path):
     assert reply["state"] == "waiting_for_runtime"
     assert "memory_mb needs 786432, 150000 available" in reply["reason"]
     assert not any(action == "submit" for _host, action in backend.calls)
+
+
+def test_task_client_per_die_request_reaches_actual_host_grant(tmp_path):
+    from mindie_coordinator.host.mindie_npu_coordination import parse_npu_smi_info
+    capture = FIXTURES / 'a3-192-168-13-165-idle.txt'
+    snapshot = _host_snapshot(capture, cores=192, mem_total_mb=1031168, mem_avail_mb=900096)
+    client, backend = _hardware_client(tmp_path)
+    backend.hbm = parse_npu_smi_info(capture.read_text())['hbm']
+    admissions, grants = [], []
+    original = backend.host
+    def observed_host(runtime, request):
+        reply = original(runtime, request)
+        if request['action'].startswith('submit'):
+            admissions.append((request, reply))
+        if reply.get('task', {}).get('state') == 'granted':
+            grants.append(reply['task'])
+        return reply
+    with (mock.patch.object(client.coordinator, '_probe_host_record', return_value=snapshot),
+          mock.patch.object(backend, 'host', side_effect=observed_host)):
+        reply = client.run('true', sources={}, resources={'npu_count': 1, 'per_die_hbm_mb': 62500})
+    assert reply['state'] == 'running', reply
+    assert len(admissions) == 1
+    request, _ = admissions[0]
+    assert request['per_die_hbm_mb'] == 62500
+    assert grants[0]['granted_devices'] == [1]

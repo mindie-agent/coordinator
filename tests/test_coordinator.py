@@ -149,7 +149,9 @@ class Backend:
         host = runtime["host_endpoint"]["host"]
         state = Path(self.state) / host.replace(".", "_")
         state.mkdir(parents=True, exist_ok=True)
-        with self.protocol_lock, mock.patch("mindie_npu_coordination.process_guard_busy", side_effect=guarded):
+        with (self.protocol_lock, mock.patch("mindie_npu_coordination.process_guard_busy", side_effect=guarded),
+              mock.patch.object(host_protocol, "_cgroup_cpu_cores", return_value=16),
+              mock.patch.object(host_protocol, "_available_memory_mb", return_value=32768)):
             result = handle_request({**request, "state_dir": str(state), "interval_seconds": 0.001},
                                     clock=self.clock,
                                     probe=lambda: {"status": "ok", "devices": [0, 1],

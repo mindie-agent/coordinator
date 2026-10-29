@@ -523,6 +523,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                                   "devices": role.get("devices") or [],
                                   "host": role.get("host"),
                                   "service_port": role.get("service_port"),
+                                  **({"per_die_hbm_mb": role["per_die_hbm_mb"]} if role.get("per_die_hbm_mb") else {}),
                                   **({"allow_external_busy": True} if role.get("allow_external_busy") else {}),
                                   "env": dict(role.get("env") or {})})
                 prepared_snapshots = placed.get("snapshots") or {}
@@ -608,6 +609,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                 native_cache_receipt=(row.get("native_cache_receipts") or {}).get(role["name"]),
                 proof_path=(role.get("proof_path") or (row.get("spec") or {}).get("proof_path")),
                 source_snapshot=spec.get("source_snapshot"),
+                **({"per_die_hbm_mb": role["per_die_hbm_mb"]} if role.get("per_die_hbm_mb") else {}),
                 **({"allow_external_busy": True} if role.get("allow_external_busy") else {}),
             )
             with self._lock_for("progress", row["id"]):

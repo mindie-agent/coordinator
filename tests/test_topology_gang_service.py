@@ -330,9 +330,9 @@ class GangBackend:
         host = runtime["host_endpoint"]["host"]
         state = self.state / host.replace(".", "_")
         state.mkdir(parents=True, exist_ok=True)
-        with self.protocol_lock, mock.patch.object(
-            host_protocol, "process_guard_busy", side_effect=guarded
-        ):
+        with (self.protocol_lock, mock.patch.object(host_protocol, "process_guard_busy", side_effect=guarded),
+              mock.patch.object(host_protocol, "_cgroup_cpu_cores", return_value=16),
+              mock.patch.object(host_protocol, "_available_memory_mb", return_value=32768)):
             return handle_request(
                 {
                     **request,
@@ -343,6 +343,7 @@ class GangBackend:
                 probe=lambda: {
                     "status": "ok",
                     "devices": list(self.devices),
+                    "hbm": getattr(self, "hbm", {}),
                     "busy": {str(device): ["test worker"] for device in self.busy},
                 },
                 device_probe=lambda device: {

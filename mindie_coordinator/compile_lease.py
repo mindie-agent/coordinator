@@ -72,13 +72,14 @@ def finish_compile_lease(record, save, *, request=None, cleanup=None):
 
 
 class CompileLease:
-    def __init__(self, host_endpoint, container_name, request, *, queue_seconds=1800, cleanup=None):
+    def __init__(self, host_endpoint, container_name, request, *, queue_seconds=1800, cleanup=None, per_worker_memory_mb=2048):
         self.host_endpoint = dict(host_endpoint)
         self.container_name = container_name
         self.request = request
         self.queue_seconds = queue_seconds
         self.cleanup = cleanup
         self.renewed_at = 0.0
+        self.per_worker_memory_mb = per_worker_memory_mb
 
     def acquire(self, record, save, cancelled):
         from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
@@ -97,6 +98,7 @@ class CompileLease:
                 "action": "submit-acquire-preflight", "task_id": lease["task_id"],
                 "coordination_epoch": lease["coordination_epoch"], "agent_id": "compiler-" + record["job_id"],
                 "container_name": self.container_name, "npu_count": 0,
+                "per_worker_memory_mb": self.per_worker_memory_mb,
                 "queue_ttl_seconds": self.queue_seconds, "estimated_duration_seconds": 7200,
             })
             while True:
@@ -110,6 +112,9 @@ class CompileLease:
                     finish_compile_lease(record, save, request=self.request, cleanup=self.cleanup)
                     raise PreparationCancelled("cancelled while waiting for CPU compilation capacity")
                 if task["state"] == "starting":
+                    lease["compile_budget"] = task.get("compile_budget") or {
+                        "status": "unavailable", "reason": "host did not provide a per-slot compile budget"}
+                    save(record)
                     return
                 if task["state"] in TERMINAL:
                     record.update(state="cancelled", quiet=True)

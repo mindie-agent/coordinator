@@ -449,15 +449,15 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
     def request_run(self, owner: str, binding_id: str, request_id: str, snapshots: dict[str, str],
                     expected_build_key: str, devices: list[int], npu_count: int,
                     priority: int = 0, queue_seconds: int = 1800, service_port: int | None = None,
-                    allow_external_busy: bool = False):
+                    allow_external_busy: bool = False, per_die_hbm_mb: int = 0):
         return self._request_run(owner, binding_id, request_id, snapshots, expected_build_key,
                                  devices, npu_count, priority, queue_seconds, service_port,
-                                 allow_external_busy=allow_external_busy)
+                                 allow_external_busy=allow_external_busy, per_die_hbm_mb=per_die_hbm_mb)
 
     def _request_run(self, owner: str, binding_id: str, request_id: str, snapshots: dict[str, str],
                      expected_build_key: str, devices: list[int], npu_count: int,
                      priority: int = 0, queue_seconds: int = 1800, service_port: int | None = None,
-                     allow_external_busy: bool = False, *, check_remote=True, _managed=False):
+                     allow_external_busy: bool = False, per_die_hbm_mb: int = 0, *, check_remote=True, _managed=False):
         try:
             safe_id(request_id)
         except ValueError as exc:
@@ -466,6 +466,8 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                 or (devices and npu_count) or any(type(d) is not int or d < 0 for d in devices)
                 or len(set(devices)) != len(devices)):
             raise ExecutionRequestError("supply distinct physical devices or a nonnegative npu_count")
+        if type(per_die_hbm_mb) is not int or per_die_hbm_mb < 0:
+            raise ExecutionRequestError("per_die_hbm_mb must be a nonnegative integer")
         if not 1 <= queue_seconds <= 86400:
             raise ExecutionRequestError("queue_seconds must be between 1 and 86400")
         if service_port is not None and (type(service_port) is not int or service_port < 0):
@@ -481,6 +483,8 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
         intent = {"snapshots": snapshots, "build_key": expected_build_key, "devices": devices,
                   "npu_count": npu_count, "priority": priority, "queue_seconds": queue_seconds,
                   "service_port": service_port}
+        if per_die_hbm_mb:
+            intent["per_die_hbm_mb"] = per_die_hbm_mb
         if allow_external_busy:
             intent["allow_external_busy"] = True
         with self._entity_lock("binding", binding_id):
@@ -613,6 +617,8 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                               "priority": intent["priority"], "latest_start": run["deadline"],
                               "estimated_duration_seconds": 1800}
                     submit.update({"devices": intent["devices"]} if intent["devices"] else {"npu_count": intent["npu_count"]})
+                    if intent.get("per_die_hbm_mb"):
+                        submit["per_die_hbm_mb"] = intent["per_die_hbm_mb"]
                     if intent.get("allow_external_busy"):
                         submit["allow_external_busy"] = True
                     if intent.get("service_port") is not None:

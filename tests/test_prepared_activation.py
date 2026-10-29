@@ -75,7 +75,7 @@ def test_guard_must_match_receipt_and_its_boot(supervisor):
 
 
 @pytest.fixture
-def authority(tmp_path, monkeypatch):
+def authority(tmp_path, monkeypatch, host_compile_capacity):
     clock = [1000.0]
     coordinator = host.NpuCoordinator(tmp_path / "authority", clock=lambda: clock[0])
     coordinator.submit({"task_id": "cpu-task", "agent_id": "owner", "npu_count": 0})

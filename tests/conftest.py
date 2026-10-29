@@ -32,3 +32,11 @@ def native_extension():
     }[sys.platform]
     module = importlib.import_module("psutil." + module_name)
     return module_name, Path(module.__file__)
+
+
+@pytest.fixture
+def host_compile_capacity(monkeypatch):
+    """Queue contracts use an explicit host size, independent of developer load."""
+    from mindie_coordinator.host import mindie_npu_coordination as authority
+    monkeypatch.setattr(authority, '_cgroup_cpu_cores', lambda: 16)
+    monkeypatch.setattr(authority, '_available_memory_mb', lambda: 32768)

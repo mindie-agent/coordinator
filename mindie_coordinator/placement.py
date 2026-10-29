@@ -34,14 +34,14 @@ from mindie_coordinator.topology_gang import (
 SUPPORTED_RECIPES = {"rc", "main", "stable", "local-latest"}
 RESERVED_ENV = {"ASCEND_RT_VISIBLE_DEVICES", "MINDIE_SERVICE_PORT", "MINDIE_PYTHON", "MINDIE_RUN_ID", "MINDIE_EXECUTION_OBSERVATION"}
 ENVIRONMENT_KEYS = {"recipe", "image", "python_abi", "cann", "soc", "machine_type", "container_name"}
-RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb"}
-HARDWARE_KEYS = ("cpu_cores", "memory_mb", "hbm_mb")
+RESOURCE_KEYS = {"devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb", "per_die_hbm_mb"}
+HARDWARE_KEYS = ("cpu_cores", "memory_mb", "hbm_mb", "per_die_hbm_mb")
 TOPOLOGY_GANG_KEYS = {
     "scale", "die_count", "placement_policy", "prefill_die_count",
     "decode_die_count", "node_count", "visible_phy_ids",
 }
 TOPOLOGY_KEYS = {"host", "roles", "distinct_hosts"} | TOPOLOGY_GANG_KEYS
-ROLE_KEYS = {"name", "command", "preflight", "devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb", "host", "env"}
+ROLE_KEYS = {"name", "command", "preflight", "devices", "npu_count", "service_port", "allow_external_busy", "cpu_cores", "memory_mb", "hbm_mb", "per_die_hbm_mb", "host", "env"}
 
 
 def validate_wait(until, timeout_seconds):
@@ -126,7 +126,7 @@ def normalize_resources(resources: dict[str, Any] | None) -> dict[str, Any]:
             raise ValueError("allow_external_busy must be a boolean")
         if resources["allow_external_busy"] and len(resources.get("devices", [])) != 1:
             raise ValueError("allow_external_busy requires exactly one explicit physical device")
-    for hw_key in ("cpu_cores", "memory_mb", "hbm_mb"):
+    for hw_key in ("cpu_cores", "memory_mb", "hbm_mb", "per_die_hbm_mb"):
         if hw_key in resources and (type(resources[hw_key]) is not int or resources[hw_key] < 0):
             raise ValueError(f"{hw_key} must be a nonnegative integer")
     return resources
@@ -219,7 +219,7 @@ def _apply_requested_resources(
         roles[0]["service_port"] = int(resources["service_port"])
     if resources.get("allow_external_busy"):
         roles[0]["allow_external_busy"] = True
-    for hw_key in ("cpu_cores", "memory_mb", "hbm_mb"):
+    for hw_key in ("cpu_cores", "memory_mb", "hbm_mb", "per_die_hbm_mb"):
         if resources.get(hw_key) is not None:
             for role in roles:
                 role.setdefault(hw_key, int(resources[hw_key]))
@@ -550,7 +550,7 @@ def role_plan(
             item["service_port"] = normalize_resources({"service_port": role["service_port"]})["service_port"]
         elif resources.get("service_port") is not None and len(roles) == 0:
             item["service_port"] = resources["service_port"]
-        for hw_key in ("cpu_cores", "memory_mb", "hbm_mb"):
+        for hw_key in ("cpu_cores", "memory_mb", "hbm_mb", "per_die_hbm_mb"):
             if hw_key in role:
                 item[hw_key] = normalize_resources({hw_key: role[hw_key]})[hw_key]
             elif hw_key in resources:
@@ -584,8 +584,12 @@ def host_key(row: dict[str, Any]) -> str:
 
 def requested_hardware(role: Mapping[str, Any] | None) -> dict[str, int]:
     """The role's explicit host hardware floor, if it declared one."""
-    return {key: int(role[key]) for key in HARDWARE_KEYS
-            if role and int(role.get(key) or 0) > 0}
+    result = {key: int(role[key]) for key in HARDWARE_KEYS
+              if key != "per_die_hbm_mb" and role and int(role.get(key) or 0) > 0}
+    if role and role.get("per_die_hbm_mb"):
+        dies = len(role.get("devices") or []) or int(role.get("npu_count") or 0)
+        result["hbm_mb"] = max(result.get("hbm_mb", 0), dies * int(role["per_die_hbm_mb"]))
+    return result
 
 
 def hardware_shortfall(

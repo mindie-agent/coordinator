@@ -497,6 +497,10 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
             workers = int(requested_jobs)
         else:
             workers = _recommend_max_jobs()
+        if environment.get('MINDIE_COMPILE_JOBS_LIMIT'):
+            workers = min(workers, int(environment['MINDIE_COMPILE_JOBS_LIMIT']))
+        if workers < 1:
+            raise ValueError('insufficient memory for one compiler worker')
         with ThreadPoolExecutor(max_workers=min(len(scripts), workers)) as executor:
             futures = [executor.submit(compile_one, script) for script in scripts]
             errors = []

@@ -1,7 +1,9 @@
 """Two-stage preparation uses the real host CPU queue before the NPU run."""
+import pytest
+
+pytestmark = pytest.mark.usefixtures("host_compile_capacity")
 import copy
 
-import pytest
 
 from mindie_coordinator.compile_lease import CompileLease, finish_compile_lease
 from mindie_coordinator.host import mindie_npu_coordination as host_module
@@ -55,6 +57,9 @@ def test_compiler_start_gate_is_fenced_and_completion_releases_cpu_capacity(tmp_
             assert saved[-1]["compile_lease"]["state"] == "starting"
             assert parameters["spec"]["env"]["ASCEND_RT_VISIBLE_DEVICES"] == ""
             assert parameters["spec"]["env"]["MINDIE_SLOT_ID"] == job_id
+            assert saved[-1]["compile_lease"]["compile_budget"]["jobs_per_slot"] == 16
+            for name in ("MAX_JOBS", "MINDIE_BUILD_JOBS", "CMAKE_BUILD_PARALLEL_LEVEL", "MINDIE_COMPILE_JOBS_LIMIT"):
+                assert parameters["spec"]["env"][name] == "2"
             return {"state": "prepared", "quiet": False, "receipt": receipt}
         if action == "go":
             task = host.snapshot(None, task_id=job_id)["tasks"][0]
@@ -67,6 +72,7 @@ def test_compiler_start_gate_is_fenced_and_completion_releases_cpu_capacity(tmp_
     monkeypatch.setattr("mindie_coordinator.preparation_process.control", control)
     result = PreparationProcess(ENDPOINT, "install-vllm-ascend",
         lambda record: saved.append(copy.deepcopy(record)), lambda: False,
+        env={"MAX_JOBS": "2", "CMAKE_BUILD_PARALLEL_LEVEL": "99"},
         compile_lease=CompileLease(ENDPOINT, "mindie-test", request,
             cleanup=lambda endpoint, slot: cleaned.append((endpoint, slot)))).run("compile", on_output=lambda *item: output.append(item))
     assert result.returncode == 0 and output == [("stdout", "compiled\n")]
@@ -99,3 +105,18 @@ def test_release_failure_preserves_compiler_outcome_for_later_reconciliation(tmp
     assert finish_compile_lease(record, lambda value: None, request=unavailable,
         cleanup=lambda endpoint, slot: cleaned.append(slot))
     assert cleaned == ["prepare-finished"] and record["slot_cleanup"]["state"] == "completed"
+
+
+def test_legacy_host_explicitly_reports_missing_compile_budget(tmp_path, monkeypatch):
+    host, request, _ = host_request(tmp_path, monkeypatch)
+    def legacy(endpoint, payload):
+        reply = request(endpoint, payload)
+        if reply.get('task'):
+            reply['task'].pop('compile_budget', None)
+        return reply
+    record = {'job_id': 'legacy-compiler', 'state': 'pending', 'quiet': False}
+    lease = CompileLease(ENDPOINT, 'mindie-test', legacy)
+    lease.acquire(record, lambda _: None, lambda: False)
+    assert record['compile_lease']['compile_budget'] == {
+        'status': 'unavailable', 'reason': 'host did not provide a per-slot compile budget'}
+    assert host.snapshot(None, task_id='legacy-compiler')['tasks'][0]['state'] == 'starting'

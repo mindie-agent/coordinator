@@ -15,6 +15,7 @@ HOST = {"host": "host.invalid", "port": 22, "user": "root", "cwd": "/ignored"}
 
 def test_default_backend_executes_fixed_host_code_with_separate_payloads(tmp_path, monkeypatch):
     calls = []
+    monkeypatch.setenv("MINDIE_COORDINATOR_MAX_COMPILE_SLOTS", "1")
 
     def python(endpoint, code, payload, *, timeout_ms):
         calls.append((endpoint, code, payload, timeout_ms))
@@ -35,7 +36,7 @@ def test_default_backend_executes_fixed_host_code_with_separate_payloads(tmp_pat
     assert len(status["diagnostics"]["clock_domain"]) == 32
     common = {"state_dir": state_dir, "coordination_epoch": epoch, "task_id": "cpu-task"}
     submitted = backend.host({"host_endpoint": HOST},
-                             {**common, "action": "submit", "agent_id": "owner", "npu_count": 0})
+                             {**common, "action": "submit", "agent_id": "owner", "npu_count": 0, "per_worker_memory_mb": 1})
     assert submitted["status"] == "queued"
     assert submitted["diagnostics"]["phases"]["state_lock_wait_ms"] >= 0
     granted = backend.host({"host_endpoint": HOST}, {**common, "action": "acquire"})
