@@ -32,6 +32,9 @@ from .mindie_npu_coordination_probe import (
     DEFAULT_QUEUE_TTL_SECONDS,
     DEFAULT_START_TTL_SECONDS,
     CoordinationError,
+    COMPILE_WORKER_MEMORY_MB,
+    compile_slot_budget,
+    hbm_eligible_devices,
     _authority_attribute,
     _json_devices,
     _load_devices,
@@ -69,6 +72,12 @@ class CoordinationLeaseMixin:
                 raise CoordinationError("npu_count must be a nonnegative integer")
         else:
             count = len(devices)
+        per_die_hbm_mb = request.get("per_die_hbm_mb", 0)
+        per_worker_memory_mb = request.get("per_worker_memory_mb", COMPILE_WORKER_MEMORY_MB)
+        if type(per_die_hbm_mb) is not int or per_die_hbm_mb < 0:
+            raise CoordinationError("per_die_hbm_mb must be a nonnegative integer")
+        if type(per_worker_memory_mb) is not int or per_worker_memory_mb < 1:
+            raise CoordinationError("per_worker_memory_mb must be a positive integer")
         allow_external_busy = request.get("allow_external_busy", False)
         if type(allow_external_busy) is not bool:
             raise CoordinationError("allow_external_busy must be a boolean")
@@ -111,6 +120,8 @@ class CoordinationLeaseMixin:
                     "session_id": session_id,
                     "container_name": container_name,
                     "requested_count": count,
+                    "per_die_hbm_mb": per_die_hbm_mb,
+                    "per_worker_memory_mb": per_worker_memory_mb,
                     "requested_devices": _json_devices(devices),
                     "allow_external_busy": int(allow_external_busy),
                     "requested_service_port": requested_service_port,
@@ -134,8 +145,8 @@ class CoordinationLeaseMixin:
                     requested_count, requested_devices, not_before, latest_start,
                     estimated_duration_seconds, preemptible, priority, state,
                     submitted_at, updated_at, message, requested_service_port, service_port_choices,
-                    allow_external_busy
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    allow_external_busy, per_die_hbm_mb, per_worker_memory_mb
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -155,7 +166,7 @@ class CoordinationLeaseMixin:
                     request.get("message"),
                     requested_service_port,
                     json.dumps(service_port_choices, separators=(",", ":")) if service_port_choices else None,
-                    int(allow_external_busy),
+                    int(allow_external_busy), per_die_hbm_mb, per_worker_memory_mb,
                 ),
             )
             self._event(connection, "task-submitted", task_id=task_id,
@@ -394,6 +405,7 @@ class CoordinationLeaseMixin:
                     "task": self._serialize_task(row),
                     "gc": changes,
                 }
+            budget = None
             if int(row["requested_count"]) == 0:
                 active = connection.execute(
                     "SELECT COUNT(*) FROM tasks WHERE requested_count=0 "
@@ -403,6 +415,12 @@ class CoordinationLeaseMixin:
                     return {"status": "waiting", "reason": "compile_slots_full",
                             "max_compile_slots": self.max_compile_slots, "active_compile_slots": active,
                             "task": self._serialize_task(row), "gc": changes}
+                budget = compile_slot_budget(self.max_compile_slots,
+                    _authority_attribute("_cgroup_cpu_cores")(),
+                    _authority_attribute("_available_memory_mb")(), row["per_worker_memory_mb"])
+                if budget["jobs_per_slot"] == 0:
+                    return {"status": "waiting", "reason": "compile_budget_insufficient",
+                            "compile_budget": budget, "task": self._serialize_task(row), "gc": changes}
             estimated_end = now + int(row["estimated_duration_seconds"])
             available = self._available_devices(
                 connection,
@@ -412,6 +430,7 @@ class CoordinationLeaseMixin:
                 end_at=estimated_end,
                 allow_external_busy=bool(row["allow_external_busy"]),
             ) if int(row["requested_count"]) else set()
+            available = hbm_eligible_devices(observed, available, row["per_die_hbm_mb"])
             requested = _load_devices(row["requested_devices"])
             selected, missing = self._select_granted_devices(
                 requested=requested,
@@ -464,10 +483,11 @@ class CoordinationLeaseMixin:
                 """
                 UPDATE tasks
                 SET state='granted', granted_devices=?, activation_deadline=?,
-                    fence_token=?, granted_service_port=?, updated_at=?, message=?
+                    fence_token=?, granted_service_port=?, compile_budget=?, updated_at=?, message=?
                 WHERE task_id=?
                 """,
-                (_json_devices(selected), deadline, fence, granted_service_port, now, "short-lived grant issued", task_id),
+                (_json_devices(selected), deadline, fence, granted_service_port,
+                 json.dumps(budget) if budget else None, now, "short-lived grant issued", task_id),
             )
             self._event(
                 connection,
@@ -523,6 +543,8 @@ class CoordinationLeaseMixin:
                 conflicts = sorted(set(devices) - set(available))
             else:
                 conflicts = sorted((set(devices) & busy) | (set(devices) - visible))
+            conflicts = sorted(set(conflicts) | (set(devices) - hbm_eligible_devices(
+                observed, devices, row["per_die_hbm_mb"])))
             if conflicts:
                 next_state = "queued" if float(row["latest_start"]) > now else "expired"
                 connection.execute(
@@ -532,7 +554,7 @@ class CoordinationLeaseMixin:
                         fence_token=NULL, updated_at=?, message=?
                     WHERE task_id=?
                     """,
-                    (next_state, now, f"preflight found externally busy devices: {conflicts}", task_id),
+                    (next_state, now, f"preflight found unavailable devices or insufficient HBM: {conflicts}", task_id),
                 )
                 self._event(
                     connection,
@@ -544,7 +566,7 @@ class CoordinationLeaseMixin:
                 row = self._task_row(connection, task_id)
                 return {
                     "status": "waiting" if next_state == "queued" else "expired",
-                    "reason": "external_occupancy",
+                    "reason": "device_headroom" if row["per_die_hbm_mb"] else "external_occupancy",
                     "conflicting_devices": conflicts,
                     "task": self._serialize_task(row),
                     "gc": changes,

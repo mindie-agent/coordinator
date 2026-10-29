@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+from mindie_coordinator.compile_environment import COMPILE_ENV_CLAMP
+
 import hashlib
 import json
 import os
@@ -308,6 +310,7 @@ def runtime_install_step_script(
             ')"',
             'fi',
         ])
+    lines.append(COMPILE_ENV_CLAMP)
     if step in {'install-vllm', 'install-vllm-ascend', 'install-vllm-ascend-requirements'}:
         lines.extend(
             [

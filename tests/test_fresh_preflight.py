@@ -1,9 +1,11 @@
 """One fresh admission sample, with the original queue and recovery boundaries."""
+import pytest
+
+pytestmark = pytest.mark.usefixtures("host_compile_capacity")
 from contextlib import closing
 from types import MethodType
 import sqlite3
 
-import pytest
 
 import test_coordinator as fixtures
 from mindie_coordinator.backend import RemoteBackend

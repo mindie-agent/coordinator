@@ -665,6 +665,8 @@ def handle_lease(
             req["devices"] = [int(d) for d in devices]
         else:
             req["npu_count"] = int(npu_count_arg) if npu_count_arg is not None else 1
+        if "per_die_hbm_mb" in args:
+            req["per_die_hbm_mb"] = args["per_die_hbm_mb"]
         if "service_port" in args and args["service_port"] is not None:
             sp = int(args["service_port"])
             req["service_port"] = sp

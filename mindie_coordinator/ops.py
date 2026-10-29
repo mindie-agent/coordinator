@@ -51,7 +51,8 @@ RESOURCE_SCHEMA = {"type": "object", "additionalProperties": False, "properties"
     "service_port": {"type": "integer", "minimum": 0, "maximum": 65535},
     "cpu_cores": {"type": "integer", "minimum": 0},
     "memory_mb": {"type": "integer", "minimum": 0},
-    "hbm_mb": {"type": "integer", "minimum": 0}}}
+    "hbm_mb": {"type": "integer", "minimum": 0},
+    "per_die_hbm_mb": {"type": "integer", "minimum": 0, "description": "Minimum measured free HBM on each leased physical Phy-ID, checked by the host queue at grant."}}}
 RESOURCE_SCHEMA["allOf"] = [{
     "if": {"required": ["allow_external_busy"], "properties": {"allow_external_busy": {"const": True}}},
     "then": {"required": ["devices"], "properties": {"devices": {"minItems": 1, "maxItems": 1}}},
@@ -183,6 +184,7 @@ TOOL_SCHEMAS = {
         "devices": {"type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True, "description": "Explicit physical NPU device IDs to reserve."},
         "allow_external_busy": {"type": "boolean", "default": False},
         "service_port": {"type": "integer", "minimum": 0, "maximum": 65535, "description": "0 reserves a free host port in 18000..18999; positive int reserves that specific port."},
+        "per_die_hbm_mb": RESOURCE_SCHEMA["properties"]["per_die_hbm_mb"],
         "purpose": {"type": "string", "description": "Human/agent-readable description of what this lease is running."},
         "ttl_seconds": {"type": "integer", "minimum": 30, "maximum": 86400, "default": 900},
         "fence_token": {"type": "integer", "minimum": 1, "description": "Fence token issued by acquire for heartbeat/release."},

@@ -1,7 +1,9 @@
 """CPU admission and arbitrary source execution use the real host authority."""
+import pytest
+
+pytestmark = pytest.mark.usefixtures("host_compile_capacity")
 import json
 from pathlib import Path
-import pytest
 
 from mindie_coordinator.host.mindie_npu_coordination import NpuCoordinator, CoordinationError, handle_request
 from mindie_coordinator.managed_execution import task_preamble

@@ -120,6 +120,7 @@ def host_queue_module_path(path: Path | str | None = None) -> Path:
 
 
 BUNDLED_HOST_MODULES = (
+    "mindie_npu_coordination_resources.py",
     "mindie_npu_coordination_probe.py",
     "mindie_npu_coordination_state.py",
     "mindie_npu_coordination_leases.py",
@@ -128,7 +129,7 @@ BUNDLED_HOST_MODULES = (
 
 
 def _is_internal_host_import(node: ast.AST) -> bool:
-    """True for imports between the four files combined into the host program."""
+    """True for imports between the bundled files combined into the host program."""
     if isinstance(node, ast.ImportFrom):
         module = node.module or ""
         if node.level:
@@ -164,7 +165,7 @@ def _strip_internal_imports(source: str, *, keep_future: bool) -> str:
 
 
 def bundled_host_source() -> str:
-    """Concatenate probe, state, leases, and public modules into one program."""
+    """Concatenate resource, probe, state, lease, and public modules in dependency order."""
     directory = bundled_host_module_path().parent
     chunks = []
     for index, name in enumerate(BUNDLED_HOST_MODULES):
@@ -202,7 +203,7 @@ class HostQueue:
     def source(self) -> str:
         if self._source is None:
             # An explicit module path remains the single-file override. The
-            # bundled authority is four modules concatenated in dependency order.
+            # bundled authority combines its modules in dependency order.
             if self._module_path or os.environ.get(HOST_QUEUE_MODULE_ENV):
                 self._source = host_queue_module_path(self._module_path).read_text(encoding="utf-8")
             else:

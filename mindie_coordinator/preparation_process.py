@@ -73,7 +73,7 @@ def stop_preparation_process(record, save, *, force=False, drain_seconds=10, lea
 
 class PreparationProcess:
     def __init__(self, endpoint, step, save, cancel_requested, *, timeout_seconds=7200,
-                 setup=(), bootstrap_root=None, compile_lease=None):
+                 setup=(), bootstrap_root=None, compile_lease=None, env=None):
         self.endpoint = dict(endpoint)
         self.step = step
         self.save = save
@@ -82,6 +82,7 @@ class PreparationProcess:
         self.setup = list(setup)
         self.bootstrap_root = bootstrap_root
         self.compile_lease = compile_lease
+        self.env = dict(env or {})
 
     @observed_operation("preparation.command", component="mindie-coordinator")
     def run(self, script, *, on_output):
@@ -142,7 +143,7 @@ class PreparationProcess:
 
         try:
             specification = {
-                "command": command, "cwd": endpoint["cwd"], "env": {},
+                "command": command, "cwd": endpoint["cwd"], "env": dict(self.env),
                 "timeout_seconds": self.timeout_seconds, "interactive": False,
             }
             if self.compile_lease:
@@ -150,7 +151,12 @@ class PreparationProcess:
                 record["slot_id"] = record["job_id"]
                 save_record(record)
                 specification["command"] = slot_preamble(record["job_id"]) + "\n" + command
-                specification["env"] = {**slot_environment(record["job_id"]), "ASCEND_RT_VISIBLE_DEVICES": ""}
+                from mindie_coordinator.compile_environment import compile_environment
+                budget = record["compile_lease"].get("compile_budget")
+                specification["env"] = {**compile_environment(budget, self.env),
+                    **slot_environment(record["job_id"]), "ASCEND_RT_VISIBLE_DEVICES": ""}
+                if not budget or budget.get("status") != "granted":
+                    on_output("stderr", "Host compile budget unavailable; product budget protection was not provided.\n")
                 observation = control(endpoint, record["job_id"], "prepare", spec=specification)
                 _remember(record, observation, save_record)
                 if observation.get("state") != "prepared":

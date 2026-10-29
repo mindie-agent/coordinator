@@ -1,9 +1,11 @@
 """One admission exchange retains epoch fencing and uncertain reconciliation."""
+import pytest
+
+pytestmark = pytest.mark.usefixtures("host_compile_capacity")
 import sqlite3
 from contextlib import closing
 from types import MethodType
 
-import pytest
 
 import test_coordinator as fixtures
 from mindie_coordinator.backend import RemoteBackend

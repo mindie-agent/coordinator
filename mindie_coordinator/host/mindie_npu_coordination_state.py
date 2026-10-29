@@ -157,6 +157,9 @@ class CoordinationStateMixin:
                         raise
             for column, decl in (
                 ("allow_external_busy", "INTEGER NOT NULL DEFAULT 0"),
+                ("per_die_hbm_mb", "INTEGER NOT NULL DEFAULT 0"),
+                ("per_worker_memory_mb", "INTEGER NOT NULL DEFAULT 2048"),
+                ("compile_budget", "TEXT"),
                 ("requested_service_port", "INTEGER"),
                 ("service_port_choices", "TEXT"),
                 ("granted_service_port", "INTEGER"),
@@ -246,6 +249,7 @@ class CoordinationStateMixin:
         if row is None:
             return None
         payload = dict(row)
+        payload["compile_budget"] = json.loads(payload["compile_budget"]) if payload.get("compile_budget") else None
         payload["requested_devices"] = _load_devices(payload.get("requested_devices")) or None
         payload["granted_devices"] = _load_devices(payload.get("granted_devices"))
         payload["preemptible"] = bool(payload.get("preemptible"))

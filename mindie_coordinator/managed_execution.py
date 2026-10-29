@@ -76,7 +76,7 @@ class ManagedExecution:
                       devices, npu_count, command, env, timeout_seconds=1800,
                       priority=0, queue_seconds=1800, service_port=None, hold_go=False,
                       allow_external_busy=False, execution_id=None, native_cache_receipt=None,
-                      proof_path=None, source_snapshot=None):
+                      proof_path=None, source_snapshot=None, per_die_hbm_mb=0):
         if not isinstance(command, str) or not command.strip() or len(command) > 200000:
             raise ValueError("a bounded nonempty shell command is required")
         if not isinstance(env, dict) or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
@@ -102,6 +102,8 @@ class ManagedExecution:
         request = {"binding_id": binding_id, "request_id": request_id, "snapshots": snapshots,
                    "expected_build_key": expected_build_key, "devices": devices, "npu_count": npu_count,
                    "priority": priority, "queue_seconds": queue_seconds, "service_port": service_port}
+        if per_die_hbm_mb:
+            request["per_die_hbm_mb"] = per_die_hbm_mb
         if allow_external_busy:
             request["allow_external_busy"] = True
         specification = {"command": command, "env": env, "timeout_seconds": timeout_seconds,

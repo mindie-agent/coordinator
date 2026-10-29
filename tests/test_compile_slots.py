@@ -1,4 +1,7 @@
 """Compile capacity and NPU capacity share fencing but never block each other."""
+import pytest
+
+pytestmark = pytest.mark.usefixtures("host_compile_capacity")
 from mindie_coordinator.host.mindie_npu_coordination import NpuCoordinator
 
 

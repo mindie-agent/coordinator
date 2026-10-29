@@ -9,8 +9,8 @@ name formerly exported by `mindie_npu_coordination` is re-exported here.
 [Invariants]
 - Public names, error messages, and response shapes are unchanged from the
   single-file authority.
-- Compile-slot capacity is bounded by both CPU quota/affinity and available
-  RAM; explicit values and the env override clamp to the hardware cap (>=1).
+- Configured compile slots divide a single observed CPU/RAM budget at grant;
+  insufficient capacity never forces a worker to start.
 - `DEFAULT_MAX_COMPILE_SLOTS = 4` remains the upper default.
 
 [Timeouts & Locks]
@@ -70,6 +70,8 @@ from .mindie_npu_coordination_probe import (
     _single_id_metric_row,
     container_ssh_task_id,
     host_worker_cap,
+    compile_slot_budget,
+    hbm_eligible_devices,
     parse_devices,
     parse_instant,
     parse_npu_smi_hbm,
@@ -109,18 +111,11 @@ class NpuCoordinator(CoordinationStateMixin, CoordinationLeaseMixin):
         self.db_path = self.state_dir / "coordinator.sqlite3"
         self.clock = clock
         self.expected_epoch = expected_epoch
-        if max_compile_slots is None:
-            configured_slots = int(os.environ.get(
-                "MINDIE_COORDINATOR_MAX_COMPILE_SLOTS", DEFAULT_MAX_COMPILE_SLOTS))
-            if type(configured_slots) is not int or configured_slots < 1:
-                raise CoordinationError("max_compile_slots must be a positive integer")
-            # The default/env cap is bounded by both CPU budget and available
-            # RAM; an explicit constructor argument keeps its caller value.
-            self.max_compile_slots = max(1, min(configured_slots, host_worker_cap()))
-        else:
-            if type(max_compile_slots) is not int or max_compile_slots < 1:
-                raise CoordinationError("max_compile_slots must be a positive integer")
-            self.max_compile_slots = max_compile_slots
+        self.max_compile_slots = (int(os.environ.get(
+            "MINDIE_COORDINATOR_MAX_COMPILE_SLOTS", DEFAULT_MAX_COMPILE_SLOTS))
+            if max_compile_slots is None else max_compile_slots)
+        if type(self.max_compile_slots) is not int or self.max_compile_slots < 1:
+            raise CoordinationError("max_compile_slots must be a positive integer")
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -129,7 +124,7 @@ class NpuCoordinator(CoordinationStateMixin, CoordinationLeaseMixin):
         with self._transaction() as connection:
             row = self._task_row(connection, require_safe_id(task_id, label="task id"))
             requested = _load_devices(row["requested_devices"])
-            shared = bool(row["allow_external_busy"]) and len(requested) == 1
+            shared = bool(row["allow_external_busy"]) and len(requested) == 1 and not row["per_die_hbm_mb"]
             # A visibility-only observation cannot reclaim a previous lease.
             # Retain full observation when this device may need reclamation,
             # so repeated shared requests cannot strand an expired reservation.

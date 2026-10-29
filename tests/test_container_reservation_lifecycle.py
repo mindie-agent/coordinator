@@ -41,7 +41,7 @@ class RecordingQueue:
                 "container_name": "mindie-alice", "port": 46000}
 
 
-def test_release_is_owner_scoped_idempotent_and_preserves_unrelated_work(tmp_path):
+def test_release_is_owner_scoped_idempotent_and_preserves_unrelated_work(tmp_path, host_compile_capacity):
     coordinator = host.NpuCoordinator(tmp_path)
     coordinator.reserve_container_ssh(request("alice", 46000))
     coordinator.reserve_container_ssh(request("bob", 46001))

@@ -1,7 +1,9 @@
 """CPU observation skips hardware, without turning unknown process state free."""
+import pytest
+
+pytestmark = pytest.mark.usefixtures("host_compile_capacity")
 import os
 
-import pytest
 
 from mindie_coordinator.host.mindie_npu_coordination import CoordinationError, NpuCoordinator, handle_request
 
