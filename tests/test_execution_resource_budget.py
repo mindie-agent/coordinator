@@ -42,9 +42,10 @@ def kernel_capture(monkeypatch, *, available='MemAvailable: 10240000 kB\n', quot
         '/sys/fs/cgroup/tenant/compiler/memory.current': str(2 * 1024**3),
     }
     def read(path, *args, **kwargs):
-        if str(path) not in files:
+        key = path.as_posix()
+        if key not in files:
             raise FileNotFoundError(path)
-        return files[str(path)]
+        return files[key]
     monkeypatch.setattr(Path, 'read_text', read)
     monkeypatch.setattr(os, 'sched_getaffinity', lambda _: set(range(32)), raising=False)
     return files
@@ -157,17 +158,24 @@ def test_captured_build_environment_cannot_override_granted_or_smaller_jobs(tmp_
     (runtime / 'vllm-ascend').mkdir()
     (runtime / 'vllm-ascend/CMakeLists.txt').write_text('VERSION_EQUAL "1.2.3"\n')
     (runtime / 'vllm-ascend/torch.py').write_text('__version__ = "1.2.3"\n')
+    (runtime / 'vllm-ascend/sitecustomize.py').write_text(
+        'import sys\nsys.stdout.reconfigure(newline="\\n")\n')
     (runtime / '.mindie-runtime/build-source.json').write_text(json.dumps({
         'versions': {'vllm-ascend': {'version': '1.0'}},
         'build_env': {name: '99' for name in BUILD_JOB_VARIABLES}}))
-    monkeypatch.setattr(parity_install, 'DEFAULT_ENV_PREAMBLE', [f'export PYTHON={sys.executable}'])
+    monkeypatch.setattr(parity_install, 'DEFAULT_ENV_PREAMBLE', [
+        f'export PYTHON={parity_install.quoted(Path(sys.executable).as_posix())}',
+        f'export PYTHONPATH={parity_install.quoted((runtime / "vllm-ascend").as_posix())}',
+    ])
     for name in BUILD_JOB_VARIABLES:
         monkeypatch.setenv(name, '100')  # Captured author inputs are also bounded.
-    script = parity_install.runtime_install_step_script(runtime_root=str(runtime), marker_dirname='.markers',
+    script = parity_install.runtime_install_step_script(runtime_root=runtime.as_posix(), marker_dirname='.markers',
         container_identity='test-container', step='check-build-compat')
     script += '\nprintf "%s,%s,%s\\n" "$MAX_JOBS" "$MINDIE_BUILD_JOBS" "$CMAKE_BUILD_PARALLEL_LEVEL"\n'
     env = compile_environment({'status': 'granted', 'jobs_per_slot': 8}, {'MAX_JOBS': '2'})
-    result = subprocess.run(['bash'], input=script, text=True, capture_output=True,
+    bash = (str(Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe')
+            if os.name == 'nt' else 'bash')
+    result = subprocess.run([bash, '-c', script], text=True, capture_output=True,
                             env={**os.environ, **env}, timeout=5)
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[-1] == '2,2,2'
