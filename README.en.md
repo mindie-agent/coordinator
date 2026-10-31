@@ -52,9 +52,7 @@ flowchart LR
 
 ## Quick Start
 
-### Option 1: One-Sentence Setup via Your AI Agent (Recommended)
-
-Copy and paste this prompt to Claude Code, Codex, Kimi Code, or Cursor and let your agent install and configure `mindie-coordinator` automatically:
+Copy and paste this prompt to Claude Code, Codex, Kimi Code, or DeepSeek Harness (DSH) so your AI Agent installs and configures `mindie-coordinator` automatically:
 
 ```text
 Please install and configure https://github.com/mindie-agent/coordinator for me
@@ -116,19 +114,9 @@ If you are an AI Agent receiving the prompt above, follow these steps to set up 
    ```bash
    uvx --from git+https://github.com/mindie-agent/coordinator@main mindie --help
    ```
-4. **Notify the User**: Let the user know they can start a new session and use `mindie_session`, `mindie_run`, `mindie_execution`, `mindie_finish`, and `mindie_message` to run workloads on remote Ascend servers.
+4. **Notify the User**: Let the user know they can start a new session and use `mindie_hosts`, `mindie_probe`, `mindie_container`, `mindie_lease`, `mindie_session`, `mindie_run`, `mindie_execution`, `mindie_finish`, and `mindie_message` to run workloads on remote Ascend servers.
 
 </details>
-
-### Option 2: One-Line Terminal Install for Humans
-
-```bash
-# Install mindie and mindie-coordinator into your Python environment
-uv pip install git+https://github.com/mindie-agent/coordinator@main
-
-# Or launch the stdio MCP task server directly via uvx without installing
-uvx --from git+https://github.com/mindie-agent/coordinator@main mindie-coordinator task-server
-```
 
 ---
 

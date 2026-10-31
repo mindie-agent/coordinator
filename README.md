@@ -52,9 +52,7 @@ flowchart LR
 
 ## 快速开始
 
-### 方式一：直接把链接发给你的 Agent 自动安装/接入（推荐）
-
-复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 Cursor，让它自动完成安装和 MCP 接入：
+直接复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 DeepSeek Harness（DSH），由 AI Agent 自动完成安装和 MCP 接入：
 
 ```text
 帮我安装并配置 https://github.com/mindie-agent/coordinator
@@ -63,7 +61,7 @@ flowchart LR
 <details>
 <summary>🤖 <b>AI Agent 自动安装与配置协议（Instructions for AI Agents）</b></summary>
 
-如果你是收到上述指令的 AI Agent，请按以下步骤为当前用户完成 `mindie-coordinator` 的安装与 MCP 配置：
+如果你是收到上述指令的 AI Agent，请按以下步骤完成 `mindie-coordinator` 的安装与 MCP 配置：
 
 1. **检查环境要求**：确认本机具备 Python `>= 3.11`、`git`、`ssh` 以及 `uv`（`pyproject.toml` 已锁定匹配的 `remote-dev` 与 `mindie-diagnostics` 版本，无需单独手动找版本）。
 2. **在当前宿主客户端注册 MCP Server**：
@@ -116,19 +114,9 @@ flowchart LR
    ```bash
    uvx --from git+https://github.com/mindie-agent/coordinator@main mindie --help
    ```
-4. **告知用户**：提示用户重启/新开对话后，即可直接使用 `mindie_session`、`mindie_run`、`mindie_execution`、`mindie_finish`、`mindie_message` 调度远端昇腾任务。
+4. **告知用户**：提示用户重启/新开对话后，即可直接使用 `mindie_hosts`、`mindie_probe`、`mindie_container`、`mindie_lease`、`mindie_session`、`mindie_run`、`mindie_execution`、`mindie_finish`、`mindie_message` 调度远端昇腾任务。
 
 </details>
-
-### 方式二：终端手动一行安装（适合人类开发者）
-
-```bash
-# 安装 mindie 与 mindie-coordinator 命令行工具到当前环境
-uv pip install git+https://github.com/mindie-agent/coordinator@main
-
-# 或者免安装直接通过 uvx 启动 MCP Task Server
-uvx --from git+https://github.com/mindie-agent/coordinator@main mindie-coordinator task-server
-```
 
 ---
 
