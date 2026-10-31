@@ -193,11 +193,7 @@ run = client.run(
 | `mindie_container` | `mindie container` / `mindie-coordinator container` | Bind existing Docker containers (`docker exec` or direct `ssh_port`), provision per-user Ascend containers (`mindie-<user>`), inspect or remove containers, and update `remote-dev` endpoint aliases |
 | `mindie_lease` | `mindie lease` / `mindie-coordinator lease` | Acquire, heartbeat, inspect, or release lightweight host NPU & service-port leases via `HostQueue`, returning `ASCEND_RT_VISIBLE_DEVICES` and `env` ready for `remote-dev` |
 
-`remote-dev` owns SSH authentication. Enter a password once with `remote-dev auth setup --host HOST --port 22 --user USER --prompt`, or supply `password_env` to `mindie_hosts(action="bootstrap_key")`. Setup attempts public-key installation and verifies the selected identity. If password access is verified but key installation fails, password authentication remains usable and the key failure is reported. Later chats, coordinator, and remote-dev reuse the same user-level credential store.
-
-Passwords use the shared `~/.mindie/ssh/credentials.json` file by default. `REMOTE_DEV_AUTH_DIR` changes the authentication directory, and `REMOTE_DEV_CREDENTIAL_FILE` can select another credential file. This flow does not use a system keychain or request the operating-system account password.
-
-`machines.json` and `endpoints.json` store only `auth_ref` and the verified `identity_file`. Host-side `docker exec` uses the host profile; a direct container SSH port has its own authentication scope, selected with `container_auth_ref` / `container_identity_file` when binding. npu-top receives the profile reference and must have access to the same user-level store. A monitoring registration failure does not undo successful SSH authentication.
+> **Shared SSH Authentication (Across `remote-dev`, `coordinator`, and `npu-top`)**: SSH credentials and managed keys live in `~/.mindie/ssh/` (configurable via `REMOTE_DEV_AUTH_DIR` or `REMOTE_DEV_CREDENTIAL_FILE`). Enroll a host once with `remote-dev auth setup --host HOST --port 22 --user USER --prompt` (or pass `password_env` to `mindie_hosts(action="bootstrap_key")`) to install and verify an SSH key (or retain password auth when public keys are disabled). `machines.json` and `endpoints.json` store only the `auth_ref` and verified `identity_file`, allowing subsequent chats, `mindie-coordinator`, `remote-dev`, and `npu-top` to reuse access seamlessly.
 
 ### 2. Managed Git-Snapshot Task Execution Lifecycle
 
@@ -211,7 +207,7 @@ Passwords use the shared `~/.mindie/ssh/credentials.json` file by default. `REMO
 
 ### 3. Build Slots, Exclusive Process Groups, and Build Cache Reuse
 
-- **Decoupled CPU Build Slots & NPU Leases**: `HostQueue` separates host CPU `compile slots` from physical NPU execution leases — multiple tasks can sync sources and compile in parallel without waiting for a card, while actual NPU execution remains safely arbitrated by exclusive leases.
+- **Decoupled CPU Build Slots, NPU Leases & Per-Die HBM Quotas**: `HostQueue` separates host CPU `compile slots` from physical NPU execution leases — multiple tasks can sync sources and compile in parallel (with single-grant multi-slot compile budgets) without waiting for a card, while NPU execution supports both whole-card exclusivity and per-device HBM lease quotas (`granted_memory_mb_per_device`).
 - **Exclusive Process Groups & Clean Exit Draining**: Every managed run launches inside its own process group. When a job finishes, times out, or is stopped, the coordinator drains the entire descendant process tree and verifies host `/proc` state before releasing the NPU and port lease, preventing orphan workers from leaking HBM.
 - **Content-Addressed Native Build Cache (`native_cache_pool`)**: Caches and reuses compiled native extensions across task worktrees by `sha256(csrc tree + CANN version + SoC model + Python ABI + compile flags)` with a recorded `native_cache_receipt` (note: live parallel cache-pool acceptance currently covers `torch.utils.cpp_extension` CPU C++ extensions, while full `AscendC` operator project caching continues expanding).
 - **Traceable Run Manifests (`RunManifest`)**: [`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) records the exact Git identity (`source_head` and `snapshot_commit`) for every mounted repository alongside optional `hardware_telemetry`, `native_cache_receipt`, `active_execution_proof`, and `profile_summary_ref` evidence so every benchmark or test run is reproducible.
@@ -253,11 +249,11 @@ Passwords use the shared `~/.mindie/ssh/credentials.json` file by default. `REMO
 
 ## Development & Testing
 
-The shared-auth development version requires the sibling remote-dev checkout. Install both with dependency resolution enabled.
+Install the package with test dependencies in a virtual environment to run the offline unit test suite (no physical NPU or Docker required; add `-e ../remote-dev` when co-developing against a local `remote-dev` checkout):
 
 ```bash
 uv venv
-uv pip install -e ../remote-dev -e ".[test]"
+uv pip install -e ".[test]"
 HOME="$(mktemp -d)" .venv/bin/python -m pytest
 ```
 

@@ -195,11 +195,7 @@ run = client.run(
 | `mindie_container` | `mindie container` / `mindie-coordinator container` | 绑定已有容器（支持 `docker exec` 直连与独立 `ssh_port` 两种模式）、一键开通用户专属昇腾容器（`mindie-<user>`）、枚举或解绑容器，并实时同步 `remote-dev` 端点别名 |
 | `mindie_lease` | `mindie lease` / `mindie-coordinator lease` | 轻量级宿主机 NPU 卡与服务端口租约申请（`acquire`）、续期（`heartbeat`）、查询（`status`）与释放（`release`），直接返回 `ASCEND_RT_VISIBLE_DEVICES` 供 `remote-dev` 使用 |
 
-SSH 认证统一由 `remote-dev` 管理。首次可用 `remote-dev auth setup --host HOST --port 22 --user USER --prompt` 录入一次密码，或在 `mindie_hosts(action="bootstrap_key")` 中传 `password_env`。默认尝试安装公钥并用实际密钥验证；如果密码已验证可用而公钥安装失败，保留密码认证并返回失败原因。后续聊天、coordinator 和 remote-dev 共享同一用户级凭据，不需要再次把密码交给 Agent。
-
-密码默认保存在共享的 `~/.mindie/ssh/credentials.json`；`REMOTE_DEV_AUTH_DIR` 可调整认证目录，`REMOTE_DEV_CREDENTIAL_FILE` 可指定凭据文件。此流程不调用系统钥匙串，也不请求系统账户密码。
-
-`machines.json` 和 `endpoints.json` 仅保存 `auth_ref` 与验证后的 `identity_file`。宿主机上的 `docker exec` 使用宿主机认证；独立容器 SSH 端口使用自己的认证范围，可在绑定时指定 `container_auth_ref` / `container_identity_file`。同步 npu-top 时只传认证引用，npu-top 必须能够访问同一个用户级凭据库；监控注册失败不会改变已经成功的 SSH 认证结果。
+> **共享 SSH 认证（与 `remote-dev` 和 `npu-top` 互通）**：SSH 认证与免密公钥统一存储在 `~/.mindie/ssh/`（可通过 `REMOTE_DEV_AUTH_DIR` 或 `REMOTE_DEV_CREDENTIAL_FILE` 自定义）。首次接入新机器时，运行一次 `remote-dev auth setup --host HOST --port 22 --user USER --prompt`（或在 `mindie_hosts(action="bootstrap_key")` 中传入 `password_env`），系统会自动安装并验证免密公钥（不支持公钥时保留密码模式）。`machines.json` 与 `endpoints.json` 仅记录认证引用 `auth_ref` 与密钥路径，后续跨会话、`mindie-coordinator`、`remote-dev` 与 `npu-top` 均可直接复用，无需重复输入密码。
 
 ### 2. 受管源码快照与任务执行生命周期
 
@@ -213,7 +209,7 @@ SSH 认证统一由 `remote-dev` 管理。首次可用 `remote-dev auth setup --
 
 ### 3. 编译槽、独占进程组与构建缓存复用机制
 
-- **编译与跑卡分离（两阶段租约与 CPU 编译槽）**：宿主机 `HostQueue` 将 CPU 编译槽（`compile slots`）与物理 NPU 执行租约分开管理——多个任务可以同时在后台拉代码、编扩展，互不阻塞；只有真正上卡跑测试或起服务时才按独占租约分配物理 NPU。
+- **编译与跑卡分离（两阶段租约、CPU 编译槽与按卡显存配额）**：宿主机 `HostQueue` 将 CPU 编译槽（`compile slots`）与物理 NPU 执行租约分开管理——多个任务可以同时在后台拉代码、编扩展（支持按单次授权分配多核编译预算），互不阻塞；上卡跑测试或起服务时，既支持独占整张物理 NPU，也支持按每张卡/每个 Die 申请显存配额（`granted_memory_mb_per_device`）安全拼卡。
 - **独占进程组与干净退出回收**：每次受管执行都在独立的进程组中启动，任务自然结束、超时或收到 `stop` 指令时，协调器会排空整个子进程树并校验宿主机 `/proc` 与设备占用，确保不留僵尸进程、不漏端口，随后立即归还 NPU 租约。
 - **跨任务原生构建缓存复用（`native_cache_pool`）**：按 `sha256(csrc 源码树 + CANN 版本 + SoC 型号 + Python ABI + 编译参数)` 对编译产物做内容寻址缓存并记录 `native_cache_receipt`，相同源码与环境直接秒级复用（注：当前实机并行构建池验收覆盖 `torch.utils.cpp_extension` CPU C++ 扩展；完整 `AscendC` 算子工程的编译池复用正在持续扩展中）。
 - **可追溯的执行清单（`RunManifest`）**：[`mindie_coordinator/run_manifest.py`](./mindie_coordinator/run_manifest.py) 为每次运行记录完整的 Git 源码快照身份（`source_head` 与 `snapshot_commit`），并按需附带硬件遥测（`hardware_telemetry`）、缓存命中回执（`native_cache_receipt`）、活跃执行证明（`active_execution_proof`）与性能剖析引用（`profile_summary_ref`），方便随时复盘某次实验到底跑的是哪版代码和环境。
@@ -255,11 +251,11 @@ SSH 认证统一由 `remote-dev` 管理。首次可用 `remote-dev auth setup --
 
 ## 本地开发与测试
 
-共享认证开发版本需要同级目录的 remote-dev 源码；一起交给依赖解析器安装，不跳过依赖检查。
+克隆仓库并在虚拟环境中安装测试依赖即可直接运行本地单元测试（无需物理 NPU 或 Docker；若同时在本地联调 `remote-dev`，可一并执行 `-e ../remote-dev`）：
 
 ```bash
 uv venv
-uv pip install -e ../remote-dev -e ".[test]"
+uv pip install -e ".[test]"
 HOME="$(mktemp -d)" .venv/bin/python -m pytest
 ```
 
