@@ -11,7 +11,7 @@ jobs:
   release:
     uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@484b80621aaf9293c559786d0ef2174c79a0dbb4
     with:
-      release-notes-path: docs/releases/coordinator-0.7.0.md
+      release-notes-path: docs/releases/coordinator-0.7.1.md
       benchmark-ref: 484b80621aaf9293c559786d0ef2174c79a0dbb4
       setup-command: |
         uv venv --python 3.13 && uv pip install -e ".[test]"
