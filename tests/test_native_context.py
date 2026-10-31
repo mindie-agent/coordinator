@@ -219,6 +219,24 @@ def test_dsh_attach_resume_preserves_native_identity_and_distinguishes_two_sessi
     assert len(store.sessions()) == 2
 
 
+def test_agy_attach_and_env_conversation_id_resolution(native_env, tmp_path, monkeypatch):
+    from mindie_coordinator.agent_session import load_context
+
+    conv_id = "6a363452-e831-4992-bba3-ad6a587c0164"
+    monkeypatch.delenv("MINDIE_CONTEXT_FILE", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setenv("AGY_CONVERSATION_ID", conv_id)
+    monkeypatch.chdir(tmp_path)
+
+    ctx1 = load_context()
+    assert ctx1["attachment"]["client"] == "agy"
+    assert ctx1["attachment"]["native_session_id"] == conv_id
+
+    ctx2 = load_context()
+    assert ctx2["session"]["id"] == ctx1["session"]["id"]
+    assert ctx2["attachment"]["id"] == ctx1["attachment"]["id"]
+
+
 def test_native_status_preserves_a_finished_task(native_env):
     context = load_context()
     store = AgentSessions(native_env)

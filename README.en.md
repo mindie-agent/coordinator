@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+  <img src="assets/brand/coordinator-logo.png" alt="mindie-coordinator logo" width="128" height="128">
 </p>
 
 <h1 align="center">MindIE Agent Coordinator (<code>mindie-coordinator</code>)</h1>
@@ -52,7 +52,7 @@ flowchart LR
 
 ## Quick Start
 
-Copy and paste this prompt to Claude Code, Codex, Kimi Code, or DeepSeek Harness (DSH) so your AI Agent installs and configures `mindie-coordinator` automatically:
+Copy and paste this prompt to Claude Code, Codex, Kimi Code, DeepSeek Harness (DSH), or Google Antigravity (AGY) so your AI Agent installs and configures `mindie-coordinator` automatically:
 
 ```text
 Please install and configure https://github.com/mindie-agent/coordinator for me

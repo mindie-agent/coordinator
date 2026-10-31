@@ -1,7 +1,7 @@
 """Local development-task identity and attachment registry.
 
 [Role]
-Maps native Harness sessions (`claude`, `codex`, `cursor`, `grok`, `kimi`, `dsh`) to
+Maps native Harness sessions (`claude`, `codex`, `cursor`, `grok`, `kimi`, `dsh`, `agy`, `antigravity`) to
 persistent local MindIE task identities, source worktree bindings, and execution
 records in `sessions.sqlite3`.
 
@@ -37,7 +37,7 @@ from pathlib import Path
 from mindie_coordinator.state_paths import agent_sessions_root
 from mindie_coordinator.client_paths import client_path
 
-CLIENTS = {"claude", "grok", "kimi", "codex", "cursor", "dsh"}
+CLIENTS = {"claude", "grok", "kimi", "codex", "cursor", "dsh", "agy", "antigravity"}
 
 
 def git_common_directory(path: str | Path) -> Path:
@@ -429,7 +429,8 @@ def load_context(context_file: str = "", *, allow_native_context: bool = True) -
     if not filename:
         callers = [(client, os.environ.get(key, "").strip()) for client, key in
                    (("codex", "CODEX_THREAD_ID"), ("cursor", "CURSOR_CONVERSATION_ID"),
-                    ("grok", "GROK_SESSION_ID"), ("kimi", "KIMI_SESSION_ID"))]
+                    ("grok", "GROK_SESSION_ID"), ("kimi", "KIMI_SESSION_ID"),
+                    ("agy", "AGY_CONVERSATION_ID"))]
         callers = [(client, native) for client, native in callers if native]
         if len(callers) > 1:
             raise ValueError("conflicting native client identities; pass context_file explicitly")
