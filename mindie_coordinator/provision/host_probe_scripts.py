@@ -568,7 +568,9 @@ try:
     import torch
     import torch_npu  # noqa: F401
     if __IMAGE_FAMILY__ == 'mindiesd':
+        import importlib.metadata
         import mindiesd  # noqa: F401
+        result["mindiesd_version"] = getattr(mindiesd, "__version__", None) or importlib.metadata.version("mindiesd")
 
     progress("smoke", "allocating a small tensor on NPU")
     x = torch.zeros(1, 2).npu()

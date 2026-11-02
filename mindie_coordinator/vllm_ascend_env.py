@@ -165,3 +165,23 @@ def validate_vllm_ascend_runtime_env(
         "violations": violations, "violation_codes": [v["code"] for v in violations],
         "errors": errors, "warnings": warnings, "recommended_env": recommended_env,
     }
+
+
+from mindie_coordinator.mindie_sd_env import (  # noqa: E402
+    probe_mindie_sd_runtime_readiness as probe_mindie_sd_runtime_readiness,
+    validate_mindie_sd_runtime_env as validate_mindie_sd_runtime_env,
+)
+from mindie_coordinator.xllm_env import (  # noqa: E402
+    probe_xllm_runtime_readiness as probe_xllm_runtime_readiness,
+    validate_xllm_runtime_env as validate_xllm_runtime_env,
+)
+
+__all__ = [
+    "_LOOPBACK_IFNAMES",
+    "probe_mindie_sd_runtime_readiness",
+    "probe_xllm_runtime_readiness",
+    "validate_mindie_sd_runtime_env",
+    "validate_vllm_ascend_runtime_env",
+    "validate_xllm_runtime_env",
+]
+

@@ -272,26 +272,42 @@ def docker_ref_repo(ref: str) -> str:
 def image_family(ref: str) -> str | None:
     """Identify image families with package-specific preparation contracts."""
     name = docker_ref_repo(ref).rsplit("/", 1)[-1].lower()
-    return "mindiesd" if name == "mindiesd" else None
+    return "mindiesd" if name in {"mindiesd", "mindie-sd"} else None
+
+
+def _docker_ref_tag_allow_digest(ref: str) -> str | None:
+    without_digest = ref.split("@", 1)[0]
+    last_slash = without_digest.rfind("/")
+    last_colon = without_digest.rfind(":")
+    if last_colon > last_slash:
+        return without_digest[last_colon + 1 :]
+    return None
 
 
 def infer_machine_type_from_image(ref: str | None) -> str | None:
     if not ref:
         return None
-    tag = docker_ref_tag(ref)
+    family = image_family(ref)
+    tag = _docker_ref_tag_allow_digest(ref) if family == "mindiesd" else docker_ref_tag(ref)
     if tag is None:
         return None
     lowered = tag.lower()
-    if any(marker in lowered for marker in ("-a5", "-950dt", "-950pr")) or (
-        image_family(ref) == "mindiesd" and re.search(r"-950(?:-|$)", lowered)
-    ):
+    if family == "mindiesd":
+        if re.search(r"(?:^|[-_])(?:a5|950(?:dt|pr)?)(?:[-_.]|$)", lowered):
+            return "A5"
+        if re.search(r"(?:^|[-_])310p(?:[-_.]|$)", lowered):
+            return "310P"
+        if re.search(r"(?:^|[-_])a3(?:[-_.]|$)", lowered):
+            return "A3"
+        if re.search(r"(?:^|[-_])(?:910b|a2)(?:[-_.]|$)", lowered):
+            return "A2"
+        return None
+    if any(marker in lowered for marker in ("-a5", "-950dt", "-950pr")):
         return "A5"
     if "-310p" in lowered:
         return "310P"
     if "-a3" in lowered:
         return "A3"
-    if image_family(ref) == "mindiesd":
-        return "A2" if re.search(r"-(?:910b|a2)(?:-|$)", lowered) else None
     if docker_ref_repo(ref).endswith("ascend/vllm-ascend"):
         return "A2"
     return None

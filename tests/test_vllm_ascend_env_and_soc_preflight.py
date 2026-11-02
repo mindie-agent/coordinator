@@ -1,6 +1,17 @@
 """Tier 0 unit tests for vllm-ascend runtime env, SoC feature compatibility, and NUMA/CPU binding preflight."""
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from mindie_coordinator import (
+    probe_mindie_sd_runtime_readiness,
+    probe_xllm_runtime_readiness,
+    validate_mindie_sd_runtime_env,
+    validate_xllm_runtime_env,
+)
 from mindie_coordinator.env_manager import validate_vllm_ascend_runtime_env
 from mindie_coordinator.op_preflight import (
     validate_model_soc_feature_compatibility,
@@ -186,3 +197,148 @@ def test_validate_numa_cpu_binding_plan_verifies_irq_acl_release_and_catches_haz
         "cross_numa_cpu_binding",
         "omp_threads_oversubscription",
     }.issubset(bad_plan["violation_codes"])
+
+
+def test_probe_xllm_runtime_readiness_checks_vendor_git_head_atb_and_build_caches(tmp_path: Path):
+    opp_root = tmp_path / "opp"
+    vendor_dir = opp_root / "vendors" / "custom_xllm_math"
+    vendor_dir.mkdir(parents=True)
+    (vendor_dir / ".xllm_ops_git_head").write_text("a1b2c3d4e5f6\n", encoding="utf-8")
+    ccache_dir = tmp_path / "ccache"
+    vcpkg_dir = tmp_path / "vcpkg"
+    ccache_dir.mkdir()
+    vcpkg_dir.mkdir()
+
+    # 1. Valid xLLM runtime and build-cache readiness
+    ok_report = probe_xllm_runtime_readiness(
+        {
+            "ASCEND_OPP_PATH": str(opp_root),
+            "ATB_HOME_PATH": "/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1",
+            "LD_LIBRARY_PATH": f"{vendor_dir}/op_api/lib:/usr/local/Ascend/driver/lib64",
+        },
+        xllm_binary_present=True,
+        expected_xllm_ops_git_head="a1b2c3d4e5f6",
+        opp_root=opp_root,
+        ccache_dir=ccache_dir,
+        vcpkg_root=vcpkg_dir,
+    )
+    assert ok_report["valid"] is True
+    assert ok_report["status"] == "ok"
+    assert ok_report["xllm_ops_vendor"]["observed_git_head"] == "a1b2c3d4e5f6"
+    assert ok_report["cache_status"]["ccache_ready"] is True
+    assert ok_report["cache_status"]["vcpkg_ready"] is True
+
+    # 2. Revision mismatch + missing ATB_HOME_PATH + missing custom_xllm_math/op_api/lib + missing runtime
+    bad_report = validate_xllm_runtime_env(
+        {"ASCEND_OPP_PATH": str(opp_root), "LD_LIBRARY_PATH": "/usr/lib64"},
+        xllm_binary_present=False,
+        xllm_package_present=False,
+        expected_xllm_ops_git_head="deadbeef9999",
+        opp_root=opp_root,
+        require_build_cache=True,
+    )
+    assert bad_report["valid"] is False
+    assert {
+        "xllm_runtime_missing",
+        "xllm_ops_revision_mismatch",
+        "missing_xllm_custom_op_lib_path",
+        "atb_home_path_missing",
+        "xllm_build_cache_unconfigured",
+    }.issubset(bad_report["violation_codes"])
+    assert f"{vendor_dir}/op_api/lib" in bad_report["recommended_env"]["LD_LIBRARY_PATH"]
+
+
+def test_probe_and_validate_mindie_sd_runtime_env_and_timeout_propagation(tmp_path: Path, monkeypatch):
+    sd_root = tmp_path / "mindiesd_pkg"
+    plugin_dir = sd_root / "mindiesd" / "plugin"
+    opp_dir = sd_root / "mindiesd" / "ops" / "vendors" / "mindie_sd"
+    plugin_dir.mkdir(parents=True)
+    opp_dir.mkdir(parents=True)
+    (plugin_dir / "libpta_extend.so").write_bytes(b"ELF-pta-extend")
+
+    ready_report = probe_mindie_sd_runtime_readiness(
+        {
+            "MINDIE_SD_ROOT": str(sd_root),
+            "MINDIE_SD_VERSION": "2.1.RC1",
+            "ASCEND_CUSTOM_OPP_PATH": str(opp_dir),
+            "LD_LIBRARY_PATH": str(plugin_dir),
+        }
+    )
+    assert ready_report["ready"] is True
+    assert ready_report["mindiesd_available"] is True
+    assert ready_report["mindiesd_version"] == "2.1.RC1"
+    assert ready_report["pta_plugin_available"] is True
+    assert ready_report["custom_opp_available"] is True
+    assert ready_report["issues"] == []
+
+    # Also verify MindIE-SD 3.1.0 libPTAExtensionOPS.so + CANN vendors/customize layout & FLA pth warning
+    sd31_root = tmp_path / "mindiesd_310"
+    sd31_plugin = sd31_root / "mindiesd" / "plugin"
+    cann_root = tmp_path / "cann"
+    cann_customize = cann_root / "opp" / "vendors" / "customize"
+    sd31_plugin.mkdir(parents=True)
+    cann_customize.mkdir(parents=True)
+    (sd31_plugin / "libPTAExtensionOPS.so").write_bytes(b"ELF-PTAExtensionOPS")
+    sd31_report = probe_mindie_sd_runtime_readiness(
+        {
+            "MINDIE_SD_ROOT": str(sd31_root),
+            "MINDIE_SD_VERSION": "3.1.0",
+            "ASCEND_HOME_PATH": str(cann_root),
+        }
+    )
+    assert sd31_report["ready"] is True
+    assert sd31_report["pta_plugin_path"].endswith("libPTAExtensionOPS.so")
+    assert sd31_report["custom_opp_path"].endswith("vendors/customize")
+
+    fla_warn = validate_mindie_sd_runtime_env(
+        {
+            "ASCEND_CUSTOM_OPP_PATH": "/usr/local/lib/python3.12/site-packages/fla/ops/ascend/vendors/customize",
+            "LD_LIBRARY_PATH": str(sd31_plugin),
+        },
+        soc_version="Ascend950DT_9582",
+    )
+    assert any("FLA_NPU_DISABLE_PTH=1" in w for w in fla_warn["warnings"])
+
+    # Verify subprocess.TimeoutExpired raises TimeoutError (never swallowed by except OSError)
+    def _raise_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["python3"], timeout=0.01)
+
+    monkeypatch.setattr(subprocess, "run", _raise_timeout)
+    with pytest.raises(TimeoutError, match="mindiesd readiness probe timed out"):
+        probe_mindie_sd_runtime_readiness({}, python_executable="python3", timeout_sec=0.01)
+
+    # Validate USP hybrid parallel topology and A5 quant_four_over_six_a5
+    valid_usp = validate_mindie_sd_runtime_env(
+        {"ASCEND_CUSTOM_OPP_PATH": str(opp_dir), "LD_LIBRARY_PATH": str(plugin_dir)},
+        soc_version="Ascend950",
+        ulysses_degree=4,
+        ring_degree=2,
+        cfg_degree=1,
+        tp_degree=1,
+        world_size=8,
+        num_q_heads=24,
+        num_kv_heads=8,
+        use_quant_four_over_six_a5=True,
+    )
+    assert valid_usp["valid"] is True
+    assert valid_usp["issues"] == []
+
+    invalid_usp = validate_mindie_sd_runtime_env(
+        {},
+        soc_version="Ascend910B4",
+        ulysses_degree=4,
+        ring_degree=2,
+        cfg_degree=1,
+        tp_degree=1,
+        world_size=4,
+        num_q_heads=30,
+        num_kv_heads=6,
+        use_quant_four_over_six_a5=True,
+    )
+    assert invalid_usp["valid"] is False
+    joined_issues = "\n".join(invalid_usp["issues"])
+    assert "MIE-USP-002" in joined_issues
+    assert "MIE-USP-001" in joined_issues
+    assert "MIE-QNT-A5" in joined_issues
+
+

@@ -33,7 +33,6 @@ missing=()
 for p in \
   /dev/davinci_manager \
   /dev/hisi_hdc \
-  /dev/devmm_svm \
   /usr/local/Ascend/driver \
   /usr/local/Ascend/driver/lib64/common \
   /usr/local/Ascend/driver/lib64/driver \
@@ -44,6 +43,11 @@ for p in \
   do
   [ -e "$p" ] || missing+=("$p")
 done
+if [ "${machine_type_input^^}" != "A5" ] && [[ "${soc_input,,}" != *"950"* ]] && [ ! -e /dev/devmm_svm ]; then
+  if ! npu-smi info 2>/dev/null | grep -qi '950'; then
+    missing+=("/dev/devmm_svm")
+  fi
+fi
 if [ "${#missing[@]}" -gt 0 ]; then
   missing_json=$(python3 - <<'PY' "${missing[@]}"
 import json
@@ -280,6 +284,14 @@ else
     visibility_args+=("--label" "com.mindie.visible_devices=$visible_devices")
   fi
 
+  device_args=(
+    --device=/dev/davinci_manager
+    --device=/dev/hisi_hdc
+  )
+  if [ -e /dev/devmm_svm ]; then
+    device_args+=(--device=/dev/devmm_svm)
+  fi
+
   emit_progress "container" "running" "creating managed container" 45
   docker run --name "$container" -it -d --network host --shm-size=500g \
     --privileged=true \
@@ -291,9 +303,7 @@ else
     --label com.mindie.container_type="$machine_type" \
     --label com.mindie.soc="$soc" \
     -w "$workdir" \
-    --device=/dev/davinci_manager \
-    --device=/dev/hisi_hdc \
-    --device=/dev/devmm_svm \
+    "${device_args[@]}" \
     --entrypoint=bash \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /usr/local/dcmi:/usr/local/dcmi \

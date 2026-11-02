@@ -61,6 +61,12 @@ def inspect_existing(request, run=subprocess.run):
                 or labels.get('com.mindie.container_ssh_port') != str(port)
                 or (info.get('HostConfig') or {}).get('NetworkMode') != 'host'):
             return {'status': 'unknown', 'reason': 'managed container or SSH port facts are incomplete'}
+        expected_machine = (request.get('image_request') or {}).get('machine_type')
+        actual_machine = (labels.get('com.mindie.machine_type') or '').strip()
+        if expected_machine and actual_machine and actual_machine.upper() != str(expected_machine).strip().upper():
+            return {'status': 'mismatch', 'container_id': identifier, 'image': image,
+                    'image_id': image_id,
+                    'reason': f'existing container machine type {actual_machine} does not match requested {expected_machine}'}
         # Host networking needs evidence that this container's sshd owns the
         # configured listening socket, not just a label or another user's port.
         processes = output(['docker', 'top', identifier, '-eo', 'pid']).splitlines()[1:]

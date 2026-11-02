@@ -85,6 +85,7 @@ from mindie_coordinator.provision.image_resolver import (
     fetch_latest_release_tag,
     fetch_release_catalog,
     image_candidates_for_tag,
+    image_family,
     image_request_payload as _image_request_payload,
     image_tag_for_machine,
     infer_machine_type_from_image,

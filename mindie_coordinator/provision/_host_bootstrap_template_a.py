@@ -193,6 +193,18 @@ infer_type_from_image() {
   else
     maybe_repo="$repo_part"
   fi
+  if [[ "$maybe_repo" == *"/mindiesd" || "$maybe_repo" == *"/mindie-sd" || "$maybe_repo" == "mindiesd" || "$maybe_repo" == "mindie-sd" ]]; then
+    case "$lowered" in
+      *-950-*|*-950)
+        printf 'A5\n'
+        return 0
+        ;;
+      *-910b-*|*-910b|*-a2-*|*-a2)
+        printf 'A2\n'
+        return 0
+        ;;
+    esac
+  fi
   if [[ "$maybe_repo" == *"ascend/vllm-ascend" ]]; then
     printf 'A2\n'
     return 0

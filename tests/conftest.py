@@ -18,6 +18,8 @@ def isolated_diagnostics(tmp_path, monkeypatch, request):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    monkeypatch.setenv("MINDIE_CONFIG_HOME", str(home / ".config" / "mindie"))
+    monkeypatch.setenv("MINDIE_DATA_HOME", str(home / ".local" / "share" / "mindie"))
     monkeypatch.setenv("MINDIE_COORDINATOR_STATE_DIR", str(tmp_path.resolve() / "coordinator-state"))
     monkeypatch.setenv("MINDIE_DIAGNOSTICS_ROOT", str(tmp_path.resolve() / "isolated-diagnostics"))
     monkeypatch.setenv("MINDIE_DIAGNOSTICS_CONFIG", str(tmp_path.resolve() / "reporting.json"))

@@ -55,7 +55,11 @@ from mindie_coordinator.ready_runtime import safe_id
 from mindie_coordinator.state_paths import coordinator_state_dir
 from mindie_coordinator.vllm_ascend_env import (
     _LOOPBACK_IFNAMES as _LOOPBACK_IFNAMES,
+    probe_mindie_sd_runtime_readiness as probe_mindie_sd_runtime_readiness,
+    probe_xllm_runtime_readiness as probe_xllm_runtime_readiness,
+    validate_mindie_sd_runtime_env as validate_mindie_sd_runtime_env,
     validate_vllm_ascend_runtime_env as validate_vllm_ascend_runtime_env,
+    validate_xllm_runtime_env as validate_xllm_runtime_env,
 )
 
 
@@ -783,9 +787,7 @@ def handle_lease(
 
 
 __all__ = [
-    "handle_container",
-    "handle_hosts",
-    "handle_lease",
-    "handle_probe",
-    "validate_vllm_ascend_runtime_env",
+    "handle_container", "handle_hosts", "handle_lease", "handle_probe",
+    "probe_mindie_sd_runtime_readiness", "probe_xllm_runtime_readiness",
+    "validate_mindie_sd_runtime_env", "validate_vllm_ascend_runtime_env", "validate_xllm_runtime_env",
 ]

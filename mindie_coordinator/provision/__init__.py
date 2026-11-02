@@ -138,11 +138,22 @@ def provision_user_container(
                                        **authentication}),
             password=password, password_env=password_env, identity_file=identity_file,
         )
-    image_request = host_ops.image_request_payload(image, machine_type=machine_type)
+    normalized_machine_type = host_ops.normalize_machine_type(machine_type)
+    image_request = host_ops.image_request_payload(image, machine_type=normalized_machine_type)
     families = {image_family(candidate) for candidate in image_request['candidates']}
     if len(families) > 1:
         raise host_ops.MachineManagementError("image candidates must belong to one image family")
     selected_family = next(iter(families), None)
+    requested_type = normalized_machine_type
+    if selected_family == 'mindiesd':
+        requested_types = {infer_machine_type_from_image(candidate)
+                           for candidate in image_request['candidates']}
+        requested_types.discard(None)
+        if len(requested_types) > 1:
+            raise host_ops.MachineManagementError('MindIE-SD image candidates target different machine types')
+        requested_type = normalized_machine_type or next(iter(requested_types), None)
+        if requested_type and not image_request.get('machine_type'):
+            image_request = {**image_request, 'machine_type': requested_type}
     if ssh_port and image_request['policy'] == 'explicit' and len(image_request['candidates']) == 1:
         from mindie_coordinator.provision.existing_container import observe_existing
         existing = measured('existing-container', lambda: observe_existing(host_target, container=container, user=user,
@@ -158,8 +169,9 @@ def provision_user_container(
                 reserved = measured('ssh-port-reservation', lambda: reserve_port(user=user, container_name=container, port=chosen_port))
                 if int(reserved.get('port') or chosen_port) != chosen_port:
                     raise host_ops.MachineManagementError('reserved SSH port differs from the verified existing listener')
+            resolved_machine = requested_type if selected_family == 'mindiesd' else normalized_machine_type
             return {**_record_ready_container(host, image, user, host_user, host_port,
-                                             chosen_port, machine_type, machines, alias=alias,
+                                             chosen_port, resolved_machine, machines, alias=alias,
                                              authentication=authentication),
                     'image_verification': existing}
     probe_payload = remote('host-probe',
@@ -172,22 +184,17 @@ def provision_user_container(
         require_payload=True,
     )
     if selected_family == 'mindiesd':
-        requested_types = {infer_machine_type_from_image(candidate)
-                           for candidate in image_request['candidates']}
-        requested_types.discard(None)
-        if len(requested_types) > 1:
-            raise host_ops.MachineManagementError('MindIE-SD image candidates target different machine types')
-        requested_type = machine_type or next(iter(requested_types), None)
-        observed_type = probe_payload.get('machine_type')
-        if requested_type and observed_type and requested_type.upper() != str(observed_type).upper():
+        raw_observed = probe_payload.get('machine_type')
+        observed_type = host_ops.normalize_machine_type(str(raw_observed)) if raw_observed else None
+        if requested_type and observed_type and requested_type.upper() != observed_type.upper():
             raise host_ops.MachineManagementError(
                 f'MindIE-SD image targets {requested_type}, but host reports {observed_type}'
             )
-        if not observed_type and not machine_type:
+        if not observed_type and not normalized_machine_type:
             raise host_ops.MachineManagementError(
                 'host machine type could not be verified; pass machine_type explicitly'
             )
-        machine_type = image_request['machine_type'] or str(observed_type).upper()
+        machine_type = normalized_machine_type or observed_type or requested_type
     chosen_port = int(ssh_port or probe_payload.get("free_port") or probe_payload.get("suggested_port") or probe_payload.get("ssh_port")
                       or probe_payload.get("container_ssh_port") or 0)
     if reserve_port is not None:

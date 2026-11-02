@@ -45,6 +45,14 @@ from mindie_coordinator.topology_gang import (  # noqa: E402
     sandbox_hygiene_command,
     validate_sandbox_path,
 )
+from mindie_coordinator.mindie_sd_env import (  # noqa: E402
+    probe_mindie_sd_runtime_readiness,
+    validate_mindie_sd_runtime_env,
+)
+from mindie_coordinator.xllm_env import (  # noqa: E402
+    probe_xllm_runtime_readiness,
+    validate_xllm_runtime_env,
+)
 
 __all__ = [
     "PLACEMENT_POLICIES",
@@ -73,6 +81,10 @@ __all__ = [
     "parse_npu_smi_capture",
     "parse_sandbox_hygiene",
     "plan_gang_lease",
+    "probe_mindie_sd_runtime_readiness",
+    "probe_xllm_runtime_readiness",
     "sandbox_hygiene_command",
+    "validate_mindie_sd_runtime_env",
     "validate_sandbox_path",
+    "validate_xllm_runtime_env",
 ]
