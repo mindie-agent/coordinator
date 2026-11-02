@@ -450,7 +450,9 @@ PY
     )
 
 
-def render_smoke_script(*, device_test: bool = True) -> str:
+def render_smoke_script(*, device_test: bool = True, image_family: str | None = None) -> str:
+    if image_family not in (None, "mindiesd"):
+        raise ValueError(f"unsupported image family {image_family!r}")
     template = r"""#!/usr/bin/env bash
 set -euo pipefail
 requested_python="${1:-}"
@@ -555,6 +557,8 @@ if not __DEVICE_TEST__:
         result.update(success=True, device_test=False,
                       torch_version=importlib.metadata.version('torch'),
                       torch_npu_version=importlib.metadata.version('torch-npu'))
+        if __IMAGE_FAMILY__ == 'mindiesd':
+            result['mindiesd_version'] = importlib.metadata.version('mindiesd')
     except importlib.metadata.PackageNotFoundError as exc:
         result.update(success=False, device_test=False, error=str(exc))
     print("__SENTINEL__" + json.dumps(result, ensure_ascii=False))
@@ -563,6 +567,8 @@ try:
     progress("smoke", "importing torch and torch_npu")
     import torch
     import torch_npu  # noqa: F401
+    if __IMAGE_FAMILY__ == 'mindiesd':
+        import mindiesd  # noqa: F401
 
     progress("smoke", "allocating a small tensor on NPU")
     x = torch.zeros(1, 2).npu()
@@ -592,7 +598,9 @@ print("__SENTINEL__" + json.dumps(result, ensure_ascii=False))
 raise SystemExit(0 if result["success"] else 3)
 PY
 """
-    return template.replace("__DEVICE_TEST__", repr(device_test)).replace("__SENTINEL__", SENTINEL).replace(
+    return template.replace("__DEVICE_TEST__", repr(device_test)).replace(
+        "__IMAGE_FAMILY__", repr(image_family)
+    ).replace("__SENTINEL__", SENTINEL).replace(
         "__PROGRESS__", PROGRESS_SENTINEL
     )
 

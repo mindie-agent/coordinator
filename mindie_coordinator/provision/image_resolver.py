@@ -269,6 +269,12 @@ def docker_ref_repo(ref: str) -> str:
     return without_digest
 
 
+def image_family(ref: str) -> str | None:
+    """Identify image families with package-specific preparation contracts."""
+    name = docker_ref_repo(ref).rsplit("/", 1)[-1].lower()
+    return "mindiesd" if name == "mindiesd" else None
+
+
 def infer_machine_type_from_image(ref: str | None) -> str | None:
     if not ref:
         return None
@@ -276,12 +282,16 @@ def infer_machine_type_from_image(ref: str | None) -> str | None:
     if tag is None:
         return None
     lowered = tag.lower()
-    if any(marker in lowered for marker in ("-a5", "-950dt", "-950pr")):
+    if any(marker in lowered for marker in ("-a5", "-950dt", "-950pr")) or (
+        image_family(ref) == "mindiesd" and re.search(r"-950(?:-|$)", lowered)
+    ):
         return "A5"
     if "-310p" in lowered:
         return "310P"
     if "-a3" in lowered:
         return "A3"
+    if image_family(ref) == "mindiesd":
+        return "A2" if re.search(r"-(?:910b|a2)(?:-|$)", lowered) else None
     if docker_ref_repo(ref).endswith("ascend/vllm-ascend"):
         return "A2"
     return None
@@ -293,9 +303,11 @@ def validate_explicit_image_for_machine(ref: str, machine_type: str | None) -> s
     if normalized_machine_type is None:
         return candidate
     repo = docker_ref_repo(candidate)
-    if not repo.endswith("ascend/vllm-ascend"):
+    if not repo.endswith("ascend/vllm-ascend") and image_family(candidate) != "mindiesd":
         return candidate
     inferred = infer_machine_type_from_image(candidate)
+    if image_family(candidate) == "mindiesd" and inferred is None:
+        return candidate
     if inferred is not None and inferred != normalized_machine_type:
         raise MachineManagementError(
             f"image {candidate!r} appears to target {inferred}, but the machine type is {normalized_machine_type}"
@@ -587,6 +599,13 @@ def resolve_image_request(
     if not candidates:
         raise MachineManagementError(
             "image selector is empty; choose `local-latest`, `rc`, `main`, `stable`, or an explicit non-latest image reference"
+        )
+    if normalized_machine_type is None and any(
+        image_family(candidate) == "mindiesd" and infer_machine_type_from_image(candidate) is None
+        for candidate in candidates
+    ):
+        raise MachineManagementError(
+            "MindIE-SD image tag does not identify a machine type; pass machine_type explicitly"
         )
     return ImageResolution(
         selector="explicit",

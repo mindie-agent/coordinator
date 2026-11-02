@@ -32,6 +32,7 @@ from typing import Any
 
 from mindie_coordinator.machine_directory import MachineDirectory
 from mindie_coordinator.provision import host_ops
+from mindie_coordinator.provision.image_resolver import image_family, infer_machine_type_from_image
 from mindie_coordinator.provision.task_environment import (  # noqa: F401
     TaskRootBusy,
     isolated_python,
@@ -138,6 +139,10 @@ def provision_user_container(
             password=password, password_env=password_env, identity_file=identity_file,
         )
     image_request = host_ops.image_request_payload(image, machine_type=machine_type)
+    families = {image_family(candidate) for candidate in image_request['candidates']}
+    if len(families) > 1:
+        raise host_ops.MachineManagementError("image candidates must belong to one image family")
+    selected_family = next(iter(families), None)
     if ssh_port and image_request['policy'] == 'explicit' and len(image_request['candidates']) == 1:
         from mindie_coordinator.provision.existing_container import observe_existing
         existing = measured('existing-container', lambda: observe_existing(host_target, container=container, user=user,
@@ -166,6 +171,23 @@ def provision_user_container(
         reuse_connection=True,
         require_payload=True,
     )
+    if selected_family == 'mindiesd':
+        requested_types = {infer_machine_type_from_image(candidate)
+                           for candidate in image_request['candidates']}
+        requested_types.discard(None)
+        if len(requested_types) > 1:
+            raise host_ops.MachineManagementError('MindIE-SD image candidates target different machine types')
+        requested_type = machine_type or next(iter(requested_types), None)
+        observed_type = probe_payload.get('machine_type')
+        if requested_type and observed_type and requested_type.upper() != str(observed_type).upper():
+            raise host_ops.MachineManagementError(
+                f'MindIE-SD image targets {requested_type}, but host reports {observed_type}'
+            )
+        if not observed_type and not machine_type:
+            raise host_ops.MachineManagementError(
+                'host machine type could not be verified; pass machine_type explicitly'
+            )
+        machine_type = image_request['machine_type'] or str(observed_type).upper()
     chosen_port = int(ssh_port or probe_payload.get("free_port") or probe_payload.get("suggested_port") or probe_payload.get("ssh_port")
                       or probe_payload.get("container_ssh_port") or 0)
     if reserve_port is not None:
@@ -199,7 +221,7 @@ def provision_user_container(
     container_target = host_ops.SshTarget(host=host, user="root", port=chosen_port)
     remote('metadata-readiness',
         container_target,
-        host_ops.render_smoke_script(device_test=False),
+        host_ops.render_smoke_script(device_test=False, image_family=selected_family),
         args=[""],
         timeout_seconds=host_ops.DEFAULT_SMOKE_TIMEOUT_SECONDS,
         stream_progress=False,

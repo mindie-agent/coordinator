@@ -6,6 +6,24 @@ This guide covers six practical topics for daily work with `mindie-coordinator`:
 
 ---
 
+## Provisioning a MindIE-SD image
+
+Pass a complete existing tag or digest. This A5 example is recorded in the [official MindIE-SD image guide](https://github.com/Ascend/MindIE-SD/blob/dev/docker/omni/OVERVIEW.zh.md); check the [MindIE-SD image download page](https://www.hiascend.com/developer/ascendhub/detail/7c3b1b7c5151469a98ac08b868dab45f) for the current pull reference:
+
+```bash
+mindie-coordinator provision --host YOUR_HOST \
+  --image 'swr.cn-south-1.myhuaweicloud.com/ascendhub/mindiesd:v3.1.0-A5-ubuntu22.04-py3.11' \
+  --machine-type A5
+```
+
+`ascendhub/mindie` is a different image repository name; it does not imply that the MindIE-SD image should use `mindie`.
+
+`mindie_container(action="provision", image="...", machine_type="A5")` uses the same path. Known MindIE-SD tag markers (`910b` / `A2`, `a3`, `950` / `A5`) are checked against the host machine type. Pass `machine_type` for custom tags that do not identify one. Provisioning checks the `torch`, `torch-npu`, and `mindiesd` package metadata without accessing an NPU before a lease is granted.
+
+The existing `rc`, `main`, `stable`, and `local-latest` selectors still select vllm-ascend images. Managed commands and business source can run inside the MindIE-SD image; automatic native build and cache reuse for MindIE-SD itself are not yet part of the dedicated `vllm` / `vllm-ascend` preparation path. Published image tags can differ from the Python version inside the image, so use registry information and the provisioning check rather than inferring the environment from the tag alone.
+
+---
+
 ## 1. Submitting Work, Waiting & Inspecting Evidence
 
 - **Command String vs. Local Script File**:
