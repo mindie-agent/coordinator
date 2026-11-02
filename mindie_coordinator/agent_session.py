@@ -1,7 +1,7 @@
 """Local development-task identity and attachment registry.
 
 [Role]
-Maps native Harness sessions (`claude`, `codex`, `cursor`, `grok`, `kimi`, `dsh`, `agy`, `antigravity`) to
+Maps native Harness sessions (`claude`, `codex`, `cursor`, `grok`, `kimi`, `dsh`, `agy`, `antigravity`, `wb`, `workbuddy`) to
 persistent local MindIE task identities, source worktree bindings, and execution
 records in `sessions.sqlite3`.
 
@@ -37,7 +37,12 @@ from pathlib import Path
 from mindie_coordinator.state_paths import agent_sessions_root
 from mindie_coordinator.client_paths import client_path
 
-CLIENTS = {"claude", "grok", "kimi", "codex", "cursor", "dsh", "agy", "antigravity"}
+CLIENTS = {"claude", "grok", "kimi", "codex", "cursor", "dsh", "agy", "antigravity", "wb", "workbuddy"}
+_CLIENT_ALIASES = {"antigravity": "agy", "workbuddy": "wb"}
+
+
+def _normalize_client(client: str) -> str:
+    return _CLIENT_ALIASES.get(client, client)
 
 
 def git_common_directory(path: str | Path) -> Path:
@@ -171,6 +176,7 @@ class AgentSessions:
                association: str = "", agent_id: str = "") -> dict:
         if client not in CLIENTS or not native_session_id or len(native_session_id) > 512:
             raise ValueError("a supported client and its actual native session id are required")
+        client = _normalize_client(client)
         if parent_context and association:
             raise ValueError("choose child inheritance or an explicit task association")
         parent = load_context(parent_context or association) if parent_context or association else None
@@ -227,6 +233,7 @@ class AgentSessions:
         return self._publish(key)
 
     def native_context(self, client: str, native_session_id: str, agent_id: str = "") -> dict:
+        client = _normalize_client(client)
         with self.transaction() as db:
             matches = [row for row in self.rows(db, "attachment")
                        if row["client"] == client and row["native_session_id"] == native_session_id
@@ -427,10 +434,17 @@ class AgentSessions:
 def load_context(context_file: str = "", *, allow_native_context: bool = True) -> dict:
     filename = context_file or os.environ.get("MINDIE_CONTEXT_FILE", "")
     if not filename:
+        wb_session = (
+            os.environ.get("WORKBUDDY_SESSION_ID", "").strip()
+            or os.environ.get("WORKBUDDY_CONVERSATION_ID", "").strip()
+            or os.environ.get("CODEBUDDY_SESSION_ID", "").strip()
+        )
         callers = [(client, os.environ.get(key, "").strip()) for client, key in
                    (("codex", "CODEX_THREAD_ID"), ("cursor", "CURSOR_CONVERSATION_ID"),
                     ("grok", "GROK_SESSION_ID"), ("kimi", "KIMI_SESSION_ID"),
                     ("agy", "AGY_CONVERSATION_ID"))]
+        if wb_session:
+            callers.append(("wb", wb_session))
         callers = [(client, native) for client, native in callers if native]
         if len(callers) > 1:
             raise ValueError("conflicting native client identities; pass context_file explicitly")

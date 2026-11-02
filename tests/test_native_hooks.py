@@ -16,7 +16,8 @@ from test_execution_inputs import repo
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
     for name in ("MINDIE_CONTEXT_FILE", "MINDIE_PARENT_CONTEXT", "MINDIE_ATTACH_CONTEXT",
-                 "MINDIE_GITHUB_IDENTITY_FILE", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+                 "MINDIE_GITHUB_IDENTITY_FILE", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+                 "WORKBUDDY_SESSION_ID", "WORKBUDDY_CONVERSATION_ID", "CODEBUDDY_SESSION_ID", "CODEBUDDY_ENV_FILE"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -102,7 +103,7 @@ def test_cursor_unknown_subagent_is_not_attached_as_a_new_root(tmp_path):
     assert store.sessions() == []
 
 
-@pytest.mark.parametrize("client", ["claude", "codex", "grok", "cursor"])
+@pytest.mark.parametrize("client", ["claude", "codex", "grok", "cursor", "wb"])
 def test_message_gets_native_context_without_changing_explicit_arguments(tmp_path, client):
     store = AgentSessions(tmp_path / "sessions")
     context = store.attach(client, "native", str(tmp_path))
@@ -402,6 +403,17 @@ def test_missing_prepared_child_never_becomes_implicit_source_free_execution(tmp
     repo(source / "missing")
     restored = store.bind_native_sources(context, sources=roots)
     assert "source_error" not in restored["attachment"]
+
+
+def test_wb_sessionstart_exports_codebuddy_env_file(tmp_path, monkeypatch):
+    source = repo(tmp_path / "project")
+    env_file = tmp_path / "codebuddy.env"
+    monkeypatch.setenv("CODEBUDDY_ENV_FILE", str(env_file))
+    store = AgentSessions(tmp_path / "sessions")
+    out = handle("wb", {"hook_event_name": "SessionStart", "session_id": "wb-sess-1", "cwd": str(source)}, store)
+    ctx = store.native_context("wb", "wb-sess-1")
+    assert ctx["context_file"] in out["hookSpecificOutput"]["additionalContext"]
+    assert f"export MINDIE_CONTEXT_FILE={ctx['context_file']}" in env_file.read_text(encoding="utf-8")
 
 
 def test_prepared_roots_keep_global_kimi_silent_outside_git_project(tmp_path, monkeypatch, capsys):

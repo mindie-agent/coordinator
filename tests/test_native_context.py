@@ -10,7 +10,9 @@ from test_execution_inputs import repo
 @pytest.fixture
 def native_env(tmp_path, monkeypatch):
     for name in ("MINDIE_CONTEXT_FILE", "MINDIE_PARENT_CONTEXT", "MINDIE_ATTACH_CONTEXT",
-                 "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GROK_SESSION_ID", "KIMI_SESSION_ID", "KIMI_AGENT_ID", "CURSOR_CONVERSATION_ID"):
+                 "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GROK_SESSION_ID", "KIMI_SESSION_ID",
+                 "KIMI_AGENT_ID", "CURSOR_CONVERSATION_ID", "AGY_CONVERSATION_ID",
+                 "WORKBUDDY_SESSION_ID", "WORKBUDDY_CONVERSATION_ID", "CODEBUDDY_SESSION_ID"):
         monkeypatch.delenv(name, raising=False)
     state = tmp_path / "sessions"
     monkeypatch.setenv("MINDIE_AGENT_SESSIONS_DIR", str(state))
@@ -231,6 +233,30 @@ def test_agy_attach_and_env_conversation_id_resolution(native_env, tmp_path, mon
     ctx1 = load_context()
     assert ctx1["attachment"]["client"] == "agy"
     assert ctx1["attachment"]["native_session_id"] == conv_id
+
+    ctx2 = load_context()
+    assert ctx2["session"]["id"] == ctx1["session"]["id"]
+    assert ctx2["attachment"]["id"] == ctx1["attachment"]["id"]
+
+
+def test_wb_attach_and_env_session_id_resolution(native_env, tmp_path, monkeypatch):
+    from mindie_coordinator.agent_session import load_context
+
+    sess_id = "wb-session-9c6fa414"
+    monkeypatch.delenv("MINDIE_CONTEXT_FILE", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setenv("WORKBUDDY_SESSION_ID", sess_id)
+    monkeypatch.setenv("CODEBUDDY_SESSION_ID", sess_id)
+    monkeypatch.chdir(tmp_path)
+
+    attached = AgentSessions(native_env).attach("workbuddy", sess_id, str(tmp_path))
+    assert attached["attachment"]["client"] == "wb"
+
+    ctx1 = load_context()
+    assert ctx1["attachment"]["client"] == "wb"
+    assert ctx1["attachment"]["native_session_id"] == sess_id
+    assert ctx1["session"]["id"] == attached["session"]["id"]
+    assert ctx1["attachment"]["id"] == attached["attachment"]["id"]
 
     ctx2 = load_context()
     assert ctx2["session"]["id"] == ctx1["session"]["id"]

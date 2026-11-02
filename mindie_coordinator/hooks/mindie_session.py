@@ -71,7 +71,7 @@ def task_call(client: str, payload: dict) -> tuple[str, object, str, object]:
 
 def needs_task_context(client: str, payload: dict) -> bool:
     name, _, _, arguments = task_call(client, payload)
-    return (client in {"claude", "codex", "grok", "cursor"} and context_tool(name, client)
+    return (client in {"claude", "codex", "grok", "cursor", "wb", "workbuddy"} and context_tool(name, client)
             and isinstance(arguments, dict) and not arguments.get("context_file"))
 
 
@@ -205,7 +205,7 @@ def handle(client: str, payload: dict, store: AgentSessions | None = None, *,
             store.detach(context)
             return {}
         refresh_cwd = normalized in {"userpromptsubmit", "beforesubmitprompt"} or (
-            client == "claude" and normalized == "pretooluse" and bool(payload.get("cwd")))
+            client in {"claude", "wb", "workbuddy"} and normalized == "pretooluse" and bool(payload.get("cwd")))
         if refresh_cwd and context["attachment"]["cwd"] != str(Path(cwd).resolve()):
             # EnterWorktree can move Claude during one prompt. Its next tool
             # carries the new native cwd; do not wait for another user prompt.
@@ -213,7 +213,7 @@ def handle(client: str, payload: dict, store: AgentSessions | None = None, *,
             context = bind_native_defaults(store, context, sources)
 
     context = store.bind_configured_user(context)
-    if client in {"claude", "codex", "grok", "cursor"} and normalized in {"userpromptsubmit", "beforesubmitprompt"}:
+    if client in {"claude", "codex", "grok", "cursor", "wb", "workbuddy"} and normalized in {"userpromptsubmit", "beforesubmitprompt"}:
         # Native tool injection retains context. Refresh cwd/user above, but do
         # not append the same instructions on every user turn.
         return {}
@@ -237,7 +237,7 @@ def handle(client: str, payload: dict, store: AgentSessions | None = None, *,
         # dispatcher envelope so the context receipt reaches the MCP server;
         # never flatten or infer the nested call from cwd/history.
         name, arguments, nested_key, nested_arguments = task_call(client, payload)
-        if context_tool(name, client) and client in {"claude", "codex", "grok", "cursor"}:
+        if context_tool(name, client) and client in {"claude", "codex", "grok", "cursor", "wb", "workbuddy"}:
             if not isinstance(nested_arguments, dict) or nested_arguments.get("context_file"):
                 return {}
             updated = {**nested_arguments, "context_file": context["context_file"]}
@@ -251,8 +251,13 @@ def handle(client: str, payload: dict, store: AgentSessions | None = None, *,
         return {}
     if client == "cursor" and normalized == "sessionstart":
         return {"env": {"MINDIE_CONTEXT_FILE": context["context_file"]}, "additional_context": hint}
-    if client == "claude" and normalized == "sessionstart" and os.environ.get("CLAUDE_ENV_FILE"):
-        with Path(client_path(os.environ["CLAUDE_ENV_FILE"])).open("a") as stream:
+    env_file_path = (
+        os.environ.get("CODEBUDDY_ENV_FILE") or os.environ.get("CLAUDE_ENV_FILE")
+        if client in {"wb", "workbuddy"}
+        else os.environ.get("CLAUDE_ENV_FILE")
+    )
+    if client in {"claude", "wb", "workbuddy"} and normalized == "sessionstart" and env_file_path:
+        with Path(client_path(env_file_path)).open("a") as stream:
             stream.write("\nexport MINDIE_CONTEXT_FILE=" + shlex.quote(context["context_file"]) + "\n")
     if normalized in {"sessionstart", "subagentstart", "userpromptsubmit"}:
         canonical = {"sessionstart": "SessionStart", "subagentstart": "SubagentStart", "userpromptsubmit": "UserPromptSubmit"}[normalized]
