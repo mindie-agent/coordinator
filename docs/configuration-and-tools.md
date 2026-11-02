@@ -6,6 +6,24 @@
 
 ---
 
+## MindIE-SD 镜像开通
+
+使用 MindIE-SD 镜像时，传入实际存在的完整 tag 或 digest。以下示例来自 [MindIE-SD 官方镜像说明](https://github.com/Ascend/MindIE-SD/blob/dev/docker/omni/OVERVIEW.zh.md)记录的 A5 实测镜像；拉取前请以 [MindIE-SD 镜像下载页](https://www.hiascend.com/developer/ascendhub/detail/7c3b1b7c5151469a98ac08b868dab45f)显示的地址为准：
+
+```bash
+mindie-coordinator provision --host YOUR_HOST \
+  --image 'swr.cn-south-1.myhuaweicloud.com/ascendhub/mindiesd:v3.1.0-A5-ubuntu22.04-py3.11' \
+  --machine-type A5
+```
+
+`ascendhub/mindie` 是另一个镜像仓库名，不能据此把 MindIE-SD 的镜像地址改成 `mindie`。
+
+`mindie_container(action="provision", image="...", machine_type="A5")` 使用同一开通流程。已知 MindIE-SD tag 中的 `910b` / `A2`、`a3`、`950` / `A5` 会被校验是否与目标主机机型相符；自定义 tag 无法识别机型时，必须显式传 `machine_type`。开通时会检查 `torch`、`torch-npu`、`mindiesd` 的包元数据，不会在尚未取得 NPU 租约时触碰设备。
+
+现有 `rc`、`main`、`stable`、`local-latest` 选择器仍只针对 vllm-ascend，不能用它们自动挑选 MindIE-SD 镜像。当前支持在镜像中执行受管命令或业务源码；MindIE-SD 自身原生算子的自动编译与缓存尚未纳入 `vllm` / `vllm-ascend` 的专用构建流程。镜像发布标签与镜像内 Python 版本可能不同，请以镜像仓库和开通检查的结果为准。
+
+---
+
 ## 1. 提交任务、等待完成与查看执行证据
 
 - **传命令还是传脚本文件？二选一即可**：
