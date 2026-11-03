@@ -130,6 +130,18 @@ fi
 
 container_exists=false
 if docker inspect "$container" >/dev/null 2>&1; then
+  if [ "$mode" = "docker_exec" ]; then
+    if [ "$(docker inspect -f '{{ index .Config.Labels "com.mindie.managed" }}' "$container")" != "true" ] ||
+       [ "$(docker inspect -f '{{ index .Config.Labels "com.mindie.namespace" }}' "$container")" != "$namespace" ] ||
+       [ "$(docker inspect -f '{{ index .Config.Labels "com.mindie.workdir" }}' "$container")" != "$workdir" ]; then
+      emit_json '{"success": false, "error": "existing container is not managed by this namespace/workdir", "phase": "container"}'
+      exit 21
+    fi
+    if [ "$(docker inspect -f '{{ index .Config.Labels "com.mindie.container_ssh_port" }}' "$container")" != "0" ]; then
+      emit_json '{"success": false, "error": "existing container mode is not docker_exec; remove the managed SSH container before changing mode", "phase": "container"}'
+      exit 21
+    fi
+  fi
   container_exists=true
   current_image=$(docker inspect -f '{{.Config.Image}}' "$container")
   current_base_image=$(docker inspect -f '{{ index .Config.Labels "com.mindie.base_image" }}' "$container" 2>/dev/null || true)
@@ -328,7 +340,9 @@ fi
 container_type="$machine_type"
 write_host_state "$machine_type" "$container_type" "$soc" "$selected_image"
 
-if ! docker exec "$container" bash -lc 'command -v sshd >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1'; then
+if [ "$mode" = "docker_exec" ]; then
+  package_bootstrap='{"install_skipped": true, "reason": "docker_exec"}'
+elif ! docker exec "$container" bash -lc 'command -v sshd >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1'; then
   emit_progress "container-ssh" "running" "installing openssh inside the container" 900
   if ! run_with_progress "container-ssh-install" "installing openssh inside the container" 900 install_container_ssh_packages; then
     emit_json '{"success": false, "error": "installing openssh inside container failed", "phase": "container-ssh-install"}'
@@ -361,22 +375,23 @@ else
   fi
 fi
 
-emit_progress "container-ssh" "running" "configuring dedicated container sshd" 60
-if ! run_with_progress "container-ssh-config" "configuring dedicated container sshd" 60 configure_container_state; then
-  emit_json '{"success": false, "error": "configuring dedicated container sshd failed", "phase": "container-ssh"}'
+emit_progress "container-config" "running" "configuring managed container state" 60
+if ! run_with_progress "container-config" "configuring managed container state" 60 configure_container_state; then
+  emit_json '{"success": false, "error": "configuring managed container state failed", "phase": "container-config"}'
   exit 31
 fi
 actions+=("configured-container-env")
-actions+=("configured-dedicated-sshd")
-
-emit_progress "firewall" "running" "updating host firewall for the container ssh port" 30
-if command -v ufw >/dev/null 2>&1; then
-  ufw allow "${port}/tcp" >/dev/null 2>&1 || true
-  firewall="ufw"
-elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-  firewall-cmd --quiet --add-port="${port}/tcp" --permanent >/dev/null 2>&1 || true
-  firewall-cmd --quiet --reload >/dev/null 2>&1 || true
-  firewall="firewalld"
+if [ "$mode" = "ssh" ]; then
+  actions+=("configured-dedicated-sshd")
+  emit_progress "firewall" "running" "updating host firewall for the container ssh port" 30
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+    firewall="ufw"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --quiet --add-port="${port}/tcp" --permanent >/dev/null 2>&1 || true
+    firewall-cmd --quiet --reload >/dev/null 2>&1 || true
+    firewall="firewalld"
+  fi
 fi
 
 payload=$(python3 - <<'PY' "$container" "$port" "$image_request_json" "$selected_image" "$image_resolution" "$workdir" "$namespace" "$created" "$started" "$pulled" "$installed_ssh" "$firewall" "${actions[*]}" "$previous_image" "$replace_on_image_change" "$machine_type" "$container_type" "$soc" "$host_env_file" "$host_metadata_file" "$container_env_file" "$container_metadata_file" "$package_bootstrap" "$run_image" "$prepared_image" "$use_prepared_image_cache" "$used_prepared_image_cache" "$created_prepared_image_cache" "$docker_pull_policy" "$visible_devices" "$selected_image_id" "$runtime_image_candidates_json" "$local_image_discovery"
@@ -421,7 +436,7 @@ image_request = json.loads(image_request_json)
 print(json.dumps({
     "success": True,
     "container": container,
-    "container_ssh_port": int(port),
+    "container_ssh_port": int(port) if int(port) else None,
     "image": selected_image,
     "requested_image": image_request.get("requested"),
     "requested_selector": image_request.get("selector"),

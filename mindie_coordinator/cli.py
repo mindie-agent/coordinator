@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--host-user", default="root")
     provision.add_argument("--host-port", type=int, default=22)
     provision.add_argument("--ssh-port", type=int)
+    provision.add_argument("--mode", choices=("ssh", "docker_exec"), default="ssh")
     provision.add_argument("--machine-type", choices=("A2", "A3", "A5", "310P"))
     provision.add_argument("--password-env")
     register = sub.add_parser(
@@ -104,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         row = provision_user_container(
             host=args.host, image=args.image, user=args.user,
             host_user=args.host_user, host_port=args.host_port,
-            ssh_port=args.ssh_port, machine_type=args.machine_type,
+            ssh_port=args.ssh_port, machine_type=args.machine_type, mode=args.mode,
             password_env=args.password_env,
         )
         print(json.dumps(row, ensure_ascii=False, indent=2, sort_keys=True))

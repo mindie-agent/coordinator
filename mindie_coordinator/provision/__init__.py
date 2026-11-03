@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import shlex
 import time
 from typing import Any
 
@@ -60,6 +61,7 @@ def provision_user_container(
     host_user: str = host_ops.DEFAULT_HOST_USER,
     host_port: int = host_ops.DEFAULT_HOST_PORT,
     ssh_port: int | None = None,
+    mode: str = "ssh",
     machine_type: str | None = None,
     password: str | None = None,
     password_env: str | None = None,
@@ -71,6 +73,11 @@ def provision_user_container(
     alias: str | None = None,
 ) -> dict[str, Any]:
     """Create or reuse `mindie-<user>` on `host` from a named image/recipe."""
+    mode = str(mode).strip().lower()
+    if mode not in {"ssh", "docker_exec"}:
+        raise ValueError("provision mode must be ssh or docker_exec")
+    if mode == "docker_exec" and ssh_port is not None:
+        raise ValueError("docker_exec provisioning does not accept ssh_port")
     timings, observation = {}, {}
 
     def progress(phase, status, **details):
@@ -117,7 +124,7 @@ def provision_user_container(
             "or a full image reference"
         )
     host_target = host_ops.SshTarget(host=host, user=host_user, port=host_port)
-    if reserve_port is None:
+    if mode == "ssh" and reserve_port is None:
         from mindie_coordinator.host_queue import HostQueue
 
         authority = HostQueue()
@@ -154,7 +161,7 @@ def provision_user_container(
         requested_type = normalized_machine_type or next(iter(requested_types), None)
         if requested_type and not image_request.get('machine_type'):
             image_request = {**image_request, 'machine_type': requested_type}
-    if ssh_port and image_request['policy'] == 'explicit' and len(image_request['candidates']) == 1:
+    if mode == "ssh" and ssh_port and image_request['policy'] == 'explicit' and len(image_request['candidates']) == 1:
         from mindie_coordinator.provision.existing_container import observe_existing
         existing = measured('existing-container', lambda: observe_existing(host_target, container=container, user=user,
                                     ssh_port=int(ssh_port), workdir=DEFAULT_WORKDIR,
@@ -197,7 +204,7 @@ def provision_user_container(
         machine_type = normalized_machine_type or observed_type or requested_type
     chosen_port = int(ssh_port or probe_payload.get("free_port") or probe_payload.get("suggested_port") or probe_payload.get("ssh_port")
                       or probe_payload.get("container_ssh_port") or 0)
-    if reserve_port is not None:
+    if mode == "ssh" and reserve_port is not None:
         # A probe's free port is only a live observation, not a reservation.
         # Let the host owner select and claim an automatic port atomically.
         requested_port = int(ssh_port or 0)
@@ -205,9 +212,12 @@ def provision_user_container(
         chosen_port = int(reserved.get("port") or 0)
         if requested_port and chosen_port != requested_port:
             raise host_ops.MachineManagementError("reserved SSH port differs from the requested fixed port")
-    if chosen_port <= 0:
+    if mode == "ssh" and chosen_port <= 0:
         raise host_ops.MachineManagementError("host did not reserve or offer a container SSH port")
-    container_identity, public_key = host_ops.ensure_key(authentication.get("identity_file"))
+    container_identity, public_key = (host_ops.ensure_key(authentication.get("identity_file"))
+                                      if mode == "ssh" else (None, ""))
+    if mode == "docker_exec":
+        chosen_port = 0
     remote('container-bootstrap',
         host_target,
         host_ops.render_bootstrap_host_script(),
@@ -221,28 +231,34 @@ def provision_user_container(
             "false",
             machine_type or "",
             "",
+            "false",
+            "",
+            mode,
         ],
         timeout_seconds=host_ops.DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS,
         stream_progress=False,
     )
-    container_target = host_ops.SshTarget(host=host, user="root", port=chosen_port)
-    remote('metadata-readiness',
-        container_target,
-        host_ops.render_smoke_script(device_test=False, image_family=selected_family),
-        args=[""],
-        timeout_seconds=host_ops.DEFAULT_SMOKE_TIMEOUT_SECONDS,
-        stream_progress=False,
-        reuse_connection=True,
-        require_payload=True,
-        identity_file=container_identity,
-    )
+    smoke_script = host_ops.render_smoke_script(device_test=False, image_family=selected_family)
+    if mode == "docker_exec":
+        container_target = host_target
+        smoke_script = ("#!/usr/bin/env bash\nset -euo pipefail\n"
+                        + "docker exec -i " + shlex.quote(container)
+                        + " bash -s -- '' <<'MINDIE_METADATA_SMOKE'\n"
+                        + smoke_script + "\nMINDIE_METADATA_SMOKE\n")
+        smoke_options = {}
+    else:
+        container_target = host_ops.SshTarget(host=host, user="root", port=chosen_port)
+        smoke_options = {"identity_file": container_identity}
+    remote('metadata-readiness', container_target, smoke_script, args=[""],
+           timeout_seconds=host_ops.DEFAULT_SMOKE_TIMEOUT_SECONDS,
+           stream_progress=False, reuse_connection=True, require_payload=True, **smoke_options)
     return _record_ready_container(host, image, user, host_user, host_port,
                                    chosen_port, machine_type, machines, alias=alias,
-                                   authentication=authentication, container_identity=container_identity)
+                                   authentication=authentication, container_identity=container_identity, mode=mode)
 
 
 def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines,
-                            alias=None, authentication=None, container_identity=None):
+                            alias=None, authentication=None, container_identity=None, mode="ssh"):
     container = user_container_name(user)
     record = {
         "alias": alias or host,
@@ -251,7 +267,7 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
                     if key in {"auth_ref", "identity_file"} and value}},
         "container": {
             "name": container,
-            "ssh_port": chosen_port,
+            **({"ssh_port": chosen_port} if mode == "ssh" else {"mode": mode}),
             "user": "root",
             "workdir": DEFAULT_WORKDIR,
             "runtime_env_file": "/etc/profile.d/mindie-ascend-env.sh",
@@ -266,7 +282,7 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "user": user,
         "container_name": container,
         "host": host,
-        "ssh_port": chosen_port,
+        **({"ssh_port": chosen_port} if mode == "ssh" else {"mode": mode}),
         "image": image,
         "workdir": DEFAULT_WORKDIR,
         "state": "ready",
