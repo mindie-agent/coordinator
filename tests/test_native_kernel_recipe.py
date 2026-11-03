@@ -14,7 +14,7 @@ from mindie_coordinator.runtime_profile import compiled_opc_recipe
 
 
 GENERATOR = r'''
-import configparser, json, pathlib, sys
+import configparser, json, pathlib, shlex, sys
 ini, output, unit = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 parser = configparser.ConfigParser()
 parser.read(ini)
@@ -25,10 +25,10 @@ for index, dtype in enumerate(parser[op_type]['input0.dtype'].split(',')):
     param = output / (name + '_param.json')
     param.write_text(json.dumps({'op_type': op_type, 'dtype': dtype, 'op_list': [{'bin_filename': name}]}))
     (output / (op_type + '-' + op + '-' + str(index) + '.sh')).write_text(
-        'res=$(opc $1 --main_func=' + op + ' --input_param=' + param.resolve().as_posix() +
+        'res=$(opc $1 --main_func=' + op + ' --input_param=' + shlex.quote(param.resolve().as_posix()) +
         ' --soc_version=' + unit + ' --output=$2 --impl_mode=high_performance,optional --simplified_key_mode=0 --op_mode=dynamic)\n'
         'printf "%s\\n" "$res"\n'
-        'test -f $2/' + name + '.o || exit 1\ntest -f $2/' + name + '.json || exit 1\n')
+        'test -f $2/' + name + '.o || exit 1\ntest -f $2/' + name + '.json || exit 1\n', encoding='utf-8')
 '''
 
 CONFIGURATOR = r'''
@@ -143,7 +143,9 @@ def compiler(tmp_path):
             'source_sha256': digest(root / 'vllm-ascend' / source), 'recipe_files': files}
     executable = write(tmp_path / 'bin/opc', '#!' + sys.executable + '\n' + OPC)
     executable.chmod(0o755)
-    environment = {**os.environ, 'PATH': str(executable.parent) + os.pathsep + os.environ.get('PATH', '')}
+    # These tiny mock compilers do not need the real OPC memory budget.
+    environment = {**os.environ, 'PATH': str(executable.parent) + os.pathsep + os.environ.get('PATH', ''),
+                   'MAX_JOBS': '3'}
     for key in ('OP_DEBUG_CONFIG', 'TILING_KEY', 'OPS_COMPILE_OPTIONS', 'CMAKE_ARGS'):
         environment.pop(key, None)
     return root, plan, environment, proof

@@ -18,6 +18,11 @@ from mindie_coordinator.prepare_runtime import REMOTE_CAPTURE_SUFFIX
 @pytest.fixture
 def prepared(tmp_path, monkeypatch):
     monkeypatch.setattr(profile, 'installed_dependency_identity', lambda: {})
+    # Windows CPython has no SOABI; this fixture models an attested native ABI.
+    if sysconfig.get_config_var('SOABI') is None:
+        get_config_var = sysconfig.get_config_var
+        monkeypatch.setattr(sysconfig, 'get_config_var',
+                            lambda name: 'fixture-native-abi' if name == 'SOABI' else get_config_var(name))
     original, view = tmp_path / 'original', tmp_path / 'view'
     extension = 'vllm-ascend/vllm_ascend/vllm_ascend_C' + importlib.machinery.EXTENSION_SUFFIXES[0]
     files = {extension: 'library', 'vllm-ascend/vllm_ascend/_cann_ops_custom/config.json': 'metadata'}
