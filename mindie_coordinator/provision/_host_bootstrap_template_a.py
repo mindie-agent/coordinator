@@ -33,15 +33,6 @@ machine_type_input="${8:-}"
 soc_input="${9:-}"
 use_prepared_image_cache="${10:-false}"
 visible_devices="${11:-}"
-mode="${12:-ssh}"
-case "$mode" in
-  ssh) ;;
-  docker_exec)
-    [ "$port" = "0" ] || exit 2
-    use_prepared_image_cache=false
-    ;;
-  *) echo "invalid container mode" >&2; exit 2 ;;
-esac
 
 emit_json() {
   python3 - "$1" <<'PY'
@@ -279,7 +270,7 @@ print(json.dumps({
     "container_type": container_type or None,
     "soc": soc or None,
     "container": container,
-    "container_ssh_port": int(port) if int(port) else None,
+    "container_ssh_port": int(port),
     "selected_image": image or None,
     "workdir": workdir,
     "namespace": namespace or None,
@@ -429,7 +420,7 @@ INNER_PKG
 }
 
 configure_container_state() {
-  docker exec -i "$container" bash -s -- "$port" "$pubkey" "$machine_type" "$container_type" "$soc" "$selected_image" "$workdir" "$namespace" "$visible_devices" "$mode" <<'INNER_CFG'
+  docker exec -i "$container" bash -s -- "$port" "$pubkey" "$machine_type" "$container_type" "$soc" "$selected_image" "$workdir" "$namespace" "$visible_devices" <<'INNER_CFG'
 set -euo pipefail
 port="$1"
 pubkey="$2"
@@ -440,7 +431,6 @@ image="$6"
 workdir="$7"
 namespace="$8"
 visible_devices="$9"
-mode="${10:-ssh}"
 export PATH="/usr/local/bin:/usr/local/sbin:${PATH:-}"
 export LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64:${LD_LIBRARY_PATH:-}"
 if [ -z "${ASCEND_HOME_PATH:-}" ]; then
@@ -451,11 +441,8 @@ if [ -z "${ASCEND_HOME_PATH:-}" ]; then
   fi
 fi
 __INSTALL_PUBLIC_KEY_SH__
-if [ "$mode" = "ssh" ]; then
-  remote_dev_install_public_key "$pubkey" /root/.ssh
-  install -d -m 0755 /run/sshd
-fi
-install -d -m 0755 /etc/profile.d /etc/mindie
+remote_dev_install_public_key "$pubkey" /root/.ssh
+install -d -m 0755 /run/sshd /etc/profile.d /etc/mindie
 _mindie_python_dir=""
 for _d in $(ls -1d /usr/local/python*/bin 2>/dev/null | sort -V -r); do
   if [ -x "$_d/python3" ]; then
@@ -576,7 +563,6 @@ EOF_PIP
 else
   echo "[mindie-bootstrap] runtime python not found, skipping pip setup"
 fi
-[ "$mode" = "ssh" ] || exit 0
 ssh-keygen -A >/dev/null 2>&1 || true
 cat > /etc/ssh/sshd_mindie_config <<EOF_SSH
 Port ${port}

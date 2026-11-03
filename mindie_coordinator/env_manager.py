@@ -500,7 +500,7 @@ def handle_container(
             user=args.get("container_user") or args.get("user_namespace") or args.get("user_tag") or args.get("user"),
             host_user=host_spec["user"], host_port=host_spec["port"],
             ssh_port=int(args["ssh_port"]) if args.get("ssh_port") else None,
-            machine_type=machine_type, mode=str(args.get("mode") or "ssh"),
+            machine_type=machine_type,
             password=args.get("password"),
             password_env=args.get("password_env"),
             auth_ref=host_spec.get("auth_ref"),
@@ -548,30 +548,29 @@ def handle_container(
             confirmed_absent = removal.get("removed") is False and removal.get("previous_state") is None
             if removal.get("success") is not True or not (removal.get("removed") is True or confirmed_absent):
                 raise RuntimeError(f"failed to confirm removal of container {container_name!r} on {host_spec['host']}")
-            if bound.get("mode") != "docker_exec" or ssh_port > 0:
-                owner = str(args.get("container_user") or args.get("owner") or (rec or {}).get("user") or "").strip()
-                if not owner and container_name.startswith("mindie-"):
-                    owner = container_name[len("mindie-"):]
-                if not owner:
-                    return {
-                        "state": "partial", "action": "remove", "alias": alias, "container_name": container_name,
-                        "removal": removal,
-                        "reservation_release": {"status": "not_attempted", "reason": "container owner is unknown; reservation not touched"},
-                        "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
-                    }
-                host_queue = queue if queue is not None else HostQueue()
-                try:
-                    release = host_queue.request(host_spec, {
-                        "action": "container-ssh-release", "user": owner,
-                        "container_name": container_name, "port": ssh_port if ssh_port > 0 else 0,
-                    })
-                except Exception as exc:
-                    return {
-                        "state": "partial", "action": "remove", "alias": alias, "container_name": container_name,
-                        "removal": removal,
-                        "reservation_release": {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:800]},
-                        "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
-                    }
+            owner = str(args.get("container_user") or args.get("owner") or (rec or {}).get("user") or "").strip()
+            if not owner and container_name.startswith("mindie-"):
+                owner = container_name[len("mindie-"):]
+            if not owner:
+                return {
+                    "state": "partial", "action": "remove", "alias": alias, "container_name": container_name,
+                    "removal": removal,
+                    "reservation_release": {"status": "not_attempted", "reason": "container owner is unknown; reservation not touched"},
+                    "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
+                }
+            host_queue = queue if queue is not None else HostQueue()
+            try:
+                release = host_queue.request(host_spec, {
+                    "action": "container-ssh-release", "user": owner,
+                    "container_name": container_name, "port": ssh_port if ssh_port > 0 else 0,
+                })
+            except Exception as exc:
+                return {
+                    "state": "partial", "action": "remove", "alias": alias, "container_name": container_name,
+                    "removal": removal,
+                    "reservation_release": {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:800]},
+                    "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
+                }
 
         if rec is not None:
             cleaned = {k: v for k, v in rec.items() if k != "container"}

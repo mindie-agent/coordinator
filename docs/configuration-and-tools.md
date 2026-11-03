@@ -22,8 +22,6 @@ mindie-coordinator provision --host YOUR_HOST \
 
 现有 `rc`、`main`、`stable`、`local-latest` 选择器仍只针对 vllm-ascend，不能用它们自动挑选 MindIE-SD 镜像。当前支持在镜像中执行受管命令或业务源码；MindIE-SD 自身原生算子的自动编译与缓存尚未纳入 `vllm` / `vllm-ascend` 的专用构建流程。镜像发布标签与镜像内 Python 版本可能不同，请以镜像仓库和开通检查的结果为准。
 
-开通默认使用 `ssh` 模式。若希望经主机 SSH 执行 Docker exec，且不安装容器 SSH 软件包，可在 CLI 传 `--mode docker_exec`，或调用 `mindie_container(action="provision", ..., mode="docker_exec")`。该模式创建或复用受管容器，通过 `docker exec` 验证包元数据，并登记不含容器 SSH 端口的 `docker_exec` 端点；此时不能传 `ssh_port`。SSH 失败不会自动切换模式。
-
 ---
 
 ## 1. 提交任务、等待完成与查看执行证据

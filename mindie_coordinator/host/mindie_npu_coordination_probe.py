@@ -377,8 +377,8 @@ def probe_listening_ports() -> dict[str, Any]:
 
 
 # A5 (`npu-smi` 26.2) renders one logical NPU as a four-cell header row plus a
-# four-cell metric row. Driver 25.7 can include a PCIe Bus-Id in that row;
-# `AICore Memory-Usage HBM-Usage` remains in its final cell.
+# four-cell metric row.  The metric row has no PCIe Bus-Id and carries
+# `AICore Memory-Usage HBM-Usage` in its final cell.
 _SINGLE_ID_TABLE_HEADER = re.compile(
     r"\|\s*NPU(?:\s+ID)?\s*\|\s*Name\s*\|\s*Health\s*\|"
 )
@@ -417,19 +417,6 @@ def _parse_npu_smi_device_table(
     layout_error = None
     current_npu: int | None = None
     for line in output.splitlines():
-        cells = _npu_smi_cells(line)
-        metrics = _single_id_metric_row(cells)
-        if metrics is not None and current_npu in single_id_headers:
-            # Recognize A5 before the A2/A3 PCIe branch: recent A5 drivers
-            # include a Bus-Id but still have no Chip/Phy-ID identity column.
-            chip_id = int(cells[0]) if cells[0].isdigit() else 0
-            dev_id = current_npu
-            chip_devices[(current_npu, chip_id)] = dev_id
-            dev_ids.add(dev_id)
-            single_id_details.add(dev_id)
-            hbm[dev_id] = {"used_mb": int(metrics.group("hbm_used")),
-                           "total_mb": int(metrics.group("hbm_total"))}
-            continue
         if "0000:" in line:
             chip = re.match(r"\|\s*(\d+)\s+(\d+)\s+\|.*0000:", line)
             if chip:
@@ -452,6 +439,22 @@ def _parse_npu_smi_device_table(
                     "used_mb": int(pairs[-1][0]),
                     "total_mb": int(pairs[-1][1]),
                 }
+            continue
+        cells = _npu_smi_cells(line)
+        metrics = _single_id_metric_row(cells)
+        if metrics is not None and current_npu is not None:
+            # A5 has one Die per NPU and no explicit Chip/Phy-ID column.  The
+            # metric row follows its NPU header; a present first cell is the
+            # Chip ID, otherwise the sole Die is Chip 0.
+            chip_id = int(cells[0]) if cells[0].isdigit() else 0
+            dev_id = current_npu
+            chip_devices[(current_npu, chip_id)] = dev_id
+            dev_ids.add(dev_id)
+            single_id_details.add(dev_id)
+            # HBM remains measured even when the process table reports idle;
+            # these observations do not identify the source of existing usage.
+            hbm[dev_id] = {"used_mb": int(metrics.group("hbm_used")),
+                           "total_mb": int(metrics.group("hbm_total"))}
             continue
         if (len(cells) >= 3 and cells[0].isdigit() and cells[1]
                 and not cells[1].isdigit() and ":" not in cells[1]):

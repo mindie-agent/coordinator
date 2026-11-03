@@ -22,15 +22,12 @@ Some legacy MindIE images also contain MindIE-SD, such as `mindie:3.1.0_torch2.9
 
 The existing `rc`, `main`, `stable`, and `local-latest` selectors still select vllm-ascend images. Managed commands and business source can run inside the MindIE-SD image; automatic native build and cache reuse for MindIE-SD itself are not yet part of the dedicated `vllm` / `vllm-ascend` preparation path. Published image tags can differ from the Python version inside the image, so use registry information and the provisioning check rather than inferring the environment from the tag alone.
 
-SSH remains the default provisioning mode. To use host SSH plus Docker exec without installing container SSH packages, pass `--mode docker_exec` to the CLI, or `mode="docker_exec"` to `mindie_container(action="provision", ...)`. This mode creates or reuses the managed container, verifies package metadata through `docker exec`, and records a `docker_exec` endpoint with no container SSH port. Do not pass `ssh_port` in this mode. SSH failures never switch modes automatically.
-
 ---
 
 ## 1. Submitting Work, Waiting & Inspecting Evidence
 
 - **Command String vs. Local Script File**:
-  `mindie_run` and `TaskClient.run` accept either a `command` string or a local UTF-8 `script_file` path (up to 1 MiB; UTF-8 BOM is stripped and Windows CRLF line endings are automatically converted to LF so Linux shells never fail on `
-`).
+  `mindie_run` and `TaskClient.run` accept either a `command` string or a local UTF-8 `script_file` path (up to 1 MiB; UTF-8 BOM is stripped and Windows CRLF line endings are automatically converted to LF so Linux shells never fail on ``).
 - **Bounded Waits (`wait_until`)**:
   - Pass `wait_until="running"` (return as soon as the workload launches) or `wait_until="released"` (wait until the process finishes and NPU leases are released), along with `wait_timeout_seconds` (`0–600` seconds).
   - **`released` vs. `succeeded`**: `released` means the process has exited and hardware resources have been returned; check `state == "succeeded"` to confirm the command itself exited with code 0.
