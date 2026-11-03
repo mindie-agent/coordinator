@@ -80,6 +80,8 @@ if [ -z "$py" ]; then
   exit 3
 fi
 "$py" - "$image_request_json" "$port_range" "$prefix" "$sourced_scripts" <<'PY'
+from __future__ import annotations
+
 import json
 import os
 import pathlib
