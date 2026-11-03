@@ -415,6 +415,7 @@ def test_wb_sessionstart_exports_codebuddy_env_file(tmp_path, monkeypatch):
     out = handle("wb", {"hook_event_name": "SessionStart", "session_id": "wb-sess-1", "cwd": str(source)}, store)
     ctx = store.native_context("wb", "wb-sess-1")
     assert ctx["context_file"] in out["hookSpecificOutput"]["additionalContext"]
+    assert b"\r" not in env_file.read_bytes()
     assert shlex.split(env_file.read_text(encoding="utf-8")) == [
         "export", f"MINDIE_CONTEXT_FILE={ctx['context_file']}"]
 

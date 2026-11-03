@@ -257,7 +257,7 @@ def handle(client: str, payload: dict, store: AgentSessions | None = None, *,
         else os.environ.get("CLAUDE_ENV_FILE")
     )
     if client in {"claude", "wb", "workbuddy"} and normalized == "sessionstart" and env_file_path:
-        with Path(client_path(env_file_path)).open("a", encoding="utf-8") as stream:
+        with Path(client_path(env_file_path)).open("a", encoding="utf-8", newline="\n") as stream:
             stream.write("\nexport MINDIE_CONTEXT_FILE=" + shlex.quote(context["context_file"]) + "\n")
     if normalized in {"sessionstart", "subagentstart", "userpromptsubmit"}:
         canonical = {"sessionstart": "SessionStart", "subagentstart": "SubagentStart", "userpromptsubmit": "UserPromptSubmit"}[normalized]
