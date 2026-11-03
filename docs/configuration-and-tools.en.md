@@ -16,7 +16,7 @@ mindie-coordinator provision --host YOUR_HOST \
   --machine-type A5
 ```
 
-`ascendhub/mindie` is a different image repository name; it does not imply that the MindIE-SD image should use `mindie`.
+Some legacy MindIE images also contain MindIE-SD, such as `mindie:3.1.0_torch2.9.0-A5-py3.11-ubuntu24.04-x86_64`. The coordinator accepts complete tags or digests for the `mindie` repository, including registry-qualified references, and discovers SD support from the container's `mindiesd` package metadata. Without that package, generic MindIE readiness remains available; the image name alone does not prove SD is installed. Explicit `mindiesd` / `mindie-sd` images still require the package. Use an existing image reference rather than rewriting pull addresses between repositories based only on their names.
 
 `mindie_container(action="provision", image="...", machine_type="A5")` uses the same path. Known MindIE-SD tag markers (`910b` / `A2`, `a3`, `950` / `A5`) are checked against the host machine type. Pass `machine_type` for custom tags that do not identify one. Provisioning checks the `torch`, `torch-npu`, and `mindiesd` package metadata without accessing an NPU before a lease is granted.
 

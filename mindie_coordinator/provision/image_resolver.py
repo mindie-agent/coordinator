@@ -270,8 +270,10 @@ def docker_ref_repo(ref: str) -> str:
 
 
 def image_family(ref: str) -> str | None:
-    """Identify image families with package-specific preparation contracts."""
+    """Identify preparation contracts; legacy mindie needs SD metadata discovery."""
     name = docker_ref_repo(ref).rsplit("/", 1)[-1].lower()
+    if name == "mindie":
+        return "mindie"
     return "mindiesd" if name in {"mindiesd", "mindie-sd"} else None
 
 
@@ -288,11 +290,11 @@ def infer_machine_type_from_image(ref: str | None) -> str | None:
     if not ref:
         return None
     family = image_family(ref)
-    tag = _docker_ref_tag_allow_digest(ref) if family == "mindiesd" else docker_ref_tag(ref)
+    tag = _docker_ref_tag_allow_digest(ref) if family in {"mindie", "mindiesd"} else docker_ref_tag(ref)
     if tag is None:
         return None
     lowered = tag.lower()
-    if family == "mindiesd":
+    if family in {"mindie", "mindiesd"}:
         if re.search(r"(?:^|[-_])(?:a5|950(?:dt|pr)?)(?:[-_.]|$)", lowered):
             return "A5"
         if re.search(r"(?:^|[-_])310p(?:[-_.]|$)", lowered):
@@ -319,10 +321,10 @@ def validate_explicit_image_for_machine(ref: str, machine_type: str | None) -> s
     if normalized_machine_type is None:
         return candidate
     repo = docker_ref_repo(candidate)
-    if not repo.endswith("ascend/vllm-ascend") and image_family(candidate) != "mindiesd":
+    if not repo.endswith("ascend/vllm-ascend") and image_family(candidate) not in {"mindie", "mindiesd"}:
         return candidate
     inferred = infer_machine_type_from_image(candidate)
-    if image_family(candidate) == "mindiesd" and inferred is None:
+    if image_family(candidate) in {"mindie", "mindiesd"} and inferred is None:
         return candidate
     if inferred is not None and inferred != normalized_machine_type:
         raise MachineManagementError(
@@ -617,11 +619,11 @@ def resolve_image_request(
             "image selector is empty; choose `local-latest`, `rc`, `main`, `stable`, or an explicit non-latest image reference"
         )
     if normalized_machine_type is None and any(
-        image_family(candidate) == "mindiesd" and infer_machine_type_from_image(candidate) is None
+        image_family(candidate) in {"mindie", "mindiesd"} and infer_machine_type_from_image(candidate) is None
         for candidate in candidates
     ):
         raise MachineManagementError(
-            "MindIE-SD image tag does not identify a machine type; pass machine_type explicitly"
+            "MindIE/MindIE-SD image tag does not identify a machine type; pass machine_type explicitly"
         )
     return ImageResolution(
         selector="explicit",

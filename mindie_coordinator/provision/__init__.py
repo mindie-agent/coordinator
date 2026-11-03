@@ -145,7 +145,7 @@ def provision_user_container(
         raise host_ops.MachineManagementError("image candidates must belong to one image family")
     selected_family = next(iter(families), None)
     requested_type = normalized_machine_type
-    if selected_family == 'mindiesd':
+    if selected_family in {'mindie', 'mindiesd'}:
         requested_types = {infer_machine_type_from_image(candidate)
                            for candidate in image_request['candidates']}
         requested_types.discard(None)
@@ -169,7 +169,7 @@ def provision_user_container(
                 reserved = measured('ssh-port-reservation', lambda: reserve_port(user=user, container_name=container, port=chosen_port))
                 if int(reserved.get('port') or chosen_port) != chosen_port:
                     raise host_ops.MachineManagementError('reserved SSH port differs from the verified existing listener')
-            resolved_machine = requested_type if selected_family == 'mindiesd' else normalized_machine_type
+            resolved_machine = requested_type if selected_family in {'mindie', 'mindiesd'} else normalized_machine_type
             return {**_record_ready_container(host, image, user, host_user, host_port,
                                              chosen_port, resolved_machine, machines, alias=alias,
                                              authentication=authentication),
@@ -183,7 +183,7 @@ def provision_user_container(
         reuse_connection=True,
         require_payload=True,
     )
-    if selected_family == 'mindiesd':
+    if selected_family in {'mindie', 'mindiesd'}:
         raw_observed = probe_payload.get('machine_type')
         observed_type = host_ops.normalize_machine_type(str(raw_observed)) if raw_observed else None
         if requested_type and observed_type and requested_type.upper() != observed_type.upper():
