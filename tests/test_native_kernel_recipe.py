@@ -143,7 +143,9 @@ def compiler(tmp_path):
             'source_sha256': digest(root / 'vllm-ascend' / source), 'recipe_files': files}
     executable = write(tmp_path / 'bin/opc', '#!' + sys.executable + '\n' + OPC)
     executable.chmod(0o755)
-    environment = {**os.environ, 'PATH': str(executable.parent) + os.pathsep + os.environ.get('PATH', '')}
+    # Tiny mock compilers use explicit capacity rather than the real OPC budget.
+    environment = {**os.environ, 'PATH': str(executable.parent) + os.pathsep + os.environ.get('PATH', ''),
+                   'MAX_JOBS': '3'}
     for key in ('OP_DEBUG_CONFIG', 'TILING_KEY', 'OPS_COMPILE_OPTIONS', 'CMAKE_ARGS'):
         environment.pop(key, None)
     return root, plan, environment, proof

@@ -4,6 +4,7 @@ from threading import Barrier
 from unittest.mock import Mock
 import io
 import json
+import shlex
 
 import pytest
 
@@ -413,7 +414,8 @@ def test_wb_sessionstart_exports_codebuddy_env_file(tmp_path, monkeypatch):
     out = handle("wb", {"hook_event_name": "SessionStart", "session_id": "wb-sess-1", "cwd": str(source)}, store)
     ctx = store.native_context("wb", "wb-sess-1")
     assert ctx["context_file"] in out["hookSpecificOutput"]["additionalContext"]
-    assert f"export MINDIE_CONTEXT_FILE={ctx['context_file']}" in env_file.read_text(encoding="utf-8")
+    assert shlex.split(env_file.read_text(encoding="utf-8")) == [
+        "export", f"MINDIE_CONTEXT_FILE={ctx['context_file']}"]
 
 
 def test_prepared_roots_keep_global_kimi_silent_outside_git_project(tmp_path, monkeypatch, capsys):
