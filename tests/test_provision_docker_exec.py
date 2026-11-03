@@ -1,9 +1,18 @@
 import json
+import shutil
 from types import SimpleNamespace
 
 import pytest
 
 from mindie_coordinator import provision
+
+
+@pytest.fixture
+def bash_executable():
+    executable = shutil.which('bash')
+    if not executable:
+        pytest.skip('Bash is required for bootstrap behavior tests')
+    return executable
 
 
 def test_docker_exec_provision_uses_host_transport_without_ssh(monkeypatch):
@@ -52,15 +61,15 @@ def test_docker_exec_cleanup_does_not_release_an_ssh_reservation(tmp_path, monke
     assert not store.get('builder').get('container')
 
 
-def test_bootstrap_docker_exec_skips_package_and_firewall_commands():
+def test_bootstrap_docker_exec_skips_package_and_firewall_commands(bash_executable):
     import subprocess
     script = provision.host_ops.render_bootstrap_host_script()
-    syntax = subprocess.run(['bash', '-n'], input=script, text=True, capture_output=True)
+    syntax = subprocess.run([bash_executable, '-n'], input=script, text=True, capture_output=True)
     assert syntax.returncode == 0, syntax.stderr
     start = script.index('if [ "$mode" = "docker_exec" ]; then\n  package_bootstrap=')
     end = script.index('\npayload=$(python3', start)
     fragment = script[start:end]
-    result = subprocess.run(['bash', '-s'], input='''set -euo pipefail
+    result = subprocess.run([bash_executable, '-s'], input='''set -euo pipefail
 mode=docker_exec
 container=mindie-tester
 actions=()
@@ -108,7 +117,7 @@ def test_docker_exec_metadata_failure_does_not_record_ready_endpoint(monkeypatch
 
 
 @pytest.mark.parametrize('existing_port', ['2022', '<no value>', '0'])
-def test_docker_exec_reuse_rejects_ssh_mode_before_mutation(existing_port):
+def test_docker_exec_reuse_rejects_ssh_mode_before_mutation(existing_port, bash_executable):
     import subprocess
     script = provision.host_ops.render_bootstrap_host_script()
     start = script.index('container_exists=false\nif docker inspect "$container"')
@@ -133,7 +142,7 @@ docker() {
   esac
 }
 '''
-    result = subprocess.run(['bash', '-s', '--', existing_port], input=prelude + guard,
+    result = subprocess.run([bash_executable, '-s', '--', existing_port], input=prelude + guard,
                             text=True, capture_output=True)
     assert result.stderr == ''
     if existing_port == '0':
