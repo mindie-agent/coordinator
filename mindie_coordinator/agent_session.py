@@ -51,6 +51,7 @@ def git_common_directory(path: str | Path) -> Path:
     result = subprocess.run(
         ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
     )
     return Path(client_path(result.stdout.strip())).resolve(strict=True)
 
@@ -74,15 +75,18 @@ def worktree_reference(path: str) -> dict:
     """Inspect an actual repository; never materialize a second source copy."""
     # Git must not inherit the MCP input pipe while its transport reads it.
     # On Windows that can block Git startup and even timeout cleanup.
+    flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
     source = Path(client_path(path)).expanduser().resolve(strict=True)
     result = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        **flags,
     )
     root = Path(result.stdout.strip()).resolve()
     info = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--git-common-dir", "HEAD"],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        **flags,
     ).stdout.splitlines()
     return {"path": str(root), "git_common_dir": str((root / info[0]).resolve()), "head_at_bind": info[1]}
 

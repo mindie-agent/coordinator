@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,8 +32,11 @@ class RepoNode:
 
 
 def git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *args], check=check,
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=30)
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=check,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+    )
 
 
 def is_git_worktree(path: Path) -> bool:

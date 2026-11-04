@@ -93,6 +93,7 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
     cwd, project = cwd.resolve(), project.resolve()
     if cwd == project:
         return True
+    flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
     if sources is not None:
         # The consumer supplies explicitly prepared roots. Never discover
         # arbitrary nested repositories or infer task association from them.
@@ -100,6 +101,7 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
             actual = subprocess.run(
                 ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+                **flags,
             ).stdout.strip()
             if Path(client_path(actual)).resolve() in {Path(client_path(path)).resolve() for path in sources.values()}:
                 return True
@@ -125,6 +127,7 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
             parent = subprocess.run(
                 ["git", "-C", str(current), "rev-parse", "--show-superproject-working-tree"],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+                **flags,
             ).stdout.strip()
             if not parent:
                 return False

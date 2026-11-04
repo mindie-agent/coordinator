@@ -108,6 +108,7 @@ def run(
             text=True, encoding="utf-8",
             timeout=timeout,
             stdin=stdin,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
