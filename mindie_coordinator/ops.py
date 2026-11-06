@@ -13,6 +13,8 @@ import time
 from remote_dev.result import make_result
 from remote_dev.observability import observed_tool
 from remote_dev.core.errors import error_details, caller_error
+from remote_dev.mcp.source_context import NATIVE_CONTINUATION_GUIDANCE
+from mindie_coordinator.continuation import continuation
 from remote_dev.runtime import process_identity, runtime_status
 from mindie_coordinator.presentation import present
 from mindie_coordinator.placement import ENVIRONMENT_KEYS
@@ -23,7 +25,7 @@ LOADED_RUNTIMES = [process_identity(name) for name in ("mindie-coordinator", "re
 
 TOOL_DESCRIPTIONS = {
     "mindie.session": "Inspect this native session's MindIE task or replace source defaults for future submissions. No machine is required. Tasks with known managed hosts also receive cached coordination messages without waiting for remote polling. Active executions retain their submitted inputs.",
-    "mindie.run": "Submit shell command or a local UTF-8 script_file with fixed sources and environment/resource/topology needs. Use wait_until=running or released and wait_timeout_seconds (0-600) for an owner-side bounded wait; timeout returns the same execution_id without stopping or resubmitting. Terminal waits include logs. Omitted sources uses task defaults; {} has no source dependencies. Devices default to zero. Explicit allow_external_busy shares one named device with external processes, retaining managed ownership.",
+    "mindie.run": "Submit shell command or a local UTF-8 script_file with fixed sources and environment/resource/topology needs. This managed path materializes a separate execution root and may prepare an interpreter; sources are local inputs, not remote directories to edit in place. For development in a user-selected existing or new remote source directory, use remote-dev at that directory with coordinator resource leases; do not switch to managed materialization merely to rebuild. Use wait_until=running or released and wait_timeout_seconds (0-600) for an owner-side bounded wait; timeout returns the same execution_id without stopping or resubmitting. Terminal waits include logs. Omitted sources uses task defaults; {} has no source dependencies. Devices default to zero. Explicit allow_external_busy shares one named device with external processes, retaining managed ownership.",
     "mindie.execution": "Observe one owned execution_id or task-scoped service: action=status, wait, tail, evidence, stop or target. wait uses until=running or released, timeout_seconds=0-600; timeout returns the same reference and does not stop or resubmit. Terminal wait includes logs. evidence reads retained source/preparation/build facts and refs, optionally filtered by section and artifact path substring; it does not revalidate remote files. Stop retains the container and source roots.",
     "mindie.finish": "Finish this MindIE task by closing admission and stopping owned executions; the coordinator completes cleanup and returns leases. Preserve the container, worktrees and evidence.",
     "mindie.message": "Send coordination text to a reference returned by run/status (coordination_peers[].reference), or reply using notifications[].reply_reference. Sender, host and thread are filled internally. Messages never execute commands or transfer resource ownership; normal run/status calls receive replies automatically.",
@@ -32,6 +34,8 @@ TOOL_DESCRIPTIONS = {
     "mindie.container": "Bind an existing Docker container or SSH port to a host alias, provision a per-user Ascend container (mindie-<user>), inspect running containers, or remove/unbind a container while syncing remote-dev endpoints.json. Actions: bind, provision, inspect, remove.",
     "mindie.lease": "Acquire, heartbeat, inspect, or release a lightweight bare-metal NPU and service-port lease on a host via HostQueue, returning ASCEND_RT_VISIBLE_DEVICES and env ready for remote-dev execution. Actions: status, acquire, heartbeat, release.",
 }
+for _name in ("mindie.run", "mindie.execution", "mindie.container", "mindie.probe"):
+    TOOL_DESCRIPTIONS[_name] += NATIVE_CONTINUATION_GUIDANCE
 
 ENV_TOOLS = frozenset({"mindie.hosts", "mindie.probe", "mindie.container", "mindie.lease"})
 
@@ -152,7 +156,7 @@ TOOL_SCHEMAS = {
         "ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Direct container SSH port (when using container sshd)."},
         "container_user": {"type": "string", "default": "root"},
         "workdir": {"type": "string", "default": "/vllm-workspace"},
-        "python": {"type": "string", "description": "Optional Python interpreter path inside the container."},
+        "python": {"type": "string", "description": "Explicit Python interpreter path inside the container; never silently replaced on failure. Automatic readiness discovery uses required package metadata and existing active bindings, not the highest Python version. Metadata readiness is separate from NPU validation."},
         "mode": {"type": "string", "enum": ["ssh", "docker_exec", "auto", "cache", "live"]},
         "image": {"type": "string", "description": "Image selector for action=provision ('local-latest', 'rc', 'main', 'stable', or full image ref)."},
         "machine_type": {"type": "string", "enum": ["A2", "A3", "A5", "310P"]},
@@ -287,12 +291,15 @@ def mindie_call(name, args, *, allow_native_context=True):
             outcome = "blocked"
         result = make_result(tool=name, target=target, outcome=outcome, status=status,
                              summary="MindIE " + status.replace("_", " "),
-                             duration_ms=int((time.monotonic() - started) * 1000), extra={"data": value})
+                             duration_ms=int((time.monotonic() - started) * 1000), extra={"data": value},
+                             next=continuation(name, args, value) if outcome in {"failed", "blocked", "timeout"} else None)
     except Exception as exc:
+        details = error_details(exc)
         result = make_result(tool=name, target=target, outcome="blocked", status="unavailable",
                              summary=str(exc), duration_ms=int((time.monotonic() - started) * 1000),
                              warnings=["Local file and shell tools remain available. No remote success is implied."],
-                             extra={"error_details": error_details(exc)})
+                             next=continuation(name, args, details=details),
+                             extra={"error_details": details})
     result["runtime"] = {"client": [runtime_status(item) for item in LOADED_RUNTIMES]}
     if client is not None:
         service = client._service

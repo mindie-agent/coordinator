@@ -186,6 +186,10 @@ run = client.run(
 
 ### 2. Managed Git-Snapshot Task Execution Lifecycle
 
+Managed mindie_run materializes a separate remote execution root from local sources. For development in a user-selected existing or new remote directory, use remote-dev there with coordinator resource leases. Source and Python environment choices remain independent. Container readiness reuses remote-dev interpreter metadata discovery to select an environment with Torch/Torch-NPU and retain its path. Later commands preserve virtualenv sys.executable rather than replacing it with the base Python. Several eligible environments return ambiguity; explicit interpreter failures never fall back. Metadata readiness does not establish device readiness.
+
+When preparation does not fit, continue within existing authorization through CLIs or task-local scripts. Managed isolated execution accepts script_file; selected-directory development can use remote-dev/native SSH while retaining leases. Failed responses expose original execution observation routes and resource-release facts through next, preventing blind duplicate launches when changing tools. Helper failure affects that step while independent work continues.
+
 | MCP Tool | CLI / Python Entry | What It Does |
 | --- | --- | --- |
 | `mindie_session` | `TaskClient.session()` | View or update default local source repositories for the current task (automatically detects Git worktrees and submodules) |

@@ -1,9 +1,12 @@
 """MindIE-SD images have their own machine and readiness contracts."""
 
+import base64
 import json
 import os
+import shlex
 import subprocess
 import sys
+import zlib
 from unittest.mock import Mock
 
 import pytest
@@ -111,7 +114,7 @@ def test_mindiesd_host_machine_mismatch_stops_before_container_creation(monkeypa
 
 
 @pytest.mark.parametrize('repository', ['mindiesd', 'mindie'])
-def test_mindiesd_provision_uses_package_readiness(monkeypatch, repository):
+def test_mindiesd_provision_uses_package_readiness(monkeypatch, tmp_path, repository):
     ref = f'swr.cn-south-1.myhuaweicloud.com/ascendhub/{repository}:v3.1.0-A5-ubuntu22.04-py3.11'
     target = host_ops.SshTarget('192.0.2.5')
     remote = Mock(side_effect=[
@@ -127,7 +130,25 @@ def test_mindiesd_provision_uses_package_readiness(monkeypatch, repository):
         reserve_port=lambda **_: {'port': 46001})
     assert result['state'] == 'ready'
     assert directory.upsert_machine.call_args.args[0]['host']['machine_type'] == 'A5'
-    assert "importlib.metadata.version('mindiesd')" in remote.call_args_list[2].args[1]
+    # Exercise the dispatched readiness payload after transport decoding.
+    # Torch metadata alone cannot satisfy a MindIE-SD image's readiness.
+    script = remote.call_args_list[2].args[1]
+    encoded = shlex.split(script.rsplit(' "$@"', 1)[0])[-1]
+    decoded = zlib.decompress(base64.b85decode(encoded)).decode('utf-8')
+    code = decoded.split('"$PYTHON_BIN" - <<\'PY\' "$PYTHON_BIN" "$sourced_file_log"\n', 1)[1].split('\nPY\n', 1)[0]
+    for name in ('torch', 'torch-npu'):
+        metadata = tmp_path / (name.replace('-', '_') + '-1.0.dist-info')
+        metadata.mkdir()
+        (metadata / 'METADATA').write_text(f'Name: {name}\nVersion: 1.0\n', encoding='utf-8', newline='\n')
+    prelude = "import sys; sys.path[:] = [p for p in sys.path if 'site-packages' not in p]; sys.path.insert(0, " + repr(str(tmp_path)) + ")\n"
+    observed = subprocess.run([sys.executable, '-I', '-c', prelude + code, sys.executable, ''],
+                              capture_output=True, text=True, timeout=5,
+                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    assert observed.returncode == (3 if repository == 'mindiesd' else 0)
+    report = json.loads(observed.stdout.split(host_ops.SENTINEL, 1)[1])
+    assert report['success'] is (repository == 'mindie')
+    if repository == 'mindiesd':
+        assert 'mindiesd' in report['error']
 
 
 @pytest.mark.parametrize('repository', ['mindiesd', 'mindie'])

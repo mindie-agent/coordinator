@@ -226,9 +226,10 @@ def provision_user_container(
         stream_progress=False,
     )
     container_target = host_ops.SshTarget(host=host, user="root", port=chosen_port)
-    remote('metadata-readiness',
+    from remote_dev.core.python_discovery import compact_shell_script
+    readiness = remote('metadata-readiness',
         container_target,
-        host_ops.render_smoke_script(device_test=False, image_family=selected_family),
+        compact_shell_script(host_ops.render_smoke_script(device_test=False, image_family=selected_family)),
         args=[""],
         timeout_seconds=host_ops.DEFAULT_SMOKE_TIMEOUT_SECONDS,
         stream_progress=False,
@@ -238,11 +239,12 @@ def provision_user_container(
     )
     return _record_ready_container(host, image, user, host_user, host_port,
                                    chosen_port, machine_type, machines, alias=alias,
-                                   authentication=authentication, container_identity=container_identity)
+                                   authentication=authentication, container_identity=container_identity,
+                                   python_path=readiness.get('python_path'))
 
 
 def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines,
-                            alias=None, authentication=None, container_identity=None):
+                            alias=None, authentication=None, container_identity=None, python_path=None):
     container = user_container_name(user)
     record = {
         "alias": alias or host,
@@ -256,6 +258,7 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
             "workdir": DEFAULT_WORKDIR,
             "runtime_env_file": "/etc/profile.d/mindie-ascend-env.sh",
             **({"identity_file": container_identity} if container_identity else {}),
+            **({"python": python_path} if python_path else {}),
         },
         "image": {"requested": image},
         "user": user,
@@ -270,4 +273,5 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "image": image,
         "workdir": DEFAULT_WORKDIR,
         "state": "ready",
+        **({"python": python_path} if python_path else {}),
     }

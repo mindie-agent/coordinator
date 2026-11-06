@@ -188,6 +188,10 @@ run = client.run(
 
 ### 2. 受管源码快照与任务执行生命周期
 
+`mindie_run` 会物化独立远端执行目录，`sources` 是待捕获的本地输入；用户希望直接开发某个现有或新远端目录时，应使用 remote-dev 操作该目录并通过 coordinator 申请资源租约。源码位置与 Python 环境分别选择，新源码不要求重建虚拟环境。容器就绪探测复用 remote-dev 的多解释器依赖元数据发现，选择实际具备 Torch / Torch-NPU 的环境并保存其路径；后续命令保留 venv 的 `sys.executable`，不转换成丢失私有依赖的底层 Python。多个合格候选返回歧义，显式选择失败不静默换环境；元数据就绪仍不等同于上卡验证通过。
+
+标准准备不适用时，可在已有授权内改用现有 CLI 或 Agent 自编任务脚本。受管隔离执行接受 `script_file`；指定目录开发可直接使用 remote-dev / 原生 SSH 并保留资源租约。失败响应的 `next` 返回原执行的查询入口与资源释放事实，避免因换工具而重复启动未确认结束的作业；辅助工具失败只影响对应步骤，独立工作继续。
+
 | MCP 工具名 | 对应的 CLI / Python 方法 | 它能帮你做什么 |
 | --- | --- | --- |
 | `mindie_session` | `TaskClient.session()` | 查看当前本地任务绑定了哪些默认源码目录（支持自动识别 Git Worktree 与 Submodule），或更新默认源码路径 |

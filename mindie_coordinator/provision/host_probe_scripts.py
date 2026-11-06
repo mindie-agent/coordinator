@@ -453,6 +453,8 @@ PY
 def render_smoke_script(*, device_test: bool = True, image_family: str | None = None) -> str:
     if image_family not in (None, "mindie", "mindiesd"):
         raise ValueError(f"unsupported image family {image_family!r}")
+    from remote_dev.core.python_discovery import selection_command
+    required = ["torch", "torch-npu"] + (["mindiesd"] if image_family == "mindiesd" else [])
     template = r"""#!/usr/bin/env bash
 set -euo pipefail
 requested_python="${1:-}"
@@ -470,29 +472,11 @@ PY
 }
 
 detect_python() {
-  if [ -n "$requested_python" ] && [ -x "$requested_python" ]; then
-    printf '%s\n' "$requested_python"
-    return 0
-  fi
-  while IFS= read -r candidate; do
-    if [ -x "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done < <(ls -1d /usr/local/python*/bin/python3 2>/dev/null | sort -V -r)
-  if command -v python3 >/dev/null 2>&1; then
-    command -v python3
-    return 0
-  fi
-  if command -v python >/dev/null 2>&1; then
-    command -v python
-    return 0
-  fi
-  return 1
+  __PYTHON_SELECTION__ "$requested_python"
 }
 
 emit_progress "python-discovery" "running" "discovering a usable python inside the container"
-PYTHON_BIN="$(detect_python || true)"
+PYTHON_BIN="$(detect_python)"
 if [ -z "$PYTHON_BIN" ]; then
   echo "__SENTINEL__{\"success\": false, \"error\": \"python not found in container\", \"phase\": \"python-discovery\"}"
   exit 40
@@ -611,7 +595,7 @@ print("__SENTINEL__" + json.dumps(result, ensure_ascii=False))
 raise SystemExit(0 if result["success"] else 3)
 PY
 """
-    return template.replace("__DEVICE_TEST__", repr(device_test)).replace(
+    return template.replace("__PYTHON_SELECTION__", selection_command(required, compact=False)).replace("__DEVICE_TEST__", repr(device_test)).replace(
         "__IMAGE_FAMILY__", repr(image_family)
     ).replace("__SENTINEL__", SENTINEL).replace(
         "__PROGRESS__", PROGRESS_SENTINEL
