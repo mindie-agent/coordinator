@@ -451,7 +451,7 @@ PY
 
 
 def render_smoke_script(*, device_test: bool = True, image_family: str | None = None) -> str:
-    if image_family not in (None, "mindiesd"):
+    if image_family not in (None, "mindie", "mindiesd"):
         raise ValueError(f"unsupported image family {image_family!r}")
     template = r"""#!/usr/bin/env bash
 set -euo pipefail
@@ -524,6 +524,7 @@ safe_source /usr/local/Ascend/nnal/atb/set_env.sh "--cxx_abi=${MINDIE_ATB_CXX_AB
 safe_source /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/vllm-ascend/bin/set_env.bash
 
 "$PYTHON_BIN" - <<'PY' "$PYTHON_BIN" "$sourced_file_log"
+import importlib.metadata
 import json
 import os
 import sys
@@ -536,6 +537,17 @@ sourced_text = sys.argv[2]
 def progress(phase: str, message: str) -> None:
     sys.stderr.write(PROGRESS + json.dumps({"phase": phase, "status": "running", "message": message}, ensure_ascii=False) + "\n")
     sys.stderr.flush()
+
+def mindiesd_metadata_version():
+    if __IMAGE_FAMILY__ not in ('mindie', 'mindiesd'):
+        return None
+    try:
+        return importlib.metadata.version('mindiesd')
+    except importlib.metadata.PackageNotFoundError:
+        # Legacy MindIE images can contain SD or only the generic runtime.
+        if __IMAGE_FAMILY__ == 'mindiesd':
+            raise
+        return None
 
 result = {
     "success": False,
@@ -552,13 +564,13 @@ result = {
 if not __DEVICE_TEST__:
     # Provisioning has no device grant. Verify the interpreter's package
     # metadata only; native imports and business execution have later owners.
-    import importlib.metadata
     try:
         result.update(success=True, device_test=False,
                       torch_version=importlib.metadata.version('torch'),
                       torch_npu_version=importlib.metadata.version('torch-npu'))
-        if __IMAGE_FAMILY__ == 'mindiesd':
-            result['mindiesd_version'] = importlib.metadata.version('mindiesd')
+        version = mindiesd_metadata_version()
+        if version is not None:
+            result['mindiesd_version'] = version
     except importlib.metadata.PackageNotFoundError as exc:
         result.update(success=False, device_test=False, error=str(exc))
     print("__SENTINEL__" + json.dumps(result, ensure_ascii=False))
@@ -567,8 +579,7 @@ try:
     progress("smoke", "importing torch and torch_npu")
     import torch
     import torch_npu  # noqa: F401
-    if __IMAGE_FAMILY__ == 'mindiesd':
-        import importlib.metadata
+    if __IMAGE_FAMILY__ == 'mindiesd' or mindiesd_metadata_version() is not None:
         import mindiesd  # noqa: F401
         result["mindiesd_version"] = getattr(mindiesd, "__version__", None) or importlib.metadata.version("mindiesd")
 

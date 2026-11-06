@@ -16,7 +16,7 @@ mindie-coordinator provision --host YOUR_HOST \
   --machine-type A5
 ```
 
-`ascendhub/mindie` 是另一个镜像仓库名，不能据此把 MindIE-SD 的镜像地址改成 `mindie`。
+部分历史 MindIE 镜像也包含 MindIE-SD，例如 `mindie:3.1.0_torch2.9.0-A5-py3.11-ubuntu24.04-x86_64`。协调器兼容仓库名为 `mindie` 的完整 tag 或 digest（包括带 registry 前缀的地址），并通过容器内的 `mindiesd` 包元数据确认 SD 能力；缺少该包时保留普通 MindIE 的就绪检查，不把镜像名当作已安装 SD 的证明。明确命名为 `mindiesd` / `mindie-sd` 的镜像仍要求该包存在。请使用实际存在的镜像地址，不要仅凭名称在不同仓库之间改写拉取地址。
 
 `mindie_container(action="provision", image="...", machine_type="A5")` 使用同一开通流程。已知 MindIE-SD tag 中的 `910b` / `A2`、`a3`、`950` / `A5` 会被校验是否与目标主机机型相符；自定义 tag 无法识别机型时，必须显式传 `machine_type`。开通时会检查 `torch`、`torch-npu`、`mindiesd` 的包元数据，不会在尚未取得 NPU 租约时触碰设备。
 

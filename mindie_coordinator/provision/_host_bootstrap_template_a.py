@@ -193,7 +193,7 @@ infer_type_from_image() {
   else
     maybe_repo="$repo_part"
   fi
-  if [[ "$maybe_repo" == *"/mindiesd" || "$maybe_repo" == *"/mindie-sd" || "$maybe_repo" == "mindiesd" || "$maybe_repo" == "mindie-sd" ]]; then
+  if [[ "$maybe_repo" == *"/mindiesd" || "$maybe_repo" == *"/mindie-sd" || "$maybe_repo" == *"/mindie" || "$maybe_repo" == "mindiesd" || "$maybe_repo" == "mindie-sd" || "$maybe_repo" == "mindie" ]]; then
     case "$lowered" in
       *-950-*|*-950)
         printf 'A5\n'

@@ -65,8 +65,9 @@ def test_unrelated_explicit_image_keeps_existing_behavior():
     assert resolve_image_request(ref, machine_type='A3').candidates == (ref,)
 
 
-def test_mindiesd_metadata_readiness_checks_package_without_native_import(tmp_path):
-    payload = host_ops.render_smoke_script(device_test=False, image_family='mindiesd')
+@pytest.mark.parametrize('family', ['mindiesd', 'mindie'])
+def test_mindiesd_metadata_readiness_checks_package_without_native_import(tmp_path, family):
+    payload = host_ops.render_smoke_script(device_test=False, image_family=family)
     code = payload.split('"$PYTHON_BIN" - <<\'PY\' "$PYTHON_BIN" "$sourced_file_log"\n', 1)[1].split('\nPY\n', 1)[0]
     (tmp_path / 'mindiesd.py').write_text("raise RuntimeError('native import before lease')\n")
     for name in ('torch', 'torch-npu', 'mindiesd'):
@@ -97,8 +98,9 @@ def test_mindiesd_readiness_rejects_missing_package(tmp_path):
     assert 'mindiesd' in report['error']
 
 
-def test_mindiesd_host_machine_mismatch_stops_before_container_creation(monkeypatch):
-    ref = 'swr.cn-south-1.myhuaweicloud.com/ascendhub/mindiesd:v3.1.0-A5-ubuntu22.04-py3.11'
+@pytest.mark.parametrize('repository', ['mindiesd', 'mindie'])
+def test_mindiesd_host_machine_mismatch_stops_before_container_creation(monkeypatch, repository):
+    ref = f'swr.cn-south-1.myhuaweicloud.com/ascendhub/{repository}:v3.1.0-A5-ubuntu22.04-py3.11'
     remote = Mock(return_value=host_ops.RemoteResult(
         host_ops.SshTarget('192.0.2.5'), 0, '', '', {'success': True, 'machine_type': 'A3', 'suggested_port': 46001}))
     monkeypatch.setattr(host_ops, 'run_remote_script', remote)
@@ -108,8 +110,9 @@ def test_mindiesd_host_machine_mismatch_stops_before_container_creation(monkeypa
     assert remote.call_count == 1
 
 
-def test_mindiesd_provision_uses_package_readiness(monkeypatch):
-    ref = 'swr.cn-south-1.myhuaweicloud.com/ascendhub/mindiesd:v3.1.0-A5-ubuntu22.04-py3.11'
+@pytest.mark.parametrize('repository', ['mindiesd', 'mindie'])
+def test_mindiesd_provision_uses_package_readiness(monkeypatch, repository):
+    ref = f'swr.cn-south-1.myhuaweicloud.com/ascendhub/{repository}:v3.1.0-A5-ubuntu22.04-py3.11'
     target = host_ops.SshTarget('192.0.2.5')
     remote = Mock(side_effect=[
         host_ops.RemoteResult(target, 0, '', '', {'success': True, 'machine_type': 'A5'}),
@@ -127,10 +130,11 @@ def test_mindiesd_provision_uses_package_readiness(monkeypatch):
     assert "importlib.metadata.version('mindiesd')" in remote.call_args_list[2].args[1]
 
 
-def test_mindiesd_fast_path_reuse_preserves_inferred_machine_and_rejects_label_mismatch(monkeypatch):
+@pytest.mark.parametrize('repository', ['mindiesd', 'mindie'])
+def test_mindiesd_fast_path_reuse_preserves_inferred_machine_and_rejects_label_mismatch(monkeypatch, repository):
     from mindie_coordinator.provision import existing_container
 
-    ref = 'swr.cn-south-1.myhuaweicloud.com/ascendhub/mindiesd:v3.1.0-A5-ubuntu22.04-py3.11'
+    ref = f'swr.cn-south-1.myhuaweicloud.com/ascendhub/{repository}:v3.1.0-A5-ubuntu22.04-py3.11'
     monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'match'})
     monkeypatch.setattr(host_ops, 'run_remote_script', Mock(side_effect=AssertionError('fast match must not probe')))
     directory = Mock()
@@ -180,3 +184,87 @@ def test_bootstrap_script_handles_mindiesd_tags_and_optional_a5_devmm_svm():
     assert '*-910b-*|*-910b|*-a2-*|*-a2)' in script
     assert 'if [ -e /dev/devmm_svm ]; then' in script
     assert 'device_args+=(--device=/dev/devmm_svm)' in script
+
+
+@pytest.mark.parametrize('prefix', ['', 'registry.example:5000/ascendhub/'])
+@pytest.mark.parametrize('digest', ['', '@sha256:' + 'a' * 64])
+def test_legacy_mindie_image_validates_machine_and_preserves_reference(prefix, digest):
+    ref = prefix + 'mindie:3.1.0_torch2.9.0-A5-py3.11-ubuntu24.04-x86_64' + digest
+    assert image_family(ref) == 'mindie'
+    assert infer_machine_type_from_image(ref) == 'A5'
+    assert resolve_image_request(ref).candidates == (ref,)
+    with pytest.raises(MachineManagementError, match='appears to target A5'):
+        resolve_image_request(ref, machine_type='A3')
+
+
+@pytest.mark.parametrize('repository', ['mindie-tools', 'not-mindie', 'custom-image'])
+def test_mindie_candidate_matching_does_not_match_substrings(repository):
+    assert image_family(f'registry.example/{repository}:mindie-A5') is None
+
+
+def test_legacy_mindie_unknown_tag_requires_machine_override():
+    ref = 'registry.example/mindie:custom-build'
+    with pytest.raises(MachineManagementError, match='machine type'):
+        resolve_image_request(ref)
+    assert resolve_image_request(ref, machine_type='A5').candidates == (ref,)
+
+
+def test_legacy_mindie_without_sd_keeps_generic_metadata_readiness(tmp_path):
+    payload = host_ops.render_smoke_script(device_test=False, image_family='mindie')
+    code = payload.split('"$PYTHON_BIN" - <<\'PY\' "$PYTHON_BIN" "$sourced_file_log"\n', 1)[1].split('\nPY\n', 1)[0]
+    for name in ('torch', 'torch-npu'):
+        directory = tmp_path / (name.replace('-', '_') + '-1.0.dist-info')
+        directory.mkdir()
+        (directory / 'METADATA').write_text(f'Name: {name}\nVersion: 1.0\n', newline='\n')
+    # A native module alone is not package metadata and must never be imported here.
+    (tmp_path / 'mindiesd.py').write_text("raise RuntimeError('native import before lease')\n", newline='\n')
+    prelude = "import sys; sys.path[:] = [p for p in sys.path if 'site-packages' not in p]; sys.path.insert(0, " + repr(str(tmp_path)) + ")\n"
+    result = subprocess.run([sys.executable, '-c', prelude + code, sys.executable, ''],
+                            capture_output=True, text=True, env={**os.environ, 'PYTHONNOUSERSITE': '1'})
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.split(host_ops.SENTINEL, 1)[1])
+    assert report['success'] is True
+    assert 'mindiesd_version' not in report
+
+
+@pytest.mark.parametrize(('family', 'sd_metadata', 'broken_import'), [
+    ('mindie', False, True),
+    ('mindie', True, False),
+    ('mindie', True, True),
+    ('mindiesd', False, False),
+])
+def test_device_smoke_imports_only_confirmed_sd_and_reports_import_failures(
+    tmp_path, family, sd_metadata, broken_import,
+):
+    payload = host_ops.render_smoke_script(device_test=True, image_family=family)
+    code = payload.split('"$PYTHON_BIN" - <<\'PY\' "$PYTHON_BIN" "$sourced_file_log"\n', 1)[1].split('\nPY\n', 1)[0]
+    (tmp_path / 'torch.py').write_text(
+        "__version__ = '1.0'\n"
+        "class Tensor:\n"
+        "    device = 'npu:0'\n"
+        "    shape = (1, 2)\n"
+        "    def npu(self): return self\n"
+        "def zeros(*args): return Tensor()\n"
+        "class npu:\n"
+        "    @staticmethod\n"
+        "    def device_count(): return 1\n", newline='\n')
+    (tmp_path / 'torch_npu.py').write_text('', newline='\n')
+    sd_code = "raise RuntimeError('broken SD native import')\n" if broken_import else "__version__ = 'source'\n"
+    (tmp_path / 'mindiesd.py').write_text(sd_code, newline='\n')
+    if sd_metadata:
+        directory = tmp_path / 'mindiesd-1.0.dist-info'
+        directory.mkdir()
+        (directory / 'METADATA').write_text('Name: mindiesd\nVersion: 1.0\n', newline='\n')
+    prelude = "import sys; sys.path[:] = [p for p in sys.path if 'site-packages' not in p]; sys.path.insert(0, " + repr(str(tmp_path)) + ")\n"
+    result = subprocess.run([sys.executable, '-c', prelude + code, sys.executable, ''],
+                            capture_output=True, text=True, env={**os.environ, 'PYTHONNOUSERSITE': '1'})
+    report = json.loads(result.stdout.split(host_ops.SENTINEL, 1)[1])
+    should_fail = sd_metadata and broken_import
+    assert result.returncode == (3 if should_fail else 0), result.stderr
+    assert report['success'] is not should_fail
+    if should_fail:
+        assert report['error'] == 'broken SD native import'
+    elif family == 'mindiesd' or sd_metadata:
+        assert report['mindiesd_version'] == 'source'
+    else:
+        assert 'mindiesd_version' not in report
