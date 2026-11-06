@@ -711,8 +711,11 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
         environment.update(binding.get("build_env", {}))
         environment.update(binding["environment"])
         with (directory / "parity.json").open("w") as stdout, (directory / "parity.log").open("w") as stderr:
-            result = subprocess.run(args, stdout=stdout, stderr=stderr,
-                                    env=environment, timeout=600, check=False)
+            result = subprocess.run(
+                args, stdout=stdout, stderr=stderr,
+                env=environment, timeout=600, check=False,
+                **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+            )
         try:
             payload = json.loads((directory / "parity.json").read_text(encoding="utf-8"))
         except TimeoutError:

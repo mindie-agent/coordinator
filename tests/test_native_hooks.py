@@ -407,7 +407,7 @@ def test_missing_prepared_child_never_becomes_implicit_source_free_execution(tmp
 
 
 def test_wb_sessionstart_exports_codebuddy_env_file(tmp_path, monkeypatch):
-    source = repo(tmp_path / "project")
+    source = repo(tmp_path / "project with spaces")
     env_file = tmp_path / "codebuddy.env"
     monkeypatch.setenv("CODEBUDDY_ENV_FILE", str(env_file))
     store = AgentSessions(tmp_path / "sessions")
@@ -415,7 +415,8 @@ def test_wb_sessionstart_exports_codebuddy_env_file(tmp_path, monkeypatch):
     ctx = store.native_context("wb", "wb-sess-1")
     assert ctx["context_file"] in out["hookSpecificOutput"]["additionalContext"]
     assert shlex.split(env_file.read_text(encoding="utf-8")) == [
-        "export", f"MINDIE_CONTEXT_FILE={ctx['context_file']}"]
+        "export", f"MINDIE_CONTEXT_FILE={ctx['context_file']}"
+    ]
 
 
 def test_prepared_roots_keep_global_kimi_silent_outside_git_project(tmp_path, monkeypatch, capsys):

@@ -245,8 +245,7 @@ def test_probe_xllm_runtime_readiness_checks_vendor_git_head_atb_and_build_cache
         "atb_home_path_missing",
         "xllm_build_cache_unconfigured",
     }.issubset(bad_report["violation_codes"])
-    recommended_library = bad_report["recommended_env"]["LD_LIBRARY_PATH"].removesuffix(":/usr/lib64")
-    assert Path(recommended_library) == vendor_dir / "op_api" / "lib"
+    assert (vendor_dir / "op_api" / "lib").as_posix() in bad_report["recommended_env"]["LD_LIBRARY_PATH"].replace("\\", "/")
 
 
 def test_probe_and_validate_mindie_sd_runtime_env_and_timeout_propagation(tmp_path: Path, monkeypatch):

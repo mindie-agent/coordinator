@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.5-blue" alt="Release v0.7.5"></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI%20%7C%20Python%20SDK-00ADD8" alt="MCP, CLI & SDK">
   <img src="https://img.shields.io/badge/Hardware-Ascend%20NPU-FF6F00" alt="Ascend NPU">

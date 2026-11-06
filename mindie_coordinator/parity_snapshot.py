@@ -567,6 +567,7 @@ def _fixed_inline_pack(repo, commit, carrier, previous, *, limit=65536):
             ['git', '-C', str(repo), 'pack-objects', '--stdout', '--revs', '--delta-base-offset', '--compression=1'],
             input=(commit + '\n' + carrier + '\n^' + previous + '\n').encode('ascii'),
             stdout=output, stderr=subprocess.PIPE, timeout=DEFAULT_GIT_TRANSPORT_TIMEOUT_SECONDS,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
         if result.returncode:
             raise RuntimeError('fixed source pack failed: ' + result.stderr.decode('utf-8', errors='replace'))
@@ -600,6 +601,7 @@ def _clean_head_snapshot_base(record):
                 ['git', '--no-replace-objects', '-C', record.source_path, *args],
                 input=data if data is not None else b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 check=True, timeout=remaining, env=env,
+                **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
             ).stdout
 
         raw = objects('cat-file', 'commit', record.commit)

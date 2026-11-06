@@ -49,6 +49,7 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         stdin=subprocess.DEVNULL, capture_output=True,
         text=True, encoding="utf-8",
         check=False, timeout=30,
+        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
     )
     if check and result.returncode != 0:
         message = (result.stderr or result.stdout).strip()

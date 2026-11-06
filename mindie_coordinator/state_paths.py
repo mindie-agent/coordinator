@@ -37,6 +37,7 @@ def shared_workspace_root(repo_root: Path | None = None) -> Path:
             ["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", timeout=5, check=False,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
     except TimeoutError:
         raise

@@ -1,9 +1,12 @@
 """Native fixtures come from an installed wheel, not optional CPython tests."""
 import importlib
 from pathlib import Path
+import shutil
 import sys
 
 import pytest
+
+_REAL_HOME = Path.home()
 
 
 @pytest.fixture(autouse=True)
@@ -11,9 +14,14 @@ def isolated_diagnostics(tmp_path, monkeypatch, request):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     if request.node.get_closest_marker("live_npu") is not None:
-        ssh = Path.home() / ".ssh"
-        if ssh.exists():
-            (home / ".ssh").symlink_to(ssh, target_is_directory=True)
+        ssh = _REAL_HOME / ".ssh"
+        if ssh.exists() and not (home / ".ssh").exists():
+            try:
+                (home / ".ssh").symlink_to(ssh, target_is_directory=True)
+            except TimeoutError:
+                raise
+            except OSError:
+                shutil.copytree(ssh, home / ".ssh")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))

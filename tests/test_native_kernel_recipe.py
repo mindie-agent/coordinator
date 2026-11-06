@@ -143,10 +143,11 @@ def compiler(tmp_path):
             'source_sha256': digest(root / 'vllm-ascend' / source), 'recipe_files': files}
     executable = write(tmp_path / 'bin/opc', '#!' + sys.executable + '\n' + OPC)
     executable.chmod(0o755)
-    # Tiny mock compilers use explicit capacity rather than the real OPC budget.
+    # These tiny Python compiler processes verify outputs and exit status;
+    # one explicit worker keeps that contract independent of shared CI load.
     environment = {**os.environ, 'PATH': str(executable.parent) + os.pathsep + os.environ.get('PATH', ''),
-                   'MAX_JOBS': '3'}
-    for key in ('OP_DEBUG_CONFIG', 'TILING_KEY', 'OPS_COMPILE_OPTIONS', 'CMAKE_ARGS'):
+                   'MAX_JOBS': '1'}
+    for key in ('OP_DEBUG_CONFIG', 'TILING_KEY', 'OPS_COMPILE_OPTIONS', 'CMAKE_ARGS', 'MINDIE_COMPILE_JOBS_LIMIT'):
         environment.pop(key, None)
     return root, plan, environment, proof
 
