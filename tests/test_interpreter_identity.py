@@ -87,5 +87,42 @@ def test_readiness_transport_stays_within_windows_ssh_command_limit():
     from remote_dev.core.ssh_transport import stream_ssh_command
     from mindie_coordinator.provision.host_probe_scripts import render_smoke_script
     script = 'set -- ""\n' + compact_shell_script(render_smoke_script(device_test=False))
-    argv = stream_ssh_command(Endpoint(host="example.invalid", port=22), script, timeout_ms=240000)
+    argv = stream_ssh_command(Endpoint(host="example.invalid", port=22, ssh_mux=False), script, timeout_ms=240000)
     assert len(subprocess.list2cmdline(argv)) < 8191
+
+
+def test_repeated_provision_preserves_verified_container_interpreter_and_key(tmp_path, monkeypatch):
+    from mindie_coordinator import provision
+    from mindie_coordinator.provision import existing_container, host_ops
+
+    directory = MachineDirectory(path=tmp_path / 'machines.json')
+    replies = iter([{'machine_type': 'A2', 'free_port': 46000}, {},
+                    {'python_path': '/business/venv/bin/python'}])
+    monkeypatch.setattr(host_ops, 'run_remote_script', lambda *a, **k: next(replies))
+    monkeypatch.setattr(host_ops, 'assert_remote_success', lambda result, **k: result)
+    monkeypatch.setattr(host_ops, 'ensure_key', lambda _: ('/keys/container', 'ssh-ed25519 test'))
+    options = dict(host='example.invalid', image='registry.example/image:fixed', user='alice',
+                   ssh_port=46000, machines=directory, reserve_port=lambda **_: {'port': 46000})
+    monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'unknown'})
+    first = provision.provision_user_container(**options)
+    monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'match'})
+    second = provision.provision_user_container(**options)
+    assert first['python'] == second['python'] == '/business/venv/bin/python'
+    stored = directory.get('example.invalid')['container']
+    assert stored['python'] == second['python']
+    assert stored['identity_file'] == '/keys/container'
+
+
+def test_fast_reuse_does_not_take_interpreter_from_another_endpoint(tmp_path, monkeypatch):
+    from mindie_coordinator import provision
+    from mindie_coordinator.provision import existing_container
+
+    directory = MachineDirectory(path=tmp_path / 'machines.json')
+    _record_ready_container('example.invalid', 'registry.example/image:fixed', 'alice', 'root', 22,
+                            46000, 'A2', directory, python_path='/business/venv/bin/python')
+    monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'match'})
+    result = provision.provision_user_container(
+        host='example.invalid', image='registry.example/image:fixed', user='alice', ssh_port=46001,
+        machines=directory, reserve_port=lambda **_: {'port': 46001})
+    assert 'python' not in result
+    assert 'python' not in directory.get('example.invalid')['container']
