@@ -368,7 +368,7 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
             root + '/.mindie-runtime/metadata', root + '/vllm', root + '/vllm-ascend'])) + '"${PYTHONPATH:+:$PYTHONPATH}"\n'
 
     def command_environment(self, donor):
-        """Resolve the real image interpreter without building an environment."""
+        """Retain the selected business interpreter, including virtualenv identity."""
         from mindie_coordinator.runtime_profile import command_launch_environment
         endpoint = donor.get('endpoint') or {}
         profile = donor.get('profile') or donor.get('attestation', {}).get('profile') or {}
@@ -379,10 +379,10 @@ print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'ma
         if candidate:
             command = shlex.quote(candidate)
         else:
-            preamble += '\nIMAGE_PYTHON="$(ls -1d /usr/local/python*/bin/python3 2>/dev/null | sort -V | tail -n 1)"\n'
-            preamble += 'if [ -z "$IMAGE_PYTHON" ]; then IMAGE_PYTHON="$(command -v python3)"; fi\n'
+            from remote_dev.core.python_discovery import selection_command
+            preamble += '\nIMAGE_PYTHON="$(' + selection_command([]) + ')"\n'
             command = '"$IMAGE_PYTHON"'
-        code = 'import os,sys; print(os.path.realpath(getattr(sys,"_base_executable",sys.executable)))'
+        code = 'import sys; print(sys.executable)'
         python = self.bash(endpoint, preamble + '\n' + command + ' -c ' + shlex.quote(code)).strip()
         if not python.startswith('/') or '\n' in python:
             raise ValueError('image interpreter discovery did not return an absolute path')

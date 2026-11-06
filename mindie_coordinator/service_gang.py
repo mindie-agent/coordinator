@@ -497,11 +497,13 @@ class ServiceGangMixin:
                     "ssh_port": c_port,
                     "endpoint": c_endpoint,
                     "container_name": target_container,
+                    **({"python": configured["python"]} if cfg_name == target_container and configured.get("python") else {}),
                     "recipe": recipe,
                     "machine_type": machine_type,
                     "service_ports": [],
                 }
             owned = record.get("user") in (None, user) and cfg_name == user_container_name(user)
+            selected_python = configured.get("python") if owned else None
             ssh_port = configured.get("ssh_port") if owned else None
             if not ssh_port or recipe:
                 if not recipe:
@@ -534,6 +536,7 @@ class ServiceGangMixin:
                     **({'on_progress': on_progress} if on_progress is not None else {}),
                 )
                 ssh_port = result["ssh_port"]
+                selected_python = result.get("python") or selected_python
             else:
                 stub = {
                     "host_endpoint": host_endpoint,
@@ -552,6 +555,7 @@ class ServiceGangMixin:
                 "endpoint": {"host": host_ip, "port": int(ssh_port), "user": "root"},
                 "container_name": user_container_name(user),
                 "recipe": recipe,
+                **({"python": selected_python} if selected_python else {}),
                 "machine_type": machine_type,
                 "service_ports": [],
             }

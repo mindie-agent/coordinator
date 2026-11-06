@@ -30,7 +30,9 @@ import json
 import time
 from typing import Any
 
-from mindie_coordinator.machine_directory import MachineDirectory
+from mindie_coordinator.machine_directory import (
+    MachineDirectory, MachineDirectoryUnavailable, MachineNotFoundError,
+)
 from mindie_coordinator.provision import host_ops
 from mindie_coordinator.provision.image_resolver import image_family, infer_machine_type_from_image
 from mindie_coordinator.provision.task_environment import (  # noqa: F401
@@ -172,7 +174,7 @@ def provision_user_container(
             resolved_machine = requested_type if selected_family in {'mindie', 'mindiesd'} else normalized_machine_type
             return {**_record_ready_container(host, image, user, host_user, host_port,
                                              chosen_port, resolved_machine, machines, alias=alias,
-                                             authentication=authentication),
+                                             authentication=authentication, reuse_existing=True),
                     'image_verification': existing}
     probe_payload = remote('host-probe',
         host_target,
@@ -226,9 +228,10 @@ def provision_user_container(
         stream_progress=False,
     )
     container_target = host_ops.SshTarget(host=host, user="root", port=chosen_port)
-    remote('metadata-readiness',
+    from remote_dev.core.python_discovery import compact_shell_script
+    readiness = remote('metadata-readiness',
         container_target,
-        host_ops.render_smoke_script(device_test=False, image_family=selected_family),
+        compact_shell_script(host_ops.render_smoke_script(device_test=False, image_family=selected_family)),
         args=[""],
         timeout_seconds=host_ops.DEFAULT_SMOKE_TIMEOUT_SECONDS,
         stream_progress=False,
@@ -238,12 +241,28 @@ def provision_user_container(
     )
     return _record_ready_container(host, image, user, host_user, host_port,
                                    chosen_port, machine_type, machines, alias=alias,
-                                   authentication=authentication, container_identity=container_identity)
+                                   authentication=authentication, container_identity=container_identity,
+                                   python_path=readiness.get('python_path'))
 
 
 def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines,
-                            alias=None, authentication=None, container_identity=None):
+                            alias=None, authentication=None, container_identity=None, python_path=None,
+                            reuse_existing=False):
     container = user_container_name(user)
+    directory = machines or MachineDirectory()
+    if reuse_existing:
+        try:
+            previous = directory.get(alias or host)
+        except (MachineDirectoryUnavailable, MachineNotFoundError):
+            previous = {}
+        old_host, old_container = previous.get('host') or {}, previous.get('container') or {}
+        # The verified fast path reuses this exact endpoint. Keep its business
+        # interpreter and SSH key; bindings from another target cannot transfer.
+        if (old_host.get('ip'), old_host.get('port', 22), old_host.get('user', 'root'),
+                old_container.get('name'), old_container.get('ssh_port')) == (
+                host, host_port, host_user, container, chosen_port):
+            python_path = python_path or old_container.get('python')
+            container_identity = container_identity or old_container.get('identity_file')
     record = {
         "alias": alias or host,
         "host": {"ip": host, "port": host_port, "user": host_user, "machine_type": machine_type,
@@ -256,11 +275,11 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
             "workdir": DEFAULT_WORKDIR,
             "runtime_env_file": "/etc/profile.d/mindie-ascend-env.sh",
             **({"identity_file": container_identity} if container_identity else {}),
+            **({"python": python_path} if python_path else {}),
         },
         "image": {"requested": image},
         "user": user,
     }
-    directory = machines or MachineDirectory()
     directory.upsert_machine(record)
     return {
         "user": user,
@@ -270,4 +289,5 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "image": image,
         "workdir": DEFAULT_WORKDIR,
         "state": "ready",
+        **({"python": python_path} if python_path else {}),
     }

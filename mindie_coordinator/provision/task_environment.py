@@ -71,35 +71,35 @@ def create_venv_script(root: str, python: str, donor_python: str | None = None) 
     from mindie_coordinator.parity import PYTHON_METADATA_PREAMBLE
     from mindie_coordinator.parity_support import quoted
 
+    if donor_python and python == donor_python:
+        raise ValueError("task-owned interpreter must not overwrite the donor interpreter")
     donor = quoted(donor_python or "")
     return "\n".join(
         [
             "set -euo pipefail",
             f"mkdir -p {quoted(root)}",
-            *PYTHON_METADATA_PREAMBLE,
-            'IMAGE_PYTHON="$PYTHON"',
+            *([f'IMAGE_PYTHON={donor}'] if donor_python else [*PYTHON_METADATA_PREAMBLE, 'IMAGE_PYTHON="$PYTHON"']),
             'if [ -z "$IMAGE_PYTHON" ]; then echo "image python3 not found" >&2; exit 1; fi',
             f"DONOR={donor}",
-            'if [ -n "$DONOR" ] && [ "$IMAGE_PYTHON" = "$DONOR" ]; then',
-            '  IMAGE_PYTHON="$(ls -1d /usr/local/python*/bin/python3 2>/dev/null | sort -V | tail -n 1 || true)"',
-            "fi",
-            'if [ -n "$DONOR" ] && [ "$IMAGE_PYTHON" = "$DONOR" ]; then',
-            '  echo "cannot create a task interpreter from the donor python" >&2',
-            "  exit 1",
-            "fi",
             f'"$IMAGE_PYTHON" -m venv --without-pip --system-site-packages {quoted(str(PurePosixPath(root) / ".venv"))}',
             f"test -x {quoted(python)}",
-            f'test {quoted(python)} != "$DONOR"',
             # Image pip is importable through system-site-packages; its
             # installation scheme is still this new venv. Seed only if absent.
             f'if ! {quoted(python)} -c "import pip" >/dev/null 2>&1; then',
             f'  "$IMAGE_PYTHON" -m venv --system-site-packages {quoted(str(PurePosixPath(root) / ".venv"))}',
             'fi',
-            f'{quoted(python)} - {quoted(str(PurePosixPath(root) / ".venv"))} <<\'MINDIE_VENV\'',
-            'import pathlib, sys, sysconfig',
+            f'{quoted(python)} - {quoted(str(PurePosixPath(root) / ".venv"))} {donor} <<\'MINDIE_VENV\'',
+            'import importlib.metadata, pathlib, sys, sysconfig',
             'expected = pathlib.Path(sys.argv[1]).resolve()',
             'if pathlib.Path(sys.prefix).resolve() != expected or not pathlib.Path(sysconfig.get_paths()["purelib"]).resolve().is_relative_to(expected):',
             '    raise ValueError("pip installation scheme escaped the owned interpreter")',
+            'if sys.argv[2]:',
+            '    missing = []',
+            '    for package in ("torch", "torch-npu"):',
+            '        try: importlib.metadata.distribution(package)',
+            '        except importlib.metadata.PackageNotFoundError: missing.append(package)',
+            '    if missing:',
+            '        raise ValueError("isolated task Python cannot inherit donor dependencies: " + ", ".join(missing) + "; use a compatible prepared runtime or install matching dependencies into this task environment; donor was not modified")',
             'MINDIE_VENV',
         ]
     )
