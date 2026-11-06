@@ -200,6 +200,10 @@ def handle_hosts(
                 continue
 
         authentication = _setup_access_if_requested(host_ip, user, port, args)
+        if authentication and authentication.get("receipt_unconfirmed") is True:
+            return {"state": "partial", "action": action, "host": host_ip, "port": port, "user": user,
+                    "registration": "not_started", "authentication": authentication,
+                    "receipt_warning": authentication["receipt_warning"], "receipt_unconfirmed": True}
 
         host_entry: dict[str, Any] = {**(existing_rec.get("host") or {}), "ip": host_ip, "port": port, "user": user}
         if machine_type:
@@ -302,6 +306,10 @@ def handle_hosts(
             host_spec["host"], host_spec["user"], host_spec["port"],
             {**host_spec, **args}, required=True,
         )
+        if authentication.get("receipt_unconfirmed") is True:
+            return {"state": "partial", "action": action, "alias": alias, "host": host_spec["host"],
+                    "registration": "not_started", "authentication": authentication,
+                    "receipt_warning": authentication["receipt_warning"], "receipt_unconfirmed": True}
         base_rec = rec if rec is not None else {"alias": alias, "host": {}}
         updated_rec = {
             **base_rec, "alias": alias,

@@ -128,6 +128,25 @@ def test_shared_auth_failure_does_not_register_a_ready_host(tmp_path, monkeypatc
     assert not (tmp_path / "machines.json").exists()
 
 
+@pytest.mark.parametrize("action", ["upsert", "bootstrap_key"])
+def test_verified_access_without_a_saved_profile_is_not_registered_as_ready(tmp_path, monkeypatch, action):
+    authentication = {
+        "auth_ref": None, "auth_method": "publickey", "identity_file": "/verified/key",
+        "operation_completed": True, "receipt_unconfirmed": True,
+        "receipt_warning": {"stage": "profile_save", "error_type": "OSError"},
+    }
+    monkeypatch.setattr(host_ops, "setup_access", lambda *args, **kwargs: authentication)
+    monkeypatch.setattr("mindie_coordinator.env_manager.NpuTopObservationClient.register_host",
+                        lambda *args, **kwargs: pytest.fail("unconfirmed credentials must not be registered"))
+    result = handle_hosts({"action": action, "host": "host.invalid", "password": "fixture-secret"},
+                          state_dir=tmp_path)
+    assert result["state"] == "partial"
+    assert result["registration"] == "not_started"
+    assert result["authentication"]["operation_completed"] is True
+    assert result["authentication"]["identity_file"] == "/verified/key"
+    assert not (tmp_path / "machines.json").exists()
+
+
 def test_git_transport_preserves_shared_askpass_environment(tmp_path, monkeypatch):
     from mindie_coordinator.parity import git_push_url, git_ssh_environment
     from mindie_coordinator.parity_support import SshEndpoint
