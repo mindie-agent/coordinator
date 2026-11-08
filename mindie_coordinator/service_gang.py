@@ -11,8 +11,9 @@ preparation, and managed-lease start/stop orchestration to `CoordinatorService`.
   lease and a prepared/running job.
 - Preparation job references are retained and never silently replayed.
 - A terminal ``failed`` execution retries preparation-job stop until quiet
-  (including automatic DONE ticks) and never lets job observation or an
-  unconfirmed explicit stop rewrite that phase to ``uncertain``.
+  (including automatic DONE ticks and finish) and never lets job observation,
+  an unconfirmed explicit stop, or a later status refresh rewrite that phase
+  to ``uncertain``.
 
 [Timeouts & Locks]
 - `GANG_PLAN_RETRY_SECONDS` gates retryable topology wait retries.
@@ -697,7 +698,7 @@ class ServiceGangMixin:
             states = [role.get("observation", {}).get("state") for role in row["roles"] if role.get("observation")]
             if states:
                 row["phase"] = _service_module().aggregate_job_states(states)
-        if locked_phase == "failed" and not row.get("cancel_requested"):
+        if locked_phase == "failed":
             row["phase"] = "failed"
         self._save_execution(store, row)
         return row

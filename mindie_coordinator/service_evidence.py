@@ -11,6 +11,7 @@ status projection, explicit placement observations, and error reporting to
 - Evidence is built only from recorded local inputs and receipts, never by
   re-probing a mutable remote root.
 - A terminal wait may enrich logs but never replaces newer lifecycle facts.
+- ``finish`` stays ``finishing`` while leftover jobs remain unreleased.
 
 [Timeouts & Locks]
 - Wait deadlines are bounded by `STATUS_CACHE_SECONDS` wakeups and the caller's
@@ -712,7 +713,7 @@ class ServiceEvidenceMixin:
             store.put(db, "session", session)
         states = []
         for row in store.executions(session_id):
-            if row.get("phase") in service_module.DONE:
+            if row.get("phase") in service_module.DONE and not self._progress_due(row):
                 continue
             states.append(self.advance(sessions_dir, user, row["id"], action="stop", force=force))
         completed = self._complete_finishing_session(sessions_dir, store, session_id)
@@ -721,7 +722,6 @@ class ServiceEvidenceMixin:
         return {"state": "finishing", "executions": states, "worktrees_preserved": True}
 
     def _resume_finishing_sessions(self, sessions_dir, store) -> None:
-        service_module = _service_module()
         for session in store.sessions():
             if session.get("state") != "finishing":
                 continue
@@ -729,7 +729,7 @@ class ServiceEvidenceMixin:
             user = intent.get("user") or ""
             force = bool(intent.get("force"))
             for row in store.executions(session["id"]):
-                if not row.get("admitted") or row.get("phase") in service_module.DONE:
+                if not self._progress_due(row):
                     continue
                 if self._lock_for("execution", row["id"]).locked():
                     continue
@@ -744,7 +744,6 @@ class ServiceEvidenceMixin:
                 self._record_daemon_error(f"finish {session.get('id')}: {exc}")
 
     def _complete_finishing_session(self, sessions_dir, store, session_id) -> dict[str, Any]:
-        service_module = _service_module()
         with store.transaction() as db:
             session = store.get(db, "session", session_id)
         if session["state"] == "finished":
@@ -755,7 +754,7 @@ class ServiceEvidenceMixin:
         rows = store.executions(session_id)
         finishing = {"state": "finishing", "executions": [self._reply(row) for row in rows],
                      "worktrees_preserved": True}
-        if any(row.get("admitted") and row.get("phase") not in service_module.DONE for row in rows):
+        if any(self._progress_due(row) for row in rows):
             return finishing
         acquired = []
         try:
@@ -767,7 +766,7 @@ class ServiceEvidenceMixin:
             rows = store.executions(session_id)
             finishing = {"state": "finishing", "executions": [self._reply(row) for row in rows],
                          "worktrees_preserved": True}
-            if any(row.get("admitted") and row.get("phase") not in service_module.DONE for row in rows):
+            if any(self._progress_due(row) for row in rows):
                 return finishing
             user = (session.get("finish") or {}).get("user") or next(
                 (row.get("user") for row in rows if row.get("user")), "")

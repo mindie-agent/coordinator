@@ -153,6 +153,34 @@ def test_explicit_stop_does_not_demote_failed_to_uncertain(owned, monkeypatch):
     reply = owner._request_stop(str(store.state_dir), "alice", row["id"], False)
     assert reply["state"] == "failed"
     assert reply["resources_released"] is False
+    with store.transaction() as db:
+        row = store.get(db, "execution", row["id"])
+    row["roles"] = [{"name": "default", "managed_job": "job", "binding": {},
+                     "observation": {"state": "uncertain", "quiet": False}}]
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner.pool, "managed_control",
+                        lambda *a, **k: {"state": "uncertain", "quiet": False, "lease_state": "active"})
+    reply = owner._observe(str(store.state_dir), "alice", row["id"], action="status", refresh=True)
+    assert reply["state"] == "failed"
+
+
+def test_finish_stays_finishing_while_failed_jobs_are_unreleased(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    result = owner.finish(str(store.state_dir), "alice", row["session_id"])
+    assert result["state"] == "finishing"
+    with store.transaction() as db:
+        session = store.get(db, "session", row["session_id"])
+        latest = store.get(db, "execution", row["id"])
+    assert session["state"] == "finishing"
+    assert latest["phase"] == "failed"
 
 
 def test_failed_phase_survives_uncertain_job_observation(owned, monkeypatch):
