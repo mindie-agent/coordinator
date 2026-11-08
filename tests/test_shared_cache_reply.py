@@ -100,9 +100,16 @@ def test_shared_restore_corrupt_index_is_failed_not_miss(monkeypatch):
 
 
 def test_shared_restore_abi_mismatch_is_still_miss(monkeypatch):
-    reply = _run_shared_suffix(monkeypatch, error=ValueError('native ABI mismatch'))
+    reply = _run_shared_suffix(monkeypatch, error=ValueError('cached Python ABI differs'))
     assert reply['status'] == 'miss'
-    assert 'ABI mismatch' in reply['reason']
+    assert 'Python ABI' in reply['reason']
+
+
+def test_shared_restore_integrity_valueerror_is_failed_not_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=ValueError('invalid shared native cache pointer'))
+    assert reply['status'] == 'failed'
+    assert reply['error_type'] == 'ValueError'
+    assert 'invalid shared native cache pointer' in reply['reason']
 
 
 def test_shared_restore_timeout_is_not_converted_to_miss(monkeypatch):

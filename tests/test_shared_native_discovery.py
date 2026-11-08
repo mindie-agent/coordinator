@@ -90,7 +90,7 @@ def test_global_exact_priority_and_finite_donor_inventory(failed_exact, unavaila
     assert len(calls) == before_empty
 
 
-@pytest.mark.parametrize('failure', ['cancelled', 'uncertain', 'remote-unknown'])
+@pytest.mark.parametrize('failure', ['cancelled', 'uncertain', 'remote-unknown', 'timeout'])
 def test_export_interruption_is_not_an_ordinary_cache_miss(monkeypatch, failure):
     from mindie_coordinator.backend import RemoteBackend
     from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
@@ -184,3 +184,29 @@ def test_export_store_failed_does_not_try_next_donor():
     assert 'No space left on device' in reply['reason']
     assert tried == ['first-id']
     assert reply['remaining_donors']
+
+
+def test_export_enospace_nonzero_exec_does_not_try_next_donor():
+    request = {'image_digest': 'sha256:same', 'preparation': {}, 'export_source': 'verify then publish'}
+    containers = [{'Id': name + '-id', 'Name': '/mindie-' + name, 'Image': 'sha256:same',
+                   'Mounts': [{'Type': 'bind', 'Source': '/tmp', 'Destination': '/tmp', 'RW': True}]}
+                  for name in ('first', 'second')]
+    tried = []
+
+    def run(argv, **kwargs):
+        if argv[1] == 'ps':
+            return SimpleNamespace(stdout='first-id second-id\n', stderr='', returncode=0)
+        if argv[1] == 'inspect':
+            return SimpleNamespace(stdout=json.dumps(containers), stderr='', returncode=0)
+        if argv[2] != '-i':
+            return SimpleNamespace(stdout=json.dumps([{'root': '/vllm-workspace/executions/' + argv[2],
+                                                       'profile': {'launch_env': {}}, 'exact': True}]),
+                                   stderr='', returncode=0)
+        tried.append(argv[3])
+        assert argv[3] == 'first-id'
+        return SimpleNamespace(stdout='', stderr='OSError: [Errno 28] No space left on device', returncode=1)
+
+    reply = export_verified_donor(request, run)
+    assert reply['status'] == 'failed'
+    assert 'No space left' in reply['reason']
+    assert tried == ['first-id']

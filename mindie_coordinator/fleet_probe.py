@@ -208,7 +208,7 @@ def apply_hbm_usage_supplement(
     usages_raw: str,
     requested_ids: list[int],
 ) -> dict[str, Any]:
-    """Apply `-t usages` text. Timeout, nonzero, and unmeasured attributable cards are excluded."""
+    """Apply `-t usages` text. Timeout, nonzero, and still-unmeasured cards are excluded."""
     by_id: dict[int, list[str]] = {}
     rcs: dict[int, int] = {}
     cur_id: int | None = None
@@ -247,8 +247,7 @@ def apply_hbm_usage_supplement(
             updated_npus.append(_card_with_hbm_probe_error(card, reason))
             continue
         updated = parse_npu_smi_usages("\n".join(by_id.get(nid, [])), dict(card))
-        attributable = not isinstance(card.get("dies"), list) or len(card.get("dies") or []) <= 1
-        if attributable and int(updated.get("hbm_total_mb") or 0) == 0:
+        if int(updated.get("hbm_total_mb") or 0) == 0:
             reason = f"npu-smi usages for NPU {nid} reported no HBM capacity"
             errors.append(reason)
             updated_npus.append(_card_with_hbm_probe_error(card, reason))

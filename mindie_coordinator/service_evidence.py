@@ -2,8 +2,7 @@
 
 [Role]
 `ServiceEvidenceMixin` supplies bounded wait/observe/tail reads, evidence and
-status projection, explicit placement capacity/topology observations, error and
-finish-session reporting to
+status projection, explicit placement observations, and error reporting to
 `CoordinatorService`.
 
 [Invariants]
@@ -24,6 +23,8 @@ finish-session reporting to
 [Side-Effect Policy]
 - Persists terminal log caches, error logs, and finish-session state through
   `AgentSessions`; evidence reads never validate or mutate remote artifacts.
+  A permanent cache/request failure still stops already-started preparation
+  jobs; it does not demote `failed` to `uncertain` when quiet is unverified.
 """
 
 from __future__ import annotations
@@ -354,6 +355,17 @@ class ServiceEvidenceMixin:
         else:
             row["phase"] = "failed" if permanent else "uncertain"
         self._save_execution(store, row)
+        if permanent and row.get("preparation_jobs"):
+            try:
+                self._stop_preparation_jobs(store, row, False)
+            except TimeoutError:
+                raise
+            except Exception as stop_exc:
+                get_recorder("mindie-coordinator").event(
+                    "WARNING", "preparation.stop_after_failure", error_type=type(stop_exc).__name__)
+            if row.get("phase") != "failed":
+                row["phase"] = "failed"
+                self._save_execution(store, row)
         return self._reply(row)
 
     def _record_daemon_error(self, message: str) -> None:

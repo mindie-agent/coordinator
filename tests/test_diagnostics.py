@@ -65,18 +65,27 @@ def test_stage_duration_uses_monotonic_and_restart_has_explicit_gap(owned, monke
     assert row["stage_history"][-1]["timing_incomplete"]
 
 
-def test_known_cache_failure_is_terminal_failed_not_uncertain(owned):
+def test_known_cache_failure_is_terminal_failed_not_uncertain(owned, monkeypatch):
     from mindie_coordinator.managed_execution import ExecutionRequestError
     from mindie_coordinator.service import DONE
     owner, store, _, row = owned
-    row["preparation_jobs"] = {"worker": {"restore": {"quiet": False, "job_id": "j", "step": "shared-native-restore"}}}
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
     owner._save_execution(store, row)
+    stopped = []
+
+    def stop_jobs(store, row, force):
+        stopped.append((force, list((row.get("preparation_jobs") or {}).get("worker") or {})))
+        return True
+
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", stop_jobs)
     reply = owner._record_execution_error(
         store, row, ExecutionRequestError("shared native cache restore failed: OSError: No space left on device"))
     assert reply["state"] == "failed"
     assert row["phase"] == "failed"
     assert row["phase"] in DONE
-    # Tick dispatch skips DONE executions, so leftover jobs cannot pin uncertain.
+    assert stopped == [(False, ["j1"])]
 
 
 def test_task_root_busy_waits_instead_of_permanent_failed(owned):

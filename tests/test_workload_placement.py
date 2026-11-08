@@ -240,7 +240,7 @@ def test_usages_supplement_rc0_without_capacity_is_not_idle_zero_hbm():
     assert spec["free_npus"] == 0 and spec["vram_free_mb"] == 0
 
 
-def test_usages_supplement_rc0_unattributable_multi_die_stays_leasable():
+def test_usages_supplement_rc0_unattributable_multi_die_is_not_leasable():
     dual = {"npu_id": 0, "phy_ids": [0, 1], "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0,
             "die_count": 2, "aicore_pct": 0.0, "processes": [],
             "dies": [{"chip_id": 0, "phy_id": 0, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0},
@@ -250,10 +250,10 @@ def test_usages_supplement_rc0_unattributable_multi_die_stays_leasable():
         f"===NPU_USAGE:0===\n{_usages(80)}===NPU_USAGE_RC:0:0===\n",
         [0],
     )
-    assert "usage_parse_error" not in snapshot
-    assert snapshot["npus"][0]["hbm_total_mb"] == 0
+    assert "no HBM capacity" in snapshot["usage_parse_error"]
+    assert snapshot["npus"][0]["busy"] is True
     spec = normalize_remote_probe_spec(snapshot)
-    assert spec["free_npus"] == 2
+    assert spec["free_npus"] == 0
     assert spec["vram_free_observed"] is False
 
 
@@ -390,10 +390,11 @@ def test_usages_supplement_keeps_observed_facts_and_ambiguous_dies_unsplit():
             "dies": [{"chip_id": 0, "phy_id": 0, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0},
                      {"chip_id": 1, "phy_id": 1, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0}]}
     assert parse_npu_smi_usages(_usages(80), dual) == dual
-    # The Dies stay leasable with unmeasured headroom, crediting no capacity.
+    # Unattributable card-wide figures are not split, and unmeasured Dies
+    # are not recommended as free capacity.
     dual_spec = normalize_remote_probe_spec(
         {"host": HOST, "npus": [dual], **device_occupancy_inventory([dual])})
-    assert dual_spec["free_npus"] == 2
+    assert dual_spec["free_npus"] == 0
     assert dual_spec["vram_free_mb"] == 0
     assert dual_spec["vram_free_observed"] is False
 
