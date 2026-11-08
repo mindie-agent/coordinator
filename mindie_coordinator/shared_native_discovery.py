@@ -11,6 +11,8 @@ native bundle into `/tmp/mindie-native-cache` on a shared-cache miss.
   dependency-compatible incremental baselines.
 - One unavailable container during read-only metadata discovery is recorded in
   `reasons` without discarding other valid candidates.
+- A donor `docker exec` export timeout or `status=failed` returns immediately
+  and never continues to another donor or a compile.
 
 [Timeouts & Locks]
 - `docker ps` / `docker inspect`: `15s`; `docker exec` metadata query: `30s`;
@@ -119,8 +121,16 @@ def export_verified_donor(request: dict, run=subprocess.run) -> dict:
             continue
         exports = '\n'.join('export ' + key + '=' + shlex.quote(value) for key, value in environment.items())
         command = exports + '\nexec python3 - ' + shlex.quote(json.dumps({'root': donor['root']}))
-        exported = run(['docker', 'exec', '-i', donor['container_id'], 'bash', '-c', command],
-                       input=request['export_source'], capture_output=True, text=True, timeout=60)
+        try:
+            exported = run(['docker', 'exec', '-i', donor['container_id'], 'bash', '-c', command],
+                           input=request['export_source'], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            # The donor process may have started writing. Do not try the next
+            # donor or treat the interruption as an ordinary cache miss.
+            return {'status': 'timeout',
+                    'reason': f'donor export exceeded {exc.timeout}s',
+                    'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                    'remaining_donors': donors[index + 1:]}
         result = {}
         try:
             parsed = json.loads(exported.stdout or '')

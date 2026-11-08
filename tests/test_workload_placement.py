@@ -399,6 +399,27 @@ def test_usages_supplement_keeps_observed_facts_and_ambiguous_dies_unsplit():
     assert dual_spec["vram_free_observed"] is False
 
 
+def test_half_measured_die_does_not_inherit_card_capacity():
+    """A sibling-measured dual-Die card must not lease the unmeasured Die."""
+    card = {
+        "npu_id": 0, "phy_ids": [0, 1], "busy": False,
+        "hbm_used_mb": 1000, "hbm_total_mb": 65536,
+        "die_count": 2, "aicore_pct": 0.0, "processes": [],
+        "dies": [
+            {"chip_id": 0, "phy_id": 0, "busy": False, "hbm_used_mb": 1000, "hbm_total_mb": 65536},
+            {"chip_id": 1, "phy_id": 1, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0},
+        ],
+    }
+    inventory = device_occupancy_inventory([card])
+    assert inventory["free_phy_ids"] == [0]
+    assert inventory["busy_phy_ids"] == [1]
+    assert inventory["free_npu_ids"] == []
+    spec = normalize_remote_probe_spec({"host": HOST, "npus": [card], **inventory})
+    assert spec["free_npus"] == 1
+    assert spec["free_phy_ids"] == [0]
+    assert 1 not in spec["free_phy_ids"]
+
+
 def _hardware_client(tmp_path, *, busy=(), prepared=True):
     backend = GangBackend(tmp_path / "host", devices=list(range(16)), busy=set(busy))
     pool = RuntimePool(tmp_path / "manager", backend)

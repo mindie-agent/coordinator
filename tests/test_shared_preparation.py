@@ -427,6 +427,39 @@ def test_export_timeout_does_not_compile(tmp_path, monkeypatch):
     assert installed == []
 
 
+def test_donor_process_timeout_does_not_compile(tmp_path, monkeypatch):
+    from mindie_coordinator.preparation_process import PreparationUncertain
+    from mindie_coordinator.shared_native_discovery import export_verified_donor
+    backend, spec, snapshot, installed = _cache_failure_backend(monkeypatch)
+    operations, exports = [], []
+
+    def operation(spec, action, versions, **kwargs):
+        operations.append(action)
+        return {'status': 'miss', 'reason': 'no cached bundle'}
+
+    def export(spec, **kwargs):
+        def run(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 60)
+        reply = export_verified_donor({
+            'image_digest': 'sha256:same', 'preparation': {}, 'export_source': 'x',
+            'donors': [{'container_id': 'first-id', 'container_name': 'mindie-first',
+                        'root': '/root', 'environment': {}}],
+        }, run=run)
+        exports.append(reply)
+        return reply
+
+    monkeypatch.setattr(backend, '_shared_native', operation)
+    monkeypatch.setattr(backend, '_export_shared_native', export)
+    with pytest.raises(PreparationUncertain, match='did not complete|uncertain|timed out'):
+        backend.prepare_task_root(spec, sources={'vllm': '/a', 'vllm-ascend': '/b'}, environment={},
+                                  source_snapshot=snapshot)
+    assert operations == ['restore']
+    assert exports == [{'status': 'timeout', 'reason': 'donor export exceeded 60s',
+                        'donor_container': 'mindie-first', 'donor_root': '/root',
+                        'remaining_donors': []}]
+    assert installed == []
+
+
 def test_failed_restore_after_dependencies_does_not_compile(tmp_path, monkeypatch):
     from mindie_coordinator.managed_execution import ExecutionRequestError
     import mindie_coordinator.parity as parity

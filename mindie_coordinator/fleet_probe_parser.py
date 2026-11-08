@@ -109,6 +109,9 @@ def device_occupancy_inventory(npus: Sequence[Mapping[str, Any]]) -> dict[str, A
     Both the raw `npu-smi info` parse and the `-t usages` supplement derive
     their card counts and physical-Die lists from these same observed rows.
     Unmeasured HBM (`hbm_total_mb` 0/absent) is not free or recommended.
+    Multi-Die cards never let an unmeasured Die inherit a sibling or card
+    aggregate; a card is not free while any Die is unmeasured. A single-Die
+    card may use the card-wide figure because `-t usages` is attributable.
     """
     cards = list(npus)
     dies = [
@@ -117,22 +120,29 @@ def device_occupancy_inventory(npus: Sequence[Mapping[str, Any]]) -> dict[str, A
         for die in (card.get("dies") or [{"phy_id": pid, "busy": card.get("busy")}
                                          for pid in (card.get("phy_ids") or [card["npu_id"]])])
     ]
-    def _measured(row: Mapping[str, Any], fallback: Mapping[str, Any] | None = None) -> bool:
-        total = row.get("hbm_total_mb")
-        if total in (None, 0, "0"):
-            total = (fallback or {}).get("hbm_total_mb")
-        return int(total or 0) > 0
+    def _measured(row: Mapping[str, Any]) -> bool:
+        return int(row.get("hbm_total_mb") or 0) > 0
 
-    free_ids = [card["npu_id"] for card in cards if not card.get("busy") and _measured(card)]
-    busy_ids = [card["npu_id"] for card in cards if card.get("busy") or not _measured(card)]
+    free_ids: list[int] = []
+    busy_ids: list[int] = []
     free_phy_ids: list[int] = []
     busy_phy_ids: list[int] = []
     for card in cards:
         card_dies = card.get("dies") or [{"phy_id": pid, "busy": card.get("busy"),
                                           "hbm_total_mb": card.get("hbm_total_mb")}
                                          for pid in (card.get("phy_ids") or [card["npu_id"]])]
+        # Dual-Die 910C reports one card-wide figure that cannot be attributed
+        # per Die. Only a single-Die row may use the card aggregate.
+        card_fallback = card if len(card_dies) == 1 else None
+        def _die_measured(die: Mapping[str, Any]) -> bool:
+            return _measured(die) or bool(card_fallback and _measured(card_fallback))
+        card_measured = all(_die_measured(die) for die in card_dies)
+        if card.get("busy") or not card_measured:
+            busy_ids.append(card["npu_id"])
+        else:
+            free_ids.append(card["npu_id"])
         for die in card_dies:
-            if die.get("busy") or not _measured(die, card):
+            if die.get("busy") or not _die_measured(die):
                 busy_phy_ids.append(int(die["phy_id"]))
             else:
                 free_phy_ids.append(int(die["phy_id"]))

@@ -274,7 +274,7 @@ class ServiceEvidenceMixin:
                     row = self._refresh_jobs(store, user, row)
                     refreshed = bool(row.get("jobs_observed_at"))
                 elif row.get("preparation_jobs") and not row.get("roles") and (action != "status" or refresh):
-                    self._refresh_preparation_jobs(store, row)
+                    (self._reclaim_preparation_jobs if row.get("phase") == "failed" else self._refresh_preparation_jobs)(store, row)
             if action == "tail":
                 return self._tail(store, user, row, role=role)
             reply = self._reply(row, role=role)
@@ -357,13 +357,12 @@ class ServiceEvidenceMixin:
         self._save_execution(store, row)
         if permanent and row.get("preparation_jobs"):
             try:
-                self._stop_preparation_jobs(store, row, False)
+                self._reclaim_preparation_jobs(store, row)
             except TimeoutError:
                 raise
             except Exception as stop_exc:
                 get_recorder("mindie-coordinator").event(
                     "WARNING", "preparation.stop_after_failure", error_type=type(stop_exc).__name__)
-            if row.get("phase") != "failed":
                 row["phase"] = "failed"
                 self._save_execution(store, row)
         return self._reply(row)

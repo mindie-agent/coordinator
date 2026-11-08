@@ -88,6 +88,52 @@ def test_known_cache_failure_is_terminal_failed_not_uncertain(owned, monkeypatch
     assert stopped == [(False, ["j1"])]
 
 
+def test_unconfirmed_stop_retries_reclaim_without_demoting_failed(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    stopped = []
+
+    def stop_jobs(store, row, force):
+        stopped.append(force)
+        return False
+
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", stop_jobs)
+    reply = owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed: OSError: No space left on device"))
+    assert reply["state"] == "failed"
+    assert reply["resources_released"] is False
+    assert stopped == [False]
+    reply = owner._advance_locked(str(store.state_dir), "alice", row["id"])
+    assert reply["state"] == "failed"
+    assert stopped == [False, False]
+    reply = owner._observe(str(store.state_dir), "alice", row["id"], action="status", refresh=True)
+    assert reply["state"] == "failed"
+    assert stopped == [False, False, False]
+
+
+def test_failed_phase_survives_uncertain_job_observation(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    row["roles"] = [{"name": "default", "managed_job": "job", "binding": {},
+                     "observation": {"state": "uncertain", "quiet": False}}]
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner.pool, "managed_control",
+                        lambda *a, **k: {"state": "uncertain", "quiet": False, "lease_state": "active"})
+    reply = owner._advance_locked(str(store.state_dir), "alice", row["id"])
+    assert reply["state"] == "failed"
+
+
 def test_task_root_busy_waits_instead_of_permanent_failed(owned):
     from mindie_coordinator.provision.task_environment import TaskRootBusy
     from mindie_coordinator.service import DONE, PERMANENT_ERRORS

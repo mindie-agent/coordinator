@@ -447,6 +447,9 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             return self._reply(row)
         if not row.get("roles"):
             if row.get("preparation_jobs"):
+                if row.get("phase") in DONE:
+                    self._reclaim_preparation_jobs(store, row)
+                    return self._reply(row)
                 row["phase"] = "uncertain"
                 row["error"] = "retained preparation jobs require stop/quiet cleanup before a new execution"
                 self._save_execution(store, row)

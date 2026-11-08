@@ -10,6 +10,8 @@ preparation, and managed-lease start/stop orchestration to `CoordinatorService`.
 - Group start authorization is persisted only after every role holds an active
   lease and a prepared/running job.
 - Preparation job references are retained and never silently replayed.
+- A terminal ``failed`` execution retries preparation-job stop until quiet and
+  never lets job observation rewrite that phase to ``uncertain``.
 
 [Timeouts & Locks]
 - `GANG_PLAN_RETRY_SECONDS` gates retryable topology wait retries.
@@ -97,8 +99,16 @@ class ServiceGangMixin:
             if not self._reply(row).get("resources_released"):
                 # Pool cleanup can complete after the business state becomes
                 # terminal. Refresh its owned facts without restarting work.
+                # Unconfirmed preparation stop must be retried, not dropped.
+                locked = row.get("phase")
+                if locked == "failed":
+                    self._reclaim_preparation_jobs(store, row)
+                else:
+                    self._refresh_preparation_jobs(store, row)
                 row = self._refresh_jobs(store, user, row)
-                self._refresh_preparation_jobs(store, row)
+                if locked == "failed" and row.get("phase") != "failed":
+                    row["phase"] = "failed"
+                    self._save_execution(store, row)
             return self._reply(row)
         with store.transaction() as db:
             session = store.get(db, "session", row["session_id"])
@@ -668,6 +678,7 @@ class ServiceGangMixin:
                 self._save_preparation_job(store, row, role, record)
 
     def _refresh_jobs(self, store, user, row):
+        locked_phase = row.get("phase")
         if not row.get("roles"):
             return row
         def observe_role(role):
@@ -685,6 +696,8 @@ class ServiceGangMixin:
             states = [role.get("observation", {}).get("state") for role in row["roles"] if role.get("observation")]
             if states:
                 row["phase"] = _service_module().aggregate_job_states(states)
+        if locked_phase == "failed" and not row.get("cancel_requested"):
+            row["phase"] = "failed"
         self._save_execution(store, row)
         return row
 
@@ -705,6 +718,17 @@ class ServiceGangMixin:
             row["phase"] = "cancelled"
             self._save_execution(store, row)
         return self._reply(row)
+
+    def _reclaim_preparation_jobs(self, store, row) -> bool:
+        """Retry leftover preparation-job stop without demoting ``failed``."""
+        locked = row.get("phase")
+        if not row.get("preparation_jobs"):
+            return True
+        quiet = self._stop_preparation_jobs(store, row, False)
+        if locked == "failed" and row.get("phase") != "failed":
+            row["phase"] = "failed"
+            self._save_execution(store, row)
+        return quiet
 
     def _stop_preparation_jobs(self, store, row, force):
         jobs = [(role, job) for role, records in (row.get("preparation_jobs") or {}).items()
