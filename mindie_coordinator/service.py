@@ -245,7 +245,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             for row in store.all_executions():
                 if row.get("session_id") in finishing:
                     continue
-                if not row.get("admitted") or row.get("phase") in DONE:
+                if not self._progress_due(row):
                     continue
                 try:
                     self.advance(directory, row.get("user") or "", row["id"], action="progress")
@@ -382,6 +382,14 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                 self._schedule_progress(sessions_dir, user, execution_id)
             return self._observe(sessions_dir, user, execution_id, "status")
         return self.advance(sessions_dir, user, execution_id, action="progress")
+
+    def _progress_due(self, row) -> bool:
+        """Admitted live work, or terminal failed/unreleased leftovers still to reclaim."""
+        if not row.get("admitted"):
+            return False
+        if row.get("phase") not in DONE:
+            return True
+        return not self._reply(row).get("resources_released")
 
     def _schedule_progress(self, sessions_dir, user, execution_id) -> None:
         lock = self._lock_for("execution", execution_id)

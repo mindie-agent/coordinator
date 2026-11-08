@@ -10,8 +10,9 @@ preparation, and managed-lease start/stop orchestration to `CoordinatorService`.
 - Group start authorization is persisted only after every role holds an active
   lease and a prepared/running job.
 - Preparation job references are retained and never silently replayed.
-- A terminal ``failed`` execution retries preparation-job stop until quiet and
-  never lets job observation rewrite that phase to ``uncertain``.
+- A terminal ``failed`` execution retries preparation-job stop until quiet
+  (including automatic DONE ticks) and never lets job observation or an
+  unconfirmed explicit stop rewrite that phase to ``uncertain``.
 
 [Timeouts & Locks]
 - `GANG_PLAN_RETRY_SECONDS` gates retryable topology wait retries.
@@ -96,14 +97,14 @@ class ServiceGangMixin:
             raise PermissionError("execution belongs to another principal")
         user = user or row.get("user")
         if row.get("phase") in _service_module().DONE:
-            if not self._reply(row).get("resources_released"):
-                # Pool cleanup can complete after the business state becomes
-                # terminal. Refresh its owned facts without restarting work.
-                # Unconfirmed preparation stop must be retried, not dropped.
-                locked = row.get("phase")
+            locked = row.get("phase")
+            released = self._reply(row).get("resources_released")
+            # Terminal failed retries leftover-job stop even when a stale
+            # resources_released snapshot would otherwise skip the tick.
+            if locked == "failed" or not released:
                 if locked == "failed":
                     self._reclaim_preparation_jobs(store, row)
-                else:
+                elif not released:
                     self._refresh_preparation_jobs(store, row)
                 row = self._refresh_jobs(store, user, row)
                 if locked == "failed" and row.get("phase") != "failed":
@@ -702,6 +703,7 @@ class ServiceGangMixin:
         return row
 
     def _stop(self, store, user, row, force):
+        locked_phase = row.get("phase")
         row["cancel_requested"] = True
         if force:
             row["force"] = True
@@ -710,7 +712,12 @@ class ServiceGangMixin:
         row = self._refresh_jobs(store, user, row)
         job_states = [role.get("observation", {}).get("state")
                       for role in row.get("roles") or [] if role.get("managed_job")]
-        if not preparation_quiet:
+        if locked_phase == "failed":
+            # An already-terminal failed request stays failed; unconfirmed stop
+            # is leftover ownership, not an unknown business outcome.
+            row["phase"] = "failed"
+            self._save_execution(store, row)
+        elif not preparation_quiet:
             row["phase"] = "uncertain"
             row["error"] = "preparation stop has not verified quiet; retained jobs remain owned"
             self._save_execution(store, row)

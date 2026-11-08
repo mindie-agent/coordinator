@@ -411,13 +411,12 @@ def test_half_measured_die_does_not_inherit_card_capacity():
         ],
     }
     inventory = device_occupancy_inventory([card])
-    assert inventory["free_phy_ids"] == [0]
-    assert inventory["busy_phy_ids"] == [1]
+    assert inventory["free_phy_ids"] == []
+    assert inventory["busy_phy_ids"] == [0, 1]
     assert inventory["free_npu_ids"] == []
     spec = normalize_remote_probe_spec({"host": HOST, "npus": [card], **inventory})
-    assert spec["free_npus"] == 1
-    assert spec["free_phy_ids"] == [0]
-    assert 1 not in spec["free_phy_ids"]
+    assert spec["free_npus"] == 0
+    assert spec["free_phy_ids"] == []
 
 
 def _hardware_client(tmp_path, *, busy=(), prepared=True):

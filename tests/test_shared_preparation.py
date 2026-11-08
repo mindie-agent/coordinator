@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import shutil
 import subprocess
 import sys
@@ -457,6 +458,39 @@ def test_donor_process_timeout_does_not_compile(tmp_path, monkeypatch):
     assert exports == [{'status': 'timeout', 'reason': 'donor export exceeded 60s',
                         'donor_container': 'mindie-first', 'donor_root': '/root',
                         'remaining_donors': []}]
+    assert installed == []
+
+
+def test_donor_inner_timeout_does_not_compile(tmp_path, monkeypatch):
+    from mindie_coordinator.preparation_process import PreparationUncertain
+    from mindie_coordinator.shared_native_discovery import export_verified_donor
+    backend, spec, snapshot, installed = _cache_failure_backend(monkeypatch)
+    operations, exports = [], []
+
+    def operation(spec, action, versions, **kwargs):
+        operations.append(action)
+        return {'status': 'miss', 'reason': 'no cached bundle'}
+
+    def export(spec, **kwargs):
+        def run(argv, **kw):
+            if argv[:3] == ['docker', 'exec', '-i']:
+                return SimpleNamespace(stdout='', stderr='TimeoutError: alarm', returncode=1)
+            return SimpleNamespace(stdout='[]', stderr='', returncode=0)
+        reply = export_verified_donor({
+            'image_digest': 'sha256:same', 'preparation': {}, 'export_source': 'x',
+            'donors': [{'container_id': 'first-id', 'container_name': 'mindie-first',
+                        'root': '/root', 'environment': {}}],
+        }, run=run)
+        exports.append(reply['status'])
+        return reply
+
+    monkeypatch.setattr(backend, '_shared_native', operation)
+    monkeypatch.setattr(backend, '_export_shared_native', export)
+    with pytest.raises(PreparationUncertain, match='did not complete|uncertain|timed out'):
+        backend.prepare_task_root(spec, sources={'vllm': '/a', 'vllm-ascend': '/b'}, environment={},
+                                  source_snapshot=snapshot)
+    assert operations == ['restore']
+    assert exports == ['timeout']
     assert installed == []
 
 

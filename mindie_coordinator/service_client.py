@@ -439,7 +439,6 @@ def _dispatch_progress(service_instance) -> None:
             service_instance._active_requests -= 1
 
 def _dispatch_progress_active(service_instance) -> None:
-    service_module = _service_module()
     sessions = []
     execution_jobs = set()
     for directory in list(service_instance._session_dirs):
@@ -448,7 +447,7 @@ def _dispatch_progress_active(service_instance) -> None:
             executions = store.all_executions()
             sessions.append((directory, store, executions))
             execution_jobs.update(role["managed_job"] for row in executions
-                                  if row.get("admitted") and row.get("phase") not in service_module.DONE
+                                  if service_instance._progress_due(row)
                                   and not service_instance._lock_for("execution", row["id"]).locked()
                                   for role in row.get("roles", []) if role.get("managed_job"))
         except Exception as exc:
@@ -464,7 +463,7 @@ def _dispatch_progress_active(service_instance) -> None:
         for row in executions:
             if row.get("session_id") in finishing:
                 continue
-            if not row.get("admitted") or row.get("phase") in service_module.DONE:
+            if not service_instance._progress_due(row):
                 continue
             lock = service_instance._lock_for("execution", row["id"])
             if lock.locked():

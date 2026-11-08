@@ -141,8 +141,11 @@ def device_occupancy_inventory(npus: Sequence[Mapping[str, Any]]) -> dict[str, A
             busy_ids.append(card["npu_id"])
         else:
             free_ids.append(card["npu_id"])
+        # A mixed/unmeasured multi-Die card is not a leasable unit: offering
+        # the measured sibling would let topology-gang pair it with the
+        # unmeasured Die via card.dies / fully_free.
         for die in card_dies:
-            if die.get("busy") or not _die_measured(die):
+            if die.get("busy") or not card_measured or not _die_measured(die):
                 busy_phy_ids.append(int(die["phy_id"]))
             else:
                 free_phy_ids.append(int(die["phy_id"]))

@@ -115,6 +115,46 @@ def test_unconfirmed_stop_retries_reclaim_without_demoting_failed(owned, monkeyp
     assert stopped == [False, False, False]
 
 
+def test_reconcile_retries_unconfirmed_stop_on_terminal_failed(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    stopped = []
+
+    def stop_jobs(store, row, force):
+        stopped.append(force)
+        return False
+
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", stop_jobs)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    assert stopped == [False]
+    stopped.clear()
+    owner.reconcile()
+    assert stopped == [False]
+    with store.transaction() as db:
+        latest = store.get(db, "execution", row["id"])
+    assert latest["phase"] == "failed"
+
+
+def test_explicit_stop_does_not_demote_failed_to_uncertain(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    reply = owner._request_stop(str(store.state_dir), "alice", row["id"], False)
+    assert reply["state"] == "failed"
+    assert reply["resources_released"] is False
+
+
 def test_failed_phase_survives_uncertain_job_observation(owned, monkeypatch):
     from mindie_coordinator.managed_execution import ExecutionRequestError
     owner, store, _, row = owned
