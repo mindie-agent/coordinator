@@ -509,8 +509,16 @@ try:
     else:
         result = restore_shared_native(root, cache, args['preparation'], args['image_digest'], args['versions'],
                                        args.get('machine_type'), args.get('candidate'))
-except Exception as exc:
+except TimeoutError:
+    raise
+except FileNotFoundError as exc:
     result = {'status': 'miss', 'reason': str(exc), 'linked_files': 0}
+except ValueError as exc:
+    result = {'status': 'miss', 'reason': str(exc), 'linked_files': 0}
+except Exception as exc:
+    result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}', 'linked_files': 0,
+              'error_type': type(exc).__name__}
+if result.get('status') in {'miss', 'failed'} and 'cache_key' not in result:
     try:
         result['cache_key'] = native_content_key(args.get('preparation', {}))
     except (TypeError, ValueError):

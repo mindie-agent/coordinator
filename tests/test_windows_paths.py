@@ -81,3 +81,32 @@ def test_unicode_worktree_binding_snapshot_and_cli(tmp_path):
                                "PYTHONIOENCODING": "cp936" if os.name == "nt" else "utf-8"})
     assert proc.returncode == 0, proc.stderr
     assert "中文 🧪" in json.dumps(json.loads(proc.stdout.decode("utf-8")), ensure_ascii=False)
+
+
+def test_cited_local_subprocesses_hide_windows_console(monkeypatch):
+    import mindie_coordinator.host.mindie_npu_coordination_probe as probe
+    import mindie_coordinator.mindie_sd_env as sd
+    import mindie_coordinator.provision.image_resolver as resolver
+
+    class NtOs:
+        name = "nt"
+
+        def __getattr__(self, item):
+            return getattr(os, item)
+
+    captured = []
+
+    def fake_run(*args, **kwargs):
+        captured.append(kwargs)
+        return subprocess.CompletedProcess(args[0] if args else [], 0, stdout="{}", stderr="")
+
+    for module in (resolver, probe, sd):
+        monkeypatch.setattr(module, "os", NtOs())
+        monkeypatch.setattr(module.subprocess, "run", fake_run)
+        monkeypatch.setattr(module.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    resolver.run_local(["ssh-keygen", "-t", "ed25519"])
+    probe.probe_listening_ports()
+    sd.probe_mindie_sd_runtime_readiness({}, python_executable="python3")
+    assert captured
+    assert all(call.get("creationflags") == 0x08000000 for call in captured)

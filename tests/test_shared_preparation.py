@@ -295,6 +295,36 @@ def test_normal_preparation_uses_cache_and_rebuilds_failed_hit(tmp_path, monkeyp
     assert spec['python'] == '/bob/.venv/bin/python'
 
 
+def test_failed_shared_restore_does_not_retry_donors_as_miss(tmp_path, monkeypatch):
+    import mindie_coordinator.parity as parity
+    import mindie_coordinator.parity_support as transport
+    from remote_dev.core.ssh_transport import RemoteCompleted
+    backend = RemoteBackend()
+    spec = {'user': 'bob', 'container_name': 'mindie-bob', 'python': '/bob/.venv/bin/python',
+            'endpoint': {'host': 'host', 'port': 2202, 'user': 'root', 'root': '/bob'},
+            'host_endpoint': {'host': 'host', 'port': 22, 'user': 'root'}}
+    snapshot = {'id': 'source', 'records': [{'relpath': name, 'scm_version': '1.0', 'source_head': 'head'}
+                                          for name in ('vllm', 'vllm-ascend')]}
+    monkeypatch.setattr(parity, 'materialize_fixed_sources', lambda **kwargs: None)
+    monkeypatch.setattr('remote_dev.core.ssh_transport.run_rpc_script',
+                        lambda *a, **k: RemoteCompleted(0, '', ''))
+    monkeypatch.setattr(transport, 'ssh_exec_stream', lambda *a, **k: None)
+    monkeypatch.setattr(backend, 'bash', lambda *a: '')
+    operations = []
+    def operation(spec, action, versions, **kwargs):
+        operations.append(action)
+        return {'status': 'failed', 'reason': 'OSError: No space left on device'}
+    monkeypatch.setattr(parity, 'run_runtime_install_step', lambda **kwargs: None)
+    monkeypatch.setattr(backend, '_write_ready_profile', lambda *a, **k: None)
+    monkeypatch.setattr(backend, '_shared_native', operation)
+    monkeypatch.setattr(backend, '_export_shared_native',
+                        lambda *a, **k: pytest.fail('failed restore must not look up donors as a cache miss'))
+    with pytest.raises(RuntimeError, match='shared native cache restore failed'):
+        backend.prepare_task_root(spec, sources={'vllm': '/a', 'vllm-ascend': '/b'}, environment={},
+                                  source_snapshot=snapshot)
+    assert operations == ['restore']
+
+
 @pytest.mark.parametrize('change', [None, 'torch', 'torch-npu', 'python', 'cann', 'manifest', 'index'])
 def test_dependency_repair_rechecks_fixed_bundle_and_preserves_native_proof(bundle, monkeypatch, change):
     source, target, shared, request, manifest, relative, versions = bundle

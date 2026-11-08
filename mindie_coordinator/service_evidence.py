@@ -311,11 +311,14 @@ class ServiceEvidenceMixin:
         return self._reply(latest)
 
     def _record_execution_error(self, store, row, exc) -> dict[str, Any]:
-        permanent = isinstance(exc, _service_module().PERMANENT_ERRORS)
+        from mindie_coordinator.provision.task_environment import TaskRootBusy
+        # TaskRootBusy is a transient local wait, never a terminal tombstone.
+        waiting = isinstance(exc, TaskRootBusy)
+        permanent = (not waiting) and isinstance(exc, _service_module().PERMANENT_ERRORS)
         # A build/preparation command that exited nonzero has a known result.
         # Repeating the same source preparation cannot resolve that failure.
         # Lost SSH transport (255) and already-bound/live work remain recoverable.
-        if (isinstance(exc, RemoteCommandError) and exc.returncode != 255
+        if (not waiting and isinstance(exc, RemoteCommandError) and exc.returncode != 255
                 and row.get("phase") == "preparing" and not row.get("roles")):
             permanent = True
         if any(not job.get("quiet") for records in (row.get("preparation_jobs") or {}).values()
@@ -339,7 +342,10 @@ class ServiceEvidenceMixin:
                 if key not in details:
                     details[key] = value
         row["error_details"] = details
-        row["phase"] = "failed" if permanent else "uncertain"
+        if waiting:
+            row["phase"] = "waiting"
+        else:
+            row["phase"] = "failed" if permanent else "uncertain"
         self._save_execution(store, row)
         return self._reply(row)
 

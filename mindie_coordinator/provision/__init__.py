@@ -20,7 +20,9 @@ smoke readiness.
 
 [Side-Effect Policy]
 - Emits structured phase timings via `on_progress`; raises `MachineManagementError`
-  on any verification or reservation mismatch.
+  on any verification or reservation mismatch. Failed or `unknown` existing-
+  container observations abort before host-probe; only determinate `unusable`
+  facts fall through to create a container.
 """
 
 from __future__ import annotations
@@ -163,8 +165,9 @@ def provision_user_container(
                                     image_request=image_request))
         if existing.get('status') == 'cancelled':
             raise host_ops.MachineManagementError('existing container verification cancelled')
-        if existing.get('status') == 'mismatch':
-            raise host_ops.MachineManagementError(existing['reason'])
+        if existing.get('status') in {'mismatch', 'failed', 'unknown'}:
+            raise host_ops.MachineManagementError(
+                existing.get('reason') or f"existing container verification {existing.get('status')}")
         if existing.get('status') == 'match':
             chosen_port = int(ssh_port)
             if reserve_port is not None:

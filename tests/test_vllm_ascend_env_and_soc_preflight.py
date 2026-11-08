@@ -307,6 +307,35 @@ def test_probe_and_validate_mindie_sd_runtime_env_and_timeout_propagation(tmp_pa
     with pytest.raises(TimeoutError, match="mindiesd readiness probe timed out"):
         probe_mindie_sd_runtime_readiness({}, python_executable="python3", timeout_sec=0.01)
 
+    from mindie_coordinator.mindie_sd_env import _PROBE_SNIPPET
+    assert "ver = 'installed'" not in _PROBE_SNIPPET
+    assert "import_error" in _PROBE_SNIPPET
+
+    def _raise_os_error(*_args, **_kwargs):
+        raise FileNotFoundError("/missing/python")
+
+    monkeypatch.setattr(subprocess, "run", _raise_os_error)
+    with pytest.raises(RuntimeError, match="could not execute"):
+        probe_mindie_sd_runtime_readiness({}, python_executable="/missing/python")
+
+    def _nonzero(*_args, **_kwargs):
+        return subprocess.CompletedProcess(["python3", "-c", "x"], 1, stdout="", stderr="No module named mindiesd")
+
+    monkeypatch.setattr(subprocess, "run", _nonzero)
+    with pytest.raises(RuntimeError, match="exit=1"):
+        probe_mindie_sd_runtime_readiness({}, python_executable="python3")
+
+    def _import_failed(*_args, **_kwargs):
+        payload = '{"available": false, "version": null, "origin": null, "import_error": "ImportError: broken"}'
+        return subprocess.CompletedProcess(["python3", "-c", "x"], 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _import_failed)
+    broken = probe_mindie_sd_runtime_readiness({}, python_executable="python3")
+    assert broken["mindiesd_available"] is False
+    assert broken["mindiesd_version"] is None
+    assert any("import failed" in item for item in broken["issues"])
+    assert all("is not installed" not in item for item in broken["issues"])
+
     # Validate USP hybrid parallel topology and A5 quant_four_over_six_a5
     valid_usp = validate_mindie_sd_runtime_env(
         {"ASCEND_CUSTOM_OPP_PATH": str(opp_dir), "LD_LIBRARY_PATH": str(plugin_dir)},

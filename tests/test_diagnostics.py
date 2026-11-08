@@ -65,6 +65,18 @@ def test_stage_duration_uses_monotonic_and_restart_has_explicit_gap(owned, monke
     assert row["stage_history"][-1]["timing_incomplete"]
 
 
+def test_task_root_busy_waits_instead_of_permanent_failed(owned):
+    from mindie_coordinator.provision.task_environment import TaskRootBusy
+    from mindie_coordinator.service import DONE, PERMANENT_ERRORS
+    owner, store, _, row = owned
+    assert TaskRootBusy not in PERMANENT_ERRORS
+    reply = owner._record_execution_error(store, row, TaskRootBusy("execution root is busy"))
+    assert reply["state"] == "waiting"
+    assert row["phase"] == "waiting"
+    assert row["phase"] not in DONE
+    assert "TaskRootBusy" in reply["error"]
+
+
 def test_diagnostic_disk_failure_preserves_error_and_authoritative_failure(owned, monkeypatch):
     owner, store, client, row = owned
     blocked = owner.state_dir / "runs"

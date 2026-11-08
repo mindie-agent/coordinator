@@ -12,6 +12,10 @@ Atlas A5 ``quant_four_over_six_a5`` SoC requirements).
   subprocess (default ``10.0s``) when ``python_executable`` is probed;
   ``subprocess.TimeoutExpired`` always raises ``TimeoutError`` and
   ``except TimeoutError: raise`` always precedes ``except OSError:``.
+  Probe execution failures (missing interpreter, nonzero exit, invalid JSON)
+  raise with the interpreter path and stderr; they are never reported as
+  "package is not installed". Import errors are recorded as issues, never as
+  ``version='installed'``.
 - ``validate_mindie_sd_runtime_env`` is pure in-memory and emits stable
   ``MIE-USP-001``, ``MIE-USP-002``, and ``MIE-QNT-A5`` diagnostic codes.
 
@@ -35,17 +39,18 @@ from typing import Any, Mapping
 
 DEFAULT_CANN_ROOT = "/usr/local/Ascend/ascend-toolkit/latest"
 _PROBE_SNIPPET = (
-    "import importlib.util, json; "
-    "spec = importlib.util.find_spec('mindiesd'); "
-    "origin = getattr(spec, 'origin', None) if spec else None; "
-    "ver = None\n"
+    "import importlib.util, json\n"
+    "spec = importlib.util.find_spec('mindiesd')\n"
+    "origin = getattr(spec, 'origin', None) if spec else None\n"
+    "payload = {'available': False, 'version': None, 'origin': origin}\n"
     "if spec is not None:\n"
     "    try:\n"
     "        import mindiesd as _m\n"
-    "        ver = getattr(_m, '__version__', 'installed')\n"
-    "    except Exception:\n"
-    "        ver = 'installed'\n"
-    "print(json.dumps({'available': spec is not None, 'version': ver, 'origin': origin}))"
+    "        payload['available'] = True\n"
+    "        payload['version'] = getattr(_m, '__version__', None)\n"
+    "    except Exception as exc:\n"
+    "        payload['import_error'] = f'{type(exc).__name__}: {exc}'\n"
+    "print(json.dumps(payload))\n"
 )
 
 
@@ -80,20 +85,39 @@ def probe_mindie_sd_runtime_readiness(
                 timeout=float(timeout_sec),
                 env=proc_env,
                 check=False,
+                **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
             )
-            if completed.returncode == 0 and completed.stdout.strip():
-                payload = json.loads(completed.stdout.strip().splitlines()[-1])
-                if payload.get("available"):
-                    mindiesd_available = True
-                    mindiesd_version = str(payload.get("version") or "installed")
-                    if payload.get("origin"):
-                        pkg_dir = Path(str(payload["origin"])).resolve().parent
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError(f"mindiesd readiness probe timed out after {timeout_sec}s") from exc
         except TimeoutError:
             raise
-        except (OSError, ValueError):
-            pass
+        except OSError as exc:
+            raise RuntimeError(
+                f"mindiesd readiness probe could not execute {exe!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "")[-500:]
+            raise RuntimeError(
+                f"mindiesd readiness probe failed: interpreter={exe!r} "
+                f"exit={completed.returncode} stderr={stderr!r}"
+            )
+        stdout = (completed.stdout or "").strip()
+        if not stdout:
+            raise RuntimeError(f"mindiesd readiness probe returned empty stdout from {exe!r}")
+        try:
+            payload = json.loads(stdout.splitlines()[-1])
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"mindiesd readiness probe returned invalid JSON from {exe!r}: {exc}"
+            ) from exc
+        if payload.get("import_error"):
+            issues.append(f"mindiesd import failed via {exe!r}: {payload['import_error']}")
+        elif payload.get("available"):
+            mindiesd_available = True
+            version = payload.get("version")
+            mindiesd_version = None if version in (None, "") else str(version)
+            if payload.get("origin"):
+                pkg_dir = Path(str(payload["origin"])).resolve().parent
 
     cann_path = (merged_env.get("ASCEND_HOME_PATH") or merged_env.get("ASCEND_TOOLKIT_HOME") or DEFAULT_CANN_ROOT).strip()
 
@@ -140,7 +164,7 @@ def probe_mindie_sd_runtime_readiness(
             continue
     custom_opp_available = custom_opp_path is not None
 
-    if not mindiesd_available:
+    if not mindiesd_available and not any(item.startswith("mindiesd import failed") for item in issues):
         issues.append("mindiesd Python package is not installed or importable")
     if not pta_plugin_available and not custom_opp_available:
         issues.append(

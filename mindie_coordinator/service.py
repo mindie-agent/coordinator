@@ -56,7 +56,6 @@ from mindie_coordinator.execution_sources import source_paths, validate_source_s
 from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERMINAL
 from mindie_coordinator.parity import materialize_command
 from mindie_coordinator.placement import extract_topology_spec, requested_hardware, role_plan, runtime_matches
-from mindie_coordinator.provision.task_environment import TaskRootBusy
 from mindie_coordinator.ready_runtime import RuntimePool
 from mindie_coordinator.task_messages import TaskMessages
 
@@ -96,7 +95,7 @@ _PROCESS_CLOCK_DOMAIN = uuid.uuid4().hex
 STATUS_CACHE_SECONDS = 2.0
 DONE = {"succeeded", "failed", "timeout", "cancelled", "inconclusive"}
 LIVE = {"running"}
-PERMANENT_ERRORS = (ValueError, PermissionError, ExecutionRequestError, TaskRootBusy)
+PERMANENT_ERRORS = (ValueError, PermissionError, ExecutionRequestError)
 STOP_WAIT_SECONDS = 30.0
 LOADED_RUNTIMES = [process_identity(name) for name in ("mindie-coordinator", "remote-dev")]
 

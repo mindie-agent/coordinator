@@ -13,6 +13,7 @@ import pytest
 
 from mindie_coordinator.agent_session import AgentSessions
 from mindie_coordinator.fleet_probe import (
+    apply_hbm_usage_supplement,
     device_occupancy_inventory,
     parse_fleet_probe_output,
     parse_npu_smi_usages,
@@ -188,6 +189,56 @@ def _usages(rate_pct: int, aicore_pct: int = 0) -> str:
     return ("\tHBM Capacity(MB)                  : 98304\n"
             f"\tHBM Usage Rate(%)                 : {rate_pct}\n"
             f"\tAicore Usage Rate(%)              : {aicore_pct}\n")
+
+
+def test_usages_supplement_timeout_does_not_publish_idle_zero_hbm():
+    raw = (
+        "===NPU_USAGE:0===\n"
+        "timeout: failed\n"
+        "===NPU_USAGE_RC:0:124===\n"
+    )
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        raw,
+        [0],
+    )
+    card = snapshot["npus"][0]
+    assert card["hbm_total_mb"] == 0
+    assert card["busy"] is True
+    assert "exited 124" in card["hbm_probe_error"]
+    assert snapshot["free_npu_ids"] == [] and snapshot["busy_npu_ids"] == [0]
+    assert snapshot["free_phy_ids"] == [] and snapshot["busy_phy_ids"] == [0]
+    assert "exited 124" in snapshot["usage_parse_error"]
+    spec = normalize_remote_probe_spec(snapshot)
+    assert spec["free_npus"] == 0 and spec["vram_free_mb"] == 0
+
+
+def test_usages_supplement_missing_status_is_not_idle_zero_hbm():
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        "===NPU_USAGE:0===\n",
+        [0],
+    )
+    assert snapshot["npus"][0]["busy"] is True
+    assert snapshot["free_npu_ids"] == []
+    assert "no exit status" in snapshot["usage_parse_error"]
+
+
+def test_usages_supplement_success_still_recovers_capacity():
+    raw = (
+        "===NPU_USAGE:0===\n"
+        f"{_usages(5)}"
+        "===NPU_USAGE_RC:0:0===\n"
+    )
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        raw,
+        [0],
+    )
+    assert snapshot["npus"][0]["hbm_total_mb"] == 98304
+    assert snapshot["npus"][0]["busy"] is False
+    assert snapshot["free_npu_ids"] == [0]
+    assert "usage_parse_error" not in snapshot
 
 
 def test_usages_supplement_publishes_capacity_to_the_die_row():

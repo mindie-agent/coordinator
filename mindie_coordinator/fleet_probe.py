@@ -12,6 +12,8 @@ here so existing `fleet_probe.parse_*` imports keep working.
   monitor outage is reported in `npu_top_observation`, never as zero capacity.
 - Dual-die 910C (A3) physical IDs (`phy_id`) drive `ASCEND_RT_VISIBLE_DEVICES`.
 - `probe_machine_record` never masks a failed live probe as an online host.
+- HBM `-t usages` supplement records timeout/nonzero per card and never
+  publishes an unmeasured unit as idle `0 / 0 MB`.
 
 [Timeouts & Locks]
 - Remote script bounds: `npu-smi info` `10s`, `docker ps` `5s`, `df` `3s`;
@@ -187,6 +189,74 @@ def save_probe_cache(
     return path
 
 
+_USAGE_SECTION = "===NPU_USAGE:"
+_USAGE_RC_SECTION = "===NPU_USAGE_RC:"
+
+
+def _card_with_hbm_probe_error(card: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    updated = dict(card)
+    updated["hbm_probe_error"] = reason[:500]
+    updated["busy"] = True
+    dies = updated.get("dies")
+    if isinstance(dies, list):
+        updated["dies"] = [{**die, "busy": True, "hbm_probe_error": reason[:500]} for die in dies]
+    return updated
+
+
+def apply_hbm_usage_supplement(
+    snapshot: Mapping[str, Any],
+    usages_raw: str,
+    requested_ids: list[int],
+) -> dict[str, Any]:
+    """Apply `-t usages` text. Timeout/nonzero cards are excluded from free inventory."""
+    by_id: dict[int, list[str]] = {}
+    rcs: dict[int, int] = {}
+    cur_id: int | None = None
+    for uline in str(usages_raw or "").splitlines():
+        if uline.startswith(_USAGE_RC_SECTION) and uline.endswith("==="):
+            payload = uline[len(_USAGE_RC_SECTION):-3]
+            nid_s, _, rc_s = payload.partition(":")
+            nid = _parse_int(nid_s, -1)
+            if nid >= 0:
+                rcs[nid] = _parse_int(rc_s, -1)
+            cur_id = None
+        elif uline.startswith(_USAGE_SECTION) and uline.endswith("==="):
+            cur_id = _parse_int(uline[len(_USAGE_SECTION):-3], -1)
+            if cur_id >= 0:
+                by_id.setdefault(cur_id, [])
+        elif cur_id is not None and cur_id >= 0:
+            by_id.setdefault(cur_id, []).append(uline)
+
+    errors: list[str] = []
+    requested = set(requested_ids)
+    updated_npus: list[dict[str, Any]] = []
+    for card in snapshot.get("npus") or []:
+        nid = card["npu_id"]
+        if nid not in requested:
+            updated_npus.append(dict(card))
+            continue
+        rc = rcs.get(nid)
+        if rc is None:
+            reason = f"npu-smi usages for NPU {nid} produced no exit status"
+            errors.append(reason)
+            updated_npus.append(_card_with_hbm_probe_error(card, reason))
+            continue
+        if rc != 0:
+            reason = f"npu-smi usages for NPU {nid} exited {rc}"
+            errors.append(reason)
+            updated_npus.append(_card_with_hbm_probe_error(card, reason))
+            continue
+        updated_npus.append(parse_npu_smi_usages("\n".join(by_id.get(nid, [])), dict(card)))
+
+    result = {**snapshot, "npus": updated_npus}
+    result.update(device_occupancy_inventory(updated_npus))
+    if errors:
+        previous = result.get("usage_parse_error")
+        joined = "; ".join(errors)[:500]
+        result["usage_parse_error"] = f"{previous}; {joined}"[:500] if previous else joined
+    return result
+
+
 def probe_machine_record(
     record: Mapping[str, Any],
     *,
@@ -253,35 +323,25 @@ def probe_machine_record(
             user=user,
             container_binding=container_binding,
         )
-        # Fallback for cards where `npu-smi info` reported 0/0 HBM
+        # Fallback for cards where `npu-smi info` reported 0/0 HBM.
+        # Capture each card's real exit status; `|| true` would turn timeout
+        # 124 / npu-smi errors into empty text parsed as idle 0/0.
         zero_hbm_ids = [c["npu_id"] for c in snapshot["npus"] if int(c.get("hbm_total_mb") or 0) == 0]
         if zero_hbm_ids and runner is None:
             usages_cmd = " ; ".join(
-                f"echo '===NPU_USAGE:{nid}==='; timeout 3 npu-smi info -t usages -i {nid} 2>/dev/null || true"
+                f"echo '===NPU_USAGE:{nid}==='; rc=0; "
+                f"timeout 3 npu-smi info -t usages -i {nid} 2>&1 || rc=$?; "
+                f"echo ===NPU_USAGE_RC:{nid}:$rc==="
                 for nid in zero_hbm_ids[:8]
             )
             try:
                 usages_raw = exec_runner(host_spec, usages_cmd)
-                by_id: dict[int, list[str]] = {}
-                cur_id: int | None = None
-                for uline in usages_raw.splitlines():
-                    if uline.startswith("===NPU_USAGE:") and uline.endswith("==="):
-                        cur_id = _parse_int(uline.split(":", 1)[1][:-3], -1)
-                    elif cur_id is not None and cur_id >= 0:
-                        by_id.setdefault(cur_id, []).append(uline)
-                updated_npus = []
-                for card in snapshot["npus"]:
-                    nid = card["npu_id"]
-                    if nid in by_id:
-                        card = parse_npu_smi_usages("\n".join(by_id[nid]), card)
-                    updated_npus.append(card)
-                snapshot["npus"] = updated_npus
-                # Rebuild card *and* physical-Die inventory from the same
-                # derivation, so a supplement can never leave a busy card with
-                # its Phy-ID still listed free.
-                snapshot.update(device_occupancy_inventory(updated_npus))
+            except TimeoutError:
+                raise
             except Exception as exc:
                 snapshot["usage_parse_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                usages_raw = ""
+            snapshot = apply_hbm_usage_supplement(snapshot, usages_raw, zero_hbm_ids[:8])
         cache[alias] = snapshot
         save_probe_cache(cache, state_dir=state_dir)
         return {**snapshot, "cache_hit": False, "cache_age_seconds": 0.0}

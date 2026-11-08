@@ -11,7 +11,8 @@ preflight, host queue, and remote shell adapters.
   donor interpreter.
 - Every installed/captured artifact is verified against the same fixed
   execution view before it is returned; uncertain/cancelled preparation is
-  propagated, not converted into an ordinary cache miss.
+  propagated, not converted into an ordinary cache miss. Disk, permission, and
+  transport failures return ``status='failed'`` and abort the donor loop.
 - Remote script text and heredoc delimiters are preserved byte-for-byte from
   the former backend module; the facade keeps its explicit `timeout=30,
   stdin=subprocess.DEVNULL` git calls.
@@ -328,6 +329,9 @@ class BackendPreparationMixin:
                     process=owned_process('shared-native-restore-after-export'))
                 if not remaining_donors:
                     break
+            if cache.get('status') == 'failed':
+                raise RuntimeError(
+                    'shared native cache restore failed: ' + str(cache.get('reason') or 'unknown')[:500])
             if accept_cache(cache):
                 # Profile capture below performs this execution's real import
                 # once. No editable install or repeated native smoke is needed.
@@ -408,8 +412,12 @@ class BackendPreparationMixin:
             return json.loads(result.stdout)
         except (PreparationCancelled, PreparationUncertain):
             raise
-        except Exception as exc:
+        except TimeoutError:
+            raise
+        except FileNotFoundError as exc:
             return {'status': 'miss', 'reason': str(exc)[:500]}
+        except Exception as exc:
+            return {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}'[:500]}
 
     def _export_shared_native(self, spec, *, donors=None):
         """An existing verified donor is exported only when the cache missed."""

@@ -436,7 +436,7 @@ def test_existing_container_image_mismatch_cannot_be_relabelled_as_requested_ima
               "container": {"name": "mindie-alice", "ssh_port": 2201}, "user": "alice",
               "image": {"requested": "registry.example/ascend:old"}}
     service._configured_machines = lambda: [record]
-    monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'unknown'})
+    monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'unusable'})
     target = SshTarget(host="192.0.2.10", user="root", port=22)
     remote = Mock(side_effect=[
         RemoteResult(target, 0, "", "", {"success": True, "suggested_port": 2299}),
