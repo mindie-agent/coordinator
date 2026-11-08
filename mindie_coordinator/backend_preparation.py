@@ -12,7 +12,9 @@ preflight, host queue, and remote shell adapters.
 - Every installed/captured artifact is verified against the same fixed
   execution view before it is returned; uncertain/cancelled preparation is
   propagated, not converted into an ordinary cache miss. Disk, permission, and
-  transport failures return ``status='failed'`` and abort the donor loop.
+  transport failures return ``status='failed'``, raise
+  ``ExecutionRequestError`` (terminal ``failed``, never ``uncertain``), and
+  abort later restore/revalidate/export/compile and the donor loop.
 - Remote script text and heredoc delimiters are preserved byte-for-byte from
   the former backend module; the facade keeps its explicit `timeout=30,
   stdin=subprocess.DEVNULL` git calls.
@@ -54,6 +56,14 @@ class PreparedNativeView:
     """Internal completed native proof, never a registration argument."""
     attestation: dict
     native_cache_receipt: dict | None = None
+
+
+def _raise_failed_shared_cache(cache, action: str) -> None:
+    """A known cache failure is a permanent request error, never a miss or wait."""
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    if isinstance(cache, dict) and cache.get('status') == 'failed':
+        raise ExecutionRequestError(
+            f'shared native cache {action} failed: ' + str(cache.get('reason') or 'unknown')[:500])
 
 
 def _captured_manifest(output: str) -> dict:
@@ -287,6 +297,7 @@ class BackendPreparationMixin:
 
         def accept_cache(cache):
             nonlocal cached_native, compiled_native, incremental_native
+            _raise_failed_shared_cache(cache, 'restore')
             progress('shared-native-cache', cache)
             cached_native = cache.get('status') in {'hit', 'incremental'}
             if not cached_native:
@@ -299,6 +310,7 @@ class BackendPreparationMixin:
                 install('verify-deps')
                 validated = self._shared_native(spec, 'revalidate', versions,
                     process=owned_process('shared-native-revalidate-after-dependencies'))
+                _raise_failed_shared_cache(validated, 'revalidate')
                 if validated.get('status') != 'validated':
                     # Imports or broad requirement ranges cannot establish the
                     # original bundle's ABI after a dependency overlay changed.
@@ -322,6 +334,7 @@ class BackendPreparationMixin:
                 progress('shared-native-export', {key: value for key, value in exported.items()
                                                    if key != 'remaining_donors'})
                 check_cancel()
+                _raise_failed_shared_cache(exported, 'export')
                 if exported.get('status') != 'stored':
                     break
                 cache = self._shared_native(spec, 'restore', versions,
@@ -329,9 +342,7 @@ class BackendPreparationMixin:
                     process=owned_process('shared-native-restore-after-export'))
                 if not remaining_donors:
                     break
-            if cache.get('status') == 'failed':
-                raise RuntimeError(
-                    'shared native cache restore failed: ' + str(cache.get('reason') or 'unknown')[:500])
+            _raise_failed_shared_cache(cache, 'restore')
             if accept_cache(cache):
                 # Profile capture below performs this execution's real import
                 # once. No editable install or repeated native smoke is needed.
@@ -414,8 +425,6 @@ class BackendPreparationMixin:
             raise
         except TimeoutError:
             raise
-        except FileNotFoundError as exc:
-            return {'status': 'miss', 'reason': str(exc)[:500]}
         except Exception as exc:
             return {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}'[:500]}
 

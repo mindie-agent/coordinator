@@ -123,6 +123,9 @@ def export_verified_donor(request: dict, run=subprocess.run) -> dict:
                        input=request['export_source'], capture_output=True, text=True, timeout=60)
         if exported.returncode == 0:
             result = json.loads(exported.stdout)
+            if result.get('status') == 'failed':
+                return {**result, 'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                        'remaining_donors': donors[index + 1:]}
             if result.get('status') == 'stored':
                 return {**result, 'donor_container': donor['container_name'], 'donor_root': donor['root'],
                         'remaining_donors': donors[index + 1:]}

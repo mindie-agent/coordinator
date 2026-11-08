@@ -15,7 +15,9 @@ Atlas A5 ``quant_four_over_six_a5`` SoC requirements).
   Probe execution failures (missing interpreter, nonzero exit, invalid JSON)
   raise with the interpreter path and stderr; they are never reported as
   "package is not installed". Import errors are recorded as issues, never as
-  ``version='installed'``.
+  ``version='installed'``. When ``python_executable`` is given, that
+  interpreter's probe is authoritative and overrides a pre-populated
+  ``MINDIE_SD_ROOT`` success.
 - ``validate_mindie_sd_runtime_env`` is pure in-memory and emits stable
   ``MIE-USP-001``, ``MIE-USP-002``, and ``MIE-QNT-A5`` diagnostic codes.
 
@@ -112,12 +114,18 @@ def probe_mindie_sd_runtime_readiness(
             ) from exc
         if payload.get("import_error"):
             issues.append(f"mindiesd import failed via {exe!r}: {payload['import_error']}")
+            if python_executable is not None:
+                mindiesd_available = False
+                mindiesd_version = None
         elif payload.get("available"):
             mindiesd_available = True
             version = payload.get("version")
             mindiesd_version = None if version in (None, "") else str(version)
             if payload.get("origin"):
                 pkg_dir = Path(str(payload["origin"])).resolve().parent
+        elif python_executable is not None:
+            mindiesd_available = False
+            mindiesd_version = None
 
     cann_path = (merged_env.get("ASCEND_HOME_PATH") or merged_env.get("ASCEND_TOOLKIT_HOME") or DEFAULT_CANN_ROOT).strip()
 

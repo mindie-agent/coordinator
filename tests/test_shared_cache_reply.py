@@ -86,10 +86,23 @@ def test_shared_restore_permission_error_is_failed_not_miss(monkeypatch):
     assert 'PermissionError' in reply['reason']
 
 
-def test_shared_restore_missing_entry_is_still_miss(monkeypatch):
+def test_shared_restore_missing_file_is_failed_not_miss(monkeypatch):
     reply = _run_shared_suffix(monkeypatch, error=FileNotFoundError('bundle missing'))
-    assert reply['status'] == 'miss'
+    assert reply['status'] == 'failed'
+    assert reply['error_type'] == 'FileNotFoundError'
     assert 'bundle missing' in reply['reason']
+
+
+def test_shared_restore_corrupt_index_is_failed_not_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=json.JSONDecodeError('Expecting value', '', 0))
+    assert reply['status'] == 'failed'
+    assert reply['error_type'] == 'JSONDecodeError'
+
+
+def test_shared_restore_abi_mismatch_is_still_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=ValueError('native ABI mismatch'))
+    assert reply['status'] == 'miss'
+    assert 'ABI mismatch' in reply['reason']
 
 
 def test_shared_restore_timeout_is_not_converted_to_miss(monkeypatch):

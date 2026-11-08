@@ -15,6 +15,7 @@ from mindie_coordinator.agent_session import AgentSessions
 from mindie_coordinator.fleet_probe import (
     apply_hbm_usage_supplement,
     device_occupancy_inventory,
+    find_fleet_capacity,
     parse_fleet_probe_output,
     parse_npu_smi_usages,
 )
@@ -222,6 +223,78 @@ def test_usages_supplement_missing_status_is_not_idle_zero_hbm():
     assert snapshot["npus"][0]["busy"] is True
     assert snapshot["free_npu_ids"] == []
     assert "no exit status" in snapshot["usage_parse_error"]
+
+
+def test_usages_supplement_rc0_without_capacity_is_not_idle_zero_hbm():
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        "===NPU_USAGE:0===\nNPU ID                         : 0\n===NPU_USAGE_RC:0:0===\n",
+        [0],
+    )
+    card = snapshot["npus"][0]
+    assert card["busy"] is True
+    assert snapshot["free_npu_ids"] == [] and snapshot["busy_npu_ids"] == [0]
+    assert "no HBM capacity" in card["hbm_probe_error"]
+    assert "no HBM capacity" in snapshot["usage_parse_error"]
+    spec = normalize_remote_probe_spec(snapshot)
+    assert spec["free_npus"] == 0 and spec["vram_free_mb"] == 0
+
+
+def test_usages_supplement_rc0_unattributable_multi_die_stays_leasable():
+    dual = {"npu_id": 0, "phy_ids": [0, 1], "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0,
+            "die_count": 2, "aicore_pct": 0.0, "processes": [],
+            "dies": [{"chip_id": 0, "phy_id": 0, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0},
+                     {"chip_id": 1, "phy_id": 1, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0}]}
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [dual], "online": True},
+        f"===NPU_USAGE:0===\n{_usages(80)}===NPU_USAGE_RC:0:0===\n",
+        [0],
+    )
+    assert "usage_parse_error" not in snapshot
+    assert snapshot["npus"][0]["hbm_total_mb"] == 0
+    spec = normalize_remote_probe_spec(snapshot)
+    assert spec["free_npus"] == 2
+    assert spec["vram_free_observed"] is False
+
+
+def test_fleet_capacity_unsatisfied_preserves_hbm_probe_error(tmp_path, monkeypatch):
+    from mindie_coordinator import fleet_probe
+    from mindie_coordinator.machine_directory import MachineDirectory
+
+    store = MachineDirectory(path=tmp_path / "machines.json")
+    store.upsert_machine({"alias": "a", "host": {"ip": "10.0.0.1", "port": 22}})
+    snap = apply_hbm_usage_supplement(
+        {"alias": "a", "host": "10.0.0.1", "online": True, "npus": [_zero_hbm_single_die_card()],
+         "chip_summary": "Ascend910B", "containers": [], "mounts": [], "bound_container": None},
+        "===NPU_USAGE:0===\ntimeout\n===NPU_USAGE_RC:0:124===\n",
+        [0],
+    )
+    monkeypatch.setattr(fleet_probe, "probe_machine_record", lambda *a, **k: snap)
+    result = find_fleet_capacity(count=1, directory=store, state_dir=tmp_path, use_npu_top=False)
+    assert result["matched_count"] == 0
+    assert "exited 124" in result["unsatisfied"][0]["reason"]
+    assert "exited 124" in result["unsatisfied"][0]["usage_parse_error"]
+
+
+def test_observe_host_specs_surfaces_hbm_probe_error(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    from mindie_coordinator.service import CoordinatorService
+
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "online": True, "npus": [_zero_hbm_single_die_card()], "alias": HOST},
+        "===NPU_USAGE:0===\ntimeout\n===NPU_USAGE_RC:0:124===\n",
+        [0],
+    )
+    snapshot["online"] = True
+    service = CoordinatorService(tmp_path / "coordinator", pool=MagicMock())
+    monkeypatch.setattr(service, "_topology_host_records",
+                        lambda *a, **k: [{"host": {"ip": HOST}}])
+    monkeypatch.setattr(service, "_probe_host_record", lambda record: snapshot)
+    specs, reports = service._observe_host_specs(
+        "alice", [{"name": "w", "npu_count": 1, "hbm_mb": 8192}], {})
+    assert reports[0]["state"] == "observed"
+    assert "exited 124" in reports[0]["usage_parse_error"]
+    assert specs[HOST]["free_npus"] == 0
 
 
 def test_usages_supplement_success_still_recovers_capacity():

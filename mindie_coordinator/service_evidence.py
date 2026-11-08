@@ -146,7 +146,9 @@ class ServiceEvidenceMixin:
                 continue
             specs[host] = normalize_remote_probe_spec(snapshot)
             reports.append({"host": host, "state": "observed",
-                            "cache_hit": bool(snapshot.get("cache_hit"))})
+                            "cache_hit": bool(snapshot.get("cache_hit")),
+                            **({"usage_parse_error": snapshot["usage_parse_error"]}
+                               if snapshot.get("usage_parse_error") else {})})
         if len(records) > probe_limit:
             reports.extend({"host": str((record.get("host") or {}).get("ip") or "").strip(), "state": "skipped",
                             "error": f"not probed: bounded observation window of {probe_limit} hosts"}
@@ -311,6 +313,7 @@ class ServiceEvidenceMixin:
         return self._reply(latest)
 
     def _record_execution_error(self, store, row, exc) -> dict[str, Any]:
+        from mindie_coordinator.managed_execution import ExecutionRequestError
         from mindie_coordinator.provision.task_environment import TaskRootBusy
         # TaskRootBusy is a transient local wait, never a terminal tombstone.
         waiting = isinstance(exc, TaskRootBusy)
@@ -321,8 +324,12 @@ class ServiceEvidenceMixin:
         if (not waiting and isinstance(exc, RemoteCommandError) and exc.returncode != 255
                 and row.get("phase") == "preparing" and not row.get("roles")):
             permanent = True
-        if any(not job.get("quiet") for records in (row.get("preparation_jobs") or {}).values()
-               for job in records.values()):
+        # Retained jobs must not demote a known-invalid cache/request into
+        # uncertain: retry cannot repair it, and leftover jobs would otherwise
+        # pin the execution out of DONE forever.
+        if (not isinstance(exc, ExecutionRequestError)
+                and any(not job.get("quiet") for records in (row.get("preparation_jobs") or {}).values()
+                        for job in records.values())):
             permanent = False
         path = self.state_dir / "runs" / row["id"] / "error.log"
         try:

@@ -5,8 +5,10 @@ without provisioning another.
 
 [Invariants] Observation is read-only. Determinate "not reusable" facts return
 `unusable` so the provision owner may create a container. Observation errors,
-timeouts, and an SSH listener that exists but is not this container's sshd
-return `failed` and must abort; they are never `unknown`.
+timeouts, docker daemon/permission failures, and an SSH listener that exists
+but is not this container's sshd return `failed` and must abort; they are
+never `unknown`. `docker inspect` is `unusable` only when the tool reports the
+named container absent. Observation SSH forwards `identity_file`/`auth_ref`.
 
 [Timeouts & Locks] The whole inspection is bounded to 8 seconds and each
 subprocess receives `min(3, remaining)` seconds.
@@ -20,6 +22,13 @@ from pathlib import Path
 import re
 import subprocess
 import time
+
+_MISSING_CONTAINER_MARKERS = ('no such object', 'no such container')
+
+
+def _inspect_reports_absent(exc: subprocess.CalledProcessError) -> bool:
+    text = f"{exc.stderr or ''} {exc.stdout or ''}".lower()
+    return any(marker in text for marker in _MISSING_CONTAINER_MARKERS)
 
 
 def inspect_existing(request, run=subprocess.run):
@@ -95,16 +104,17 @@ def inspect_existing(request, run=subprocess.run):
         return {'status': 'failed', 'reason': f'host observation command missing: {exc}'[:300]}
     except subprocess.CalledProcessError as exc:
         argv = list(exc.cmd) if isinstance(exc.cmd, (list, tuple)) else [str(exc.cmd)]
-        # Missing container is a determinate non-reuse; other docker/ss
-        # failures mean the running target cannot be observed safely.
-        if argv[:2] == ['docker', 'inspect']:
+        # Missing container is a determinate non-reuse; docker daemon,
+        # permission, and timeout-as-nonzero failures abort as failed.
+        if argv[:2] == ['docker', 'inspect'] and _inspect_reports_absent(exc):
             return {'status': 'unusable', 'reason': str(exc)[:300]}
         return {'status': 'failed', 'reason': str(exc)[:300]}
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         return {'status': 'failed', 'reason': str(exc)[:300]}
 
 
-def observe_existing(target, *, container, user, ssh_port, workdir, image_request):
+def observe_existing(target, *, container, user, ssh_port, workdir, image_request,
+                     identity_file=None, auth_ref=None):
     """Use the existing cached Python transport, with no host mutation or probe."""
     from remote_dev.core.endpoint import resolve_endpoint
     from remote_dev.core.ssh_transport import run_remote_python
@@ -112,8 +122,12 @@ def observe_existing(target, *, container, user, ssh_port, workdir, image_reques
 
     source = Path(__file__).read_text(encoding='utf-8')
     source += '\nimport sys\nprint(json.dumps(inspect_existing(json.load(sys.stdin))))\n'
-    endpoint = resolve_endpoint({'host': target.host, 'port': target.port,
-                                 'user': target.user, 'root': '/', 'cwd': '/'})
+    endpoint = resolve_endpoint({
+        'host': target.host, 'port': target.port, 'user': target.user,
+        'root': '/', 'cwd': '/',
+        **({'identity_file': identity_file} if identity_file else {}),
+        **({'auth_ref': auth_ref} if auth_ref else {}),
+    })
     try:
         result = run_remote_python(endpoint, source,
             {'container': container, 'user': user, 'ssh_port': ssh_port,

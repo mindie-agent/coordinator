@@ -65,6 +65,20 @@ def test_stage_duration_uses_monotonic_and_restart_has_explicit_gap(owned, monke
     assert row["stage_history"][-1]["timing_incomplete"]
 
 
+def test_known_cache_failure_is_terminal_failed_not_uncertain(owned):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    from mindie_coordinator.service import DONE
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"restore": {"quiet": False, "job_id": "j", "step": "shared-native-restore"}}}
+    owner._save_execution(store, row)
+    reply = owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed: OSError: No space left on device"))
+    assert reply["state"] == "failed"
+    assert row["phase"] == "failed"
+    assert row["phase"] in DONE
+    # Tick dispatch skips DONE executions, so leftover jobs cannot pin uncertain.
+
+
 def test_task_root_busy_waits_instead_of_permanent_failed(owned):
     from mindie_coordinator.provision.task_environment import TaskRootBusy
     from mindie_coordinator.service import DONE, PERMANENT_ERRORS

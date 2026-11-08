@@ -371,3 +371,31 @@ def test_probe_and_validate_mindie_sd_runtime_env_and_timeout_propagation(tmp_pa
     assert "MIE-QNT-A5" in joined_issues
 
 
+def test_explicit_interpreter_import_error_overrides_mindie_sd_root(tmp_path: Path, monkeypatch):
+    sd_root = tmp_path / "mindiesd_pkg"
+    plugin_dir = sd_root / "mindiesd" / "plugin"
+    opp_dir = sd_root / "mindiesd" / "ops" / "vendors" / "mindie_sd"
+    plugin_dir.mkdir(parents=True)
+    opp_dir.mkdir(parents=True)
+    (plugin_dir / "libpta_extend.so").write_bytes(b"ELF-pta-extend")
+
+    def _import_failed(*_args, **_kwargs):
+        payload = '{"available": false, "version": null, "origin": null, "import_error": "ImportError: broken"}'
+        return subprocess.CompletedProcess(["/venv/bin/python", "-c", "x"], 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _import_failed)
+    report = probe_mindie_sd_runtime_readiness(
+        {
+            "MINDIE_SD_ROOT": str(sd_root),
+            "MINDIE_SD_VERSION": "2.1.RC1",
+            "ASCEND_CUSTOM_OPP_PATH": str(opp_dir),
+            "LD_LIBRARY_PATH": str(plugin_dir),
+        },
+        python_executable="/venv/bin/python",
+    )
+    assert report["mindiesd_available"] is False
+    assert report["mindiesd_version"] is None
+    assert report["ready"] is False
+    assert any("import failed" in item for item in report["issues"])
+
+

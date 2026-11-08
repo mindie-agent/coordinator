@@ -208,7 +208,7 @@ def apply_hbm_usage_supplement(
     usages_raw: str,
     requested_ids: list[int],
 ) -> dict[str, Any]:
-    """Apply `-t usages` text. Timeout/nonzero cards are excluded from free inventory."""
+    """Apply `-t usages` text. Timeout, nonzero, and unmeasured attributable cards are excluded."""
     by_id: dict[int, list[str]] = {}
     rcs: dict[int, int] = {}
     cur_id: int | None = None
@@ -246,7 +246,14 @@ def apply_hbm_usage_supplement(
             errors.append(reason)
             updated_npus.append(_card_with_hbm_probe_error(card, reason))
             continue
-        updated_npus.append(parse_npu_smi_usages("\n".join(by_id.get(nid, [])), dict(card)))
+        updated = parse_npu_smi_usages("\n".join(by_id.get(nid, [])), dict(card))
+        attributable = not isinstance(card.get("dies"), list) or len(card.get("dies") or []) <= 1
+        if attributable and int(updated.get("hbm_total_mb") or 0) == 0:
+            reason = f"npu-smi usages for NPU {nid} reported no HBM capacity"
+            errors.append(reason)
+            updated_npus.append(_card_with_hbm_probe_error(card, reason))
+            continue
+        updated_npus.append(updated)
 
     result = {**snapshot, "npus": updated_npus}
     result.update(device_occupancy_inventory(updated_npus))
@@ -569,16 +576,21 @@ def find_fleet_capacity(
             continue
         free_ids = list(snap.get("free_npu_ids") or [])
         if len(free_ids) < count:
+            reason = f"only {len(free_ids)}/{snap['total_npus']} NPUs free (requested {count})"
+            if snap.get("usage_parse_error"):
+                reason = f"{reason}; {snap['usage_parse_error']}"[:500]
             unsatisfied.append(
                 {
                     "alias": snap["alias"],
                     "host": snap["host"],
                     "online": True,
-                    "reason": f"only {len(free_ids)}/{snap['total_npus']} NPUs free (requested {count})",
+                    "reason": reason,
                     "free_npus": len(free_ids),
                     "free_npu_ids": free_ids,
                     "free_phy_ids": list(snap.get("free_phy_ids") or []),
                     "total_npus": snap["total_npus"],
+                    **({"usage_parse_error": snap["usage_parse_error"]}
+                       if snap.get("usage_parse_error") else {}),
                 }
             )
             continue

@@ -319,10 +319,124 @@ def test_failed_shared_restore_does_not_retry_donors_as_miss(tmp_path, monkeypat
     monkeypatch.setattr(backend, '_shared_native', operation)
     monkeypatch.setattr(backend, '_export_shared_native',
                         lambda *a, **k: pytest.fail('failed restore must not look up donors as a cache miss'))
-    with pytest.raises(RuntimeError, match='shared native cache restore failed'):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    with pytest.raises(ExecutionRequestError, match='shared native cache restore failed'):
         backend.prepare_task_root(spec, sources={'vllm': '/a', 'vllm-ascend': '/b'}, environment={},
                                   source_snapshot=snapshot)
     assert operations == ['restore']
+
+
+def _cache_failure_backend(monkeypatch):
+    import mindie_coordinator.parity as parity
+    import mindie_coordinator.parity_support as transport
+    from remote_dev.core.ssh_transport import RemoteCompleted
+    backend = RemoteBackend()
+    spec = {'user': 'bob', 'container_name': 'mindie-bob', 'python': '/bob/.venv/bin/python',
+            'endpoint': {'host': 'host', 'port': 2202, 'user': 'root', 'root': '/bob'},
+            'host_endpoint': {'host': 'host', 'port': 22, 'user': 'root'}}
+    snapshot = {'id': 'source', 'records': [{'relpath': name, 'scm_version': '1.0', 'source_head': 'head'}
+                                          for name in ('vllm', 'vllm-ascend')]}
+    monkeypatch.setattr(parity, 'materialize_fixed_sources', lambda **kwargs: None)
+    monkeypatch.setattr('remote_dev.core.ssh_transport.run_rpc_script',
+                        lambda *a, **k: RemoteCompleted(0, '', ''))
+    monkeypatch.setattr(transport, 'ssh_exec_stream', lambda *a, **k: None)
+    monkeypatch.setattr(backend, 'bash', lambda *a: '')
+    installed = []
+
+    def install(**kwargs):
+        installed.append(kwargs['step'])
+        if kwargs['step'] in {'install-vllm', 'install-vllm-ascend', 'install-vllm-ascend-incremental'}:
+            pytest.fail('failed cache must not compile native: ' + kwargs['step'])
+
+    monkeypatch.setattr(parity, 'run_runtime_install_step', install)
+    monkeypatch.setattr(backend, '_write_ready_profile', lambda *a, **k: None)
+    return backend, spec, snapshot, installed
+
+
+def test_failed_revalidate_does_not_rebuild(tmp_path, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    backend, spec, snapshot, installed = _cache_failure_backend(monkeypatch)
+    operations = []
+
+    def operation(spec, action, versions, **kwargs):
+        operations.append(action)
+        if action == 'restore':
+            return {'status': 'hit', 'dependencies': {'satisfied': False}}
+        if action == 'revalidate':
+            return {'status': 'failed', 'reason': 'PermissionError: cache not writable'}
+        if action == 'discard':
+            pytest.fail('failed revalidate must not discard/rebuild')
+        return {'status': 'validated'}
+
+    monkeypatch.setattr(backend, '_shared_native', operation)
+    monkeypatch.setattr(backend, '_export_shared_native',
+                        lambda *a, **k: pytest.fail('hit restore must not export donors'))
+    with pytest.raises(ExecutionRequestError, match='shared native cache revalidate failed'):
+        backend.prepare_task_root(spec, sources={'vllm': '/a', 'vllm-ascend': '/b'}, environment={},
+                                  source_snapshot=snapshot)
+    assert operations == ['restore', 'revalidate']
+    assert 'install-vllm-ascend' not in installed
+    assert installed == ['install-vllm-ascend-requirements', 'verify-deps']
+
+
+def test_failed_export_does_not_compile_or_try_next_donor(tmp_path, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    backend, spec, snapshot, installed = _cache_failure_backend(monkeypatch)
+    operations, exports = [], []
+
+    def operation(spec, action, versions, **kwargs):
+        operations.append(action)
+        return {'status': 'miss', 'reason': 'no cached bundle'}
+
+    def export(spec, **kwargs):
+        exports.append(kwargs)
+        assert len(exports) == 1
+        return {'status': 'failed', 'reason': 'OSError: No space left on device',
+                'remaining_donors': ['next-donor']}
+
+    monkeypatch.setattr(backend, '_shared_native', operation)
+    monkeypatch.setattr(backend, '_export_shared_native', export)
+    with pytest.raises(ExecutionRequestError, match='shared native cache export failed'):
+        backend.prepare_task_root(spec, sources={'vllm': '/a', 'vllm-ascend': '/b'}, environment={},
+                                  source_snapshot=snapshot)
+    assert operations == ['restore']
+    assert exports == [{}]
+    assert installed == []
+
+
+def test_failed_restore_after_dependencies_does_not_compile(tmp_path, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    import mindie_coordinator.parity as parity
+    backend, spec, snapshot, installed = _cache_failure_backend(monkeypatch)
+    operations = []
+
+    def install(**kwargs):
+        installed.append(kwargs['step'])
+        if kwargs['step'] == 'install-vllm-ascend':
+            pytest.fail('failed restore-after-dependencies must not compile native')
+
+    monkeypatch.setattr(parity, 'run_runtime_install_step', install)
+
+    def operation(spec, action, versions, **kwargs):
+        operations.append(action)
+        if action == 'restore' and operations.count('restore') > 1:
+            return {'status': 'failed', 'reason': 'OSError: No space left on device'}
+        return {'status': 'miss', 'reason': 'no cached bundle'}
+
+    monkeypatch.setattr(backend, '_shared_native', operation)
+    monkeypatch.setattr(backend, '_export_shared_native', lambda *a, **k: {'status': 'miss'})
+    reuse = {'kind': 'dependencies', 'runtime': {
+        'endpoint': {'root': '/dependency-donor'},
+        'attestation': {'profile': {**dict.fromkeys(profile.PROFILE_FIELDS, '1.0'),
+            'build_env': {}, 'launch_env': {}, 'compatibility_evidence': 'smoke.json',
+            'system_files': {key: {'path': '/' + key, 'sha256': '1' * 64}
+                             for key in ('cann', 'driver')}}},
+        'python': '/dependency-donor/.venv/bin/python'}}
+    with pytest.raises(ExecutionRequestError, match='shared native cache restore failed'):
+        backend.prepare_task_root(spec, sources={'vllm': '/a', 'vllm-ascend': '/b'}, environment={},
+                                  source_snapshot=snapshot, reuse=reuse)
+    assert operations.count('restore') == 2
+    assert 'install-vllm-ascend' not in installed
 
 
 @pytest.mark.parametrize('change', [None, 'torch', 'torch-npu', 'python', 'cann', 'manifest', 'index'])

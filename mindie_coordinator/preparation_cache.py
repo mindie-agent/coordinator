@@ -511,8 +511,12 @@ try:
                                        args.get('machine_type'), args.get('candidate'))
 except TimeoutError:
     raise
+except json.JSONDecodeError as exc:
+    result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}', 'linked_files': 0,
+              'error_type': type(exc).__name__}
 except FileNotFoundError as exc:
-    result = {'status': 'miss', 'reason': str(exc), 'linked_files': 0}
+    result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}', 'linked_files': 0,
+              'error_type': type(exc).__name__}
 except ValueError as exc:
     result = {'status': 'miss', 'reason': str(exc), 'linked_files': 0}
 except Exception as exc:
