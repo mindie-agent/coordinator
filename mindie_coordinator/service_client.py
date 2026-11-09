@@ -21,6 +21,8 @@ loop bound onto `CoordinatorService`.
 [Side-Effect Policy]
 - Mutates only coordinator IPC/startup markers and daemon process state; the
   daemon tick loop persists through the service/pool/store owners.
+- Progress workers record errors onto the persisted execution, never a stub
+  dispatch row, so a sqlite lock cannot rewrite ``failed`` to ``uncertain``.
 """
 
 from __future__ import annotations
@@ -487,7 +489,9 @@ def _tick_one_correlated(service_instance, directory, row, lock: threading.Lock)
     except Exception as exc:
         try:
             store = service_instance.store(directory)
-            service_instance._record_execution_error(store, row, exc)
+            with store.transaction() as db:
+                current = store.get(db, "execution", row["id"])
+            service_instance._record_execution_error(store, current, exc)
         except Exception as record_exc:
             service_instance._record_daemon_error(f"execution {row.get('id')}: {exc}; persist {record_exc}")
     finally:

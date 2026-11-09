@@ -395,6 +395,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
         lock = self._lock_for("execution", execution_id)
         if lock.locked():
             return
+        # Worker payload is a stub; error recording reloads persisted execution.
         threading.Thread(
             target=wrap_context(self._tick_one),
             args=(sessions_dir, {"id": execution_id, "user": user, "diagnostics_context": current_context()}, lock),

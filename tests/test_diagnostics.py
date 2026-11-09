@@ -238,6 +238,35 @@ def test_cleanup_sqlite_locked_does_not_demote_failed(owned, monkeypatch):
     assert reply["recording_error"]["artifact"] == "execution-state"
 
 
+def test_scheduled_worker_sqlite_locked_does_not_demote_failed(owned, monkeypatch):
+    import sqlite3
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    original = row["error"]
+    assert row["phase"] == "failed"
+
+    def boom(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(owner, "_advance_locked", boom)
+    stub = {"id": row["id"], "user": "alice", "diagnostics_context": {}}
+    owner._tick_one(str(store.state_dir), stub, threading.Lock())
+    with store.transaction() as db:
+        latest = store.get(db, "execution", row["id"])
+    assert latest["phase"] == "failed"
+    assert original in latest["error"]
+    assert "phase" not in stub
+    assert "database is locked" in (latest.get("recording_error") or {}).get("error", "")
+    assert latest.get("preparation_jobs")
+
+
 def test_task_root_busy_waits_instead_of_permanent_failed(owned):
     from mindie_coordinator.provision.task_environment import TaskRootBusy
     from mindie_coordinator.service import DONE, PERMANENT_ERRORS
