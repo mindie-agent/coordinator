@@ -28,7 +28,10 @@ from mindie_coordinator.placement import (
     select_runtimes,
 )
 from mindie_coordinator.topology_gang import (
+    CardObservation,
+    DieObservation,
     GangLeaseError,
+    HostTopology,
     TopologySpec,
     allocate_gang_lease,
     classify_topology_scale,
@@ -274,6 +277,33 @@ def test_tier0_same_card_pairs_skip_half_busy_card_and_active_user_process():
     assert lease.members[0].phy_ids == (2, 3)
     assert 0 not in lease.members[0].phy_ids
     assert 1 not in lease.members[0].phy_ids
+
+
+@pytest.mark.unit
+def test_half_measured_die_is_not_selected_by_topology_gang():
+    host = A3_IDLE_HOST
+    dies = tuple(
+        DieObservation(
+            host=host, npu_id=0, chip_id=index, phy_id=phy_id,
+            chip_name="Ascend910", health="OK",
+            hbm_used_mb=0, hbm_total_mb=total,
+            observed_busy=False,
+        )
+        for index, (phy_id, total) in enumerate(((0, 65536), (1, 0)))
+    )
+    topology = HostTopology(
+        host=host,
+        cards=(CardObservation(
+            host=host, npu_id=0, chip_name="Ascend910",
+            phy_ids=(0, 1), dies=dies,
+        ),),
+    )
+    assert 1 not in topology.free_phy_ids
+    assert topology.cards[0].fully_free is False
+    assert "HBM capacity was not measured" in topology.cards[0].dies[1].exclusion_reasons
+    with pytest.raises(GangLeaseError) as excinfo:
+        allocate_gang_lease([topology], TopologySpec("S1", 2, "same_npu_dual_die"))
+    assert excinfo.value.code == "insufficient_dual_die_pairs"
 
 
 @pytest.mark.unit

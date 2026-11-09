@@ -11,6 +11,8 @@ native bundle into `/tmp/mindie-native-cache` on a shared-cache miss.
   dependency-compatible incremental baselines.
 - One unavailable container during read-only metadata discovery is recorded in
   `reasons` without discarding other valid candidates.
+- A donor `docker exec` export timeout or `status=failed` returns immediately
+  and never continues to another donor or a compile.
 
 [Timeouts & Locks]
 - `docker ps` / `docker inspect`: `15s`; `docker exec` metadata query: `30s`;
@@ -119,12 +121,44 @@ def export_verified_donor(request: dict, run=subprocess.run) -> dict:
             continue
         exports = '\n'.join('export ' + key + '=' + shlex.quote(value) for key, value in environment.items())
         command = exports + '\nexec python3 - ' + shlex.quote(json.dumps({'root': donor['root']}))
-        exported = run(['docker', 'exec', '-i', donor['container_id'], 'bash', '-c', command],
-                       input=request['export_source'], capture_output=True, text=True, timeout=60)
-        if exported.returncode == 0:
-            result = json.loads(exported.stdout)
-            if result.get('status') == 'stored':
-                return {**result, 'donor_container': donor['container_name'], 'donor_root': donor['root'],
-                        'remaining_donors': donors[index + 1:]}
-        reasons.append(donor['container_name'] + ': ' + exported.stderr[-500:])
+        try:
+            exported = run(['docker', 'exec', '-i', donor['container_id'], 'bash', '-c', command],
+                           input=request['export_source'], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            # The donor process may have started writing. Do not try the next
+            # donor or treat the interruption as an ordinary cache miss.
+            return {'status': 'timeout',
+                    'reason': f'donor export exceeded {exc.timeout}s',
+                    'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                    'remaining_donors': donors[index + 1:]}
+        result = {}
+        try:
+            parsed = json.loads(exported.stdout or '')
+            if isinstance(parsed, dict):
+                result = parsed
+        except (json.JSONDecodeError, TypeError, ValueError):
+            result = {}
+        remaining = donors[index + 1:]
+        if result.get('status') == 'failed':
+            return {**result, 'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                    'remaining_donors': remaining}
+        if result.get('status') in {'timeout', 'uncertain', 'unknown'}:
+            return {**result, 'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                    'remaining_donors': remaining}
+        if exported.returncode == 0 and result.get('status') == 'stored':
+            return {**result, 'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                    'remaining_donors': remaining}
+        detail = (exported.stderr or '') + (exported.stdout or '')
+        lowered = detail.lower()
+        if exported.returncode in {14, 124, 137, 142, -14} or any(token in lowered for token in (
+                'timeoutexpired', 'timeouterror', 'timed out', 'timeout', 'alarm clock', 'sigalrm')):
+            return {'status': 'timeout', 'reason': detail[-500:] or f'export exited {exported.returncode}',
+                    'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                    'remaining_donors': remaining}
+        if exported.returncode and any(token in detail for token in (
+                'No space left', 'Errno 28', 'ENOSPC', 'OSError', 'PermissionError')):
+            return {'status': 'failed', 'reason': detail[-500:] or f'export exited {exported.returncode}',
+                    'donor_container': donor['container_name'], 'donor_root': donor['root'],
+                    'remaining_donors': remaining}
+        reasons.append(donor['container_name'] + ': ' + (exported.stderr or detail)[-500:])
     return {'status': 'miss', 'reason': '; '.join(reasons[-3:]) or 'no compatible verified donor'}

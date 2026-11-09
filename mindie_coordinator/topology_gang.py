@@ -11,7 +11,7 @@ groups for same-card dual-Die, intra-node HCCS, PD split, and multi-node gangs.
   validated placement plan, never a reservation or process launch.
 - A2 is one Die per card; A3 cards own sibling `(2k, 2k+1)` pairs. A pair is
   allocatable only when both Dies are free. Any active process (including
-  `VLLMWorker_*`) or HBM >= 8192 MB excludes the Die.
+  `VLLMWorker_*`), unmeasured HBM, or HBM >= 8192 MB excludes the Die.
 - PD groups are disjoint; each emits its own visible-device string. Multi-node
   hosts keep per-host Phy-IDs instead of flattening colliding IDs.
 - Stale `/dev/shm/hccl*` entries are read-only candidates. No command touches

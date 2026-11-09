@@ -19,7 +19,7 @@ def setup(monkeypatch, *, match=False, failure=None):
     monkeypatch.setattr(provision, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     def observe(*args, **kwargs):
         clock[0] += 10.0
-        return {'status': 'match' if match else 'unknown', 'reason': 'observation timed out',
+        return {'status': 'match' if match else 'unusable', 'reason': 'container is not running normally',
                 'stdout': 'PRIVATE FULL PAYLOAD', 'credential': 'SECRET'}
     observation = Mock(side_effect=observe)
     monkeypatch.setattr(existing_container, 'observe_existing', observation)
@@ -57,12 +57,24 @@ def test_progress_retains_initial_observation_and_actual_fallback_phases(monkeyp
         assert timings['host-probe'] == 2.0
         assert timings['container-bootstrap'] == 3.0
         assert timings['metadata-readiness'] == 4.0
-    assert completed[-1]['existing_observation'] == {'status': 'match' if match else 'unknown',
-        'reason': 'observation timed out', 'elapsed_seconds': 10.0}
+    assert completed[-1]['existing_observation'] == {'status': 'match' if match else 'unusable',
+        'reason': 'container is not running normally', 'elapsed_seconds': 10.0}
     assert 'SECRET' not in json.dumps(events) and 'PRIVATE FULL PAYLOAD' not in json.dumps(events)
     # Each start precedes the actual operation; progress never adds a probe.
     assert [(event['phase'], event['status']) for event in events] == [
         (phase, status) for phase in phases for status in ['running', 'complete']]
+
+
+def test_failed_existing_observation_aborts_before_host_probe(monkeypatch):
+    observe = Mock(return_value={'status': 'failed', 'reason': 'SSH listener ownership is unconfirmed'})
+    monkeypatch.setattr(existing_container, 'observe_existing', observe)
+    remote = Mock(side_effect=AssertionError('failed observation must not probe/bootstrap'))
+    monkeypatch.setattr(provision.host_ops, 'run_remote_script', remote)
+    with pytest.raises(MachineManagementError, match='SSH listener ownership is unconfirmed'):
+        provision.provision_user_container(host=TARGET.host, image=IMAGE, user='alice',
+            ssh_port=2201, machines=Mock())
+    observe.assert_called_once()
+    remote.assert_not_called()
 
 
 def test_failed_fallback_records_elapsed_without_changing_the_exception(monkeypatch):
@@ -75,7 +87,7 @@ def test_failed_fallback_records_elapsed_without_changing_the_exception(monkeypa
     assert error.value is failure and observe.call_count == calls.call_count == 1
     assert events[-1]['phase'] == 'host-probe' and events[-1]['status'] == 'failed'
     assert events[-1]['phase_seconds']['host-probe'] == 2.0
-    assert events[-1]['existing_observation']['status'] == 'unknown'
+    assert events[-1]['existing_observation']['status'] == 'unusable'
     assert events[-1]['error_type'] == 'MachineManagementError'
     assert 'PRIVATE FULL PAYLOAD' not in json.dumps(events)
 
@@ -95,7 +107,7 @@ def test_placement_routes_owner_phases_to_persisted_run_log_before_root_preparat
         service._place_or_prepare(store, 'alice', row, [{'name': 'worker'}], {'image': IMAGE})
     assert calls.call_count == 3 and observe.call_count == 1
     assert row['progress']['step'] == 'prepare-container'
-    assert row['progress']['existing_observation']['status'] == 'unknown'
+    assert row['progress']['existing_observation']['status'] == 'unusable'
     log = tmp_path / 'coordinator/runs/owned-execution/worker/prepare-container.log'
     records = [json.loads(line) for line in log.read_text().splitlines()]
     assert records[-1]['phase'] == 'metadata-readiness'
@@ -103,5 +115,5 @@ def test_placement_routes_owner_phases_to_persisted_run_log_before_root_preparat
         'ssh-port-reservation': 0.0, 'container-bootstrap': 3.0, 'metadata-readiness': 4.0}
     service._save_progress(store, row, 'worker', {'step': 'prepare-root'})
     assert row['progress']['step'] == 'prepare-root'
-    assert json.loads(log.read_text().splitlines()[-1])['existing_observation']['reason'] == 'observation timed out'
+    assert json.loads(log.read_text().splitlines()[-1])['existing_observation']['reason'] == 'container is not running normally'
     assert 'SECRET' not in log.read_text() and 'PRIVATE FULL PAYLOAD' not in log.read_text()

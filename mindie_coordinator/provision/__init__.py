@@ -20,7 +20,10 @@ smoke readiness.
 
 [Side-Effect Policy]
 - Emits structured phase timings via `on_progress`; raises `MachineManagementError`
-  on any verification or reservation mismatch.
+  on any verification or reservation mismatch. Failed, `unknown`, `timeout`, or
+  other non-reuse existing-container observations abort before host-probe;
+  only determinate `unusable` facts fall through to create a container.
+  Observation SSH uses the same `identity_file`/`auth_ref` as later phases.
 """
 
 from __future__ import annotations
@@ -158,13 +161,14 @@ def provision_user_container(
             image_request = {**image_request, 'machine_type': requested_type}
     if ssh_port and image_request['policy'] == 'explicit' and len(image_request['candidates']) == 1:
         from mindie_coordinator.provision.existing_container import observe_existing
-        existing = measured('existing-container', lambda: observe_existing(host_target, container=container, user=user,
-                                    ssh_port=int(ssh_port), workdir=DEFAULT_WORKDIR,
-                                    image_request=image_request))
+        existing = measured('existing-container', lambda: observe_existing(
+            host_target, container=container, user=user,
+            ssh_port=int(ssh_port), workdir=DEFAULT_WORKDIR,
+            image_request=image_request,
+            identity_file=authentication.get('identity_file'),
+            auth_ref=authentication.get('auth_ref')))
         if existing.get('status') == 'cancelled':
             raise host_ops.MachineManagementError('existing container verification cancelled')
-        if existing.get('status') == 'mismatch':
-            raise host_ops.MachineManagementError(existing['reason'])
         if existing.get('status') == 'match':
             chosen_port = int(ssh_port)
             if reserve_port is not None:
@@ -176,6 +180,10 @@ def provision_user_container(
                                              chosen_port, resolved_machine, machines, alias=alias,
                                              authentication=authentication, reuse_existing=True),
                     'image_verification': existing}
+        if existing.get('status') != 'unusable':
+            raise host_ops.MachineManagementError(
+                existing.get('reason') or existing.get('error') or
+                f"existing container verification {existing.get('status')}")
     probe_payload = remote('host-probe',
         host_target,
         host_ops.render_host_probe_script(),

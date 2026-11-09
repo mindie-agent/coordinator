@@ -12,6 +12,7 @@ helpers used by the state, lease, and public coordination modules.
 
 [Timeouts & Locks]
 - `docker`/`ss`/`netstat`/`npu-smi` probes use bounded 5s-15s subprocesses.
+  Windows local subprocesses pass ``CREATE_NO_WINDOW``.
 - No SQLite or lease state is touched here.
 
 [Side-Effect Policy]
@@ -344,6 +345,7 @@ def probe_listening_ports() -> dict[str, Any]:
                 text=True,
                 timeout=10,
                 check=False,
+                **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
             )
         except TimeoutError:
             raise
@@ -617,6 +619,7 @@ def probe_npu_device(device: int) -> dict[str, Any]:
         result = subprocess.run(
             ["npu-smi", "info", "-t", "phyid-remap", "-p", str(device)],
             capture_output=True, text=True, timeout=15, check=False,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
         if result.returncode != 0:
             return failed
@@ -649,6 +652,7 @@ def probe_npu_occupancy() -> dict[str, Any]:
             text=True,
             timeout=15,
             check=False,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
     except TimeoutError:
         raise

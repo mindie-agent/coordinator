@@ -87,20 +87,36 @@ def test_incomplete_container_facts_cannot_skip_bootstrap(damage):
     else:
         key = {'label': 'managed', 'user': 'namespace', 'port': 'container_ssh_port', 'workdir': 'workdir'}[damage]
         info['Config']['Labels']['com.mindie.' + key] = 'different'
-    assert existing.inspect_existing(request(), run=command_results(info))['status'] == 'unknown'
+    assert existing.inspect_existing(request(), run=command_results(info))['status'] == 'unusable'
 
 
-@pytest.mark.parametrize('listener', ['', 'LISTEN 0 128 0.0.0.0:2201 *:*',
+def test_missing_listener_is_unusable_and_does_not_establish_reuse():
+    assert existing.inspect_existing(request(), run=command_results(listener=''))['status'] == 'unusable'
+
+
+@pytest.mark.parametrize('listener', [
+    'LISTEN 0 128 0.0.0.0:2201 *:*',
     'LISTEN 0 128 0.0.0.0:2201 *:* users:(("sshd",pid=999,fd=3))',
-    'LISTEN 0 128 0.0.0.0:2201 *:* users:(("python",pid=102,fd=3))'])
-def test_unowned_or_unobservable_listener_does_not_establish_reuse(listener):
-    assert existing.inspect_existing(request(), run=command_results(listener=listener))['status'] == 'unknown'
+    'LISTEN 0 128 0.0.0.0:2201 *:* users:(("python",pid=102,fd=3))',
+])
+def test_unowned_listener_fails_observation_instead_of_reuse(listener):
+    assert existing.inspect_existing(request(), run=command_results(listener=listener))['status'] == 'failed'
 
 
-@pytest.mark.parametrize('failure', [FileNotFoundError('docker'), subprocess.TimeoutExpired('docker', 3),
-                                   subprocess.CalledProcessError(1, 'docker')])
-def test_missing_or_slow_host_facts_are_bounded_unknowns(failure):
-    assert existing.inspect_existing(request(), run=Mock(side_effect=failure))['status'] == 'unknown'
+@pytest.mark.parametrize('failure, status', [
+    (FileNotFoundError('docker'), 'failed'),
+    (subprocess.TimeoutExpired('docker', 3), 'failed'),
+    (subprocess.CalledProcessError(1, ['docker', 'inspect', 'mindie-alice']), 'failed'),
+    (subprocess.CalledProcessError(
+        1, ['docker', 'inspect', 'mindie-alice'],
+        stderr='Error: No such object: mindie-alice'), 'unusable'),
+    (subprocess.CalledProcessError(
+        1, ['docker', 'inspect', 'mindie-alice'],
+        stderr='permission denied while trying to connect to the Docker daemon socket'), 'failed'),
+    (subprocess.CalledProcessError(1, ['docker', 'top', 'a' * 64, '-eo', 'pid']), 'failed'),
+])
+def test_host_fact_failures_are_failed_or_unusable_never_unknown(failure, status):
+    assert existing.inspect_existing(request(), run=Mock(side_effect=failure))['status'] == status
 
 
 def test_transported_program_executes_the_same_self_contained_observation(monkeypatch):
@@ -142,12 +158,18 @@ def test_fast_match_skips_bootstrap_and_smoke_but_keeps_port_reservation(monkeyp
     remote.assert_not_called()
 
 
-@pytest.mark.parametrize('status', ['mismatch', 'cancelled'])
-def test_mismatch_and_cancellation_never_enter_mutating_fallback(status, monkeypatch):
-    monkeypatch.setattr(existing, 'observe_existing', lambda *a, **k: {'status': status, 'reason': 'image mismatch'})
+@pytest.mark.parametrize('status, payload, match', [
+    ('mismatch', {'status': 'mismatch', 'reason': 'image mismatch'}, 'image mismatch'),
+    ('cancelled', {'status': 'cancelled'}, 'cancelled'),
+    ('failed', {'status': 'failed', 'reason': 'SSH listener ownership is unconfirmed'}, 'unconfirmed'),
+    ('unknown', {'status': 'unknown', 'reason': 'observation unknown'}, 'unknown'),
+    ('timeout', {'status': 'timeout', 'error': 'remote python timed out'}, 'timed out'),
+])
+def test_mismatch_cancellation_and_failed_observation_never_enter_mutating_fallback(status, payload, match, monkeypatch):
+    monkeypatch.setattr(existing, 'observe_existing', lambda *a, **k: payload)
     remote, directory, reserve = Mock(), Mock(), Mock()
     monkeypatch.setattr(provision.host_ops, 'run_remote_script', remote)
-    with pytest.raises(MachineManagementError, match='mismatch|cancelled'):
+    with pytest.raises(MachineManagementError, match=match):
         provision.provision_user_container(host=TARGET.host, image=IMAGE, user='alice',
             ssh_port=2201, machines=directory, reserve_port=reserve)
     remote.assert_not_called()
@@ -164,8 +186,8 @@ def test_port_reservation_cannot_silently_change_the_verified_listener(monkeypat
     directory.upsert_machine.assert_not_called()
 
 
-def test_uncertain_read_returns_to_original_non_replacing_provision(monkeypatch):
-    monkeypatch.setattr(existing, 'observe_existing', lambda *a, **k: {'status': 'unknown'})
+def test_unusable_read_returns_to_original_non_replacing_provision(monkeypatch):
+    monkeypatch.setattr(existing, 'observe_existing', lambda *a, **k: {'status': 'unusable'})
     remote = Mock(side_effect=[RemoteResult(TARGET, 0, '', '', {'success': True, 'suggested_port': 2299}),
                               RemoteResult(TARGET, 0, '', '', {'success': True}),
                               RemoteResult(TARGET, 0, '', '', {'success': True})])
@@ -188,3 +210,64 @@ def test_transport_cancellation_is_preserved_instead_of_becoming_unknown(monkeyp
     monkeypatch.setattr(ssh_transport, 'run_remote_python', lambda *a, **k: {'status': 'failed'})
     with request_context(cancel):
         assert existing.observe_existing(TARGET, **request())['status'] == 'cancelled'
+
+
+def test_observe_existing_does_not_swallow_timeout(monkeypatch):
+    from remote_dev.core import ssh_transport
+
+    def boom(*a, **k):
+        raise TimeoutError('existing container observation timed out')
+
+    monkeypatch.setattr(ssh_transport, 'run_remote_python', boom)
+    with pytest.raises(TimeoutError, match='timed out'):
+        existing.observe_existing(TARGET, **request())
+
+
+def test_observe_existing_transport_error_is_failed_not_unknown(monkeypatch):
+    from remote_dev.core import ssh_transport
+    monkeypatch.setattr(ssh_transport, 'run_remote_python',
+                        Mock(side_effect=OSError(13, 'Permission denied')))
+    result = existing.observe_existing(TARGET, **request())
+    assert result['status'] == 'failed'
+    assert 'Permission denied' in result['reason']
+
+
+def test_observe_existing_forwards_ssh_credentials(monkeypatch):
+    from remote_dev.core import ssh_transport
+    seen = {}
+
+    def execute(endpoint, source, payload, *, timeout_ms):
+        seen['identity_file'] = getattr(endpoint, 'identity_file', None)
+        seen['auth_ref'] = getattr(endpoint, 'auth_ref', None)
+        return {'status': 'unusable', 'reason': 'container is not running normally'}
+
+    monkeypatch.setattr(ssh_transport, 'run_remote_python', execute)
+    result = existing.observe_existing(
+        TARGET, **request(), identity_file='/keys/id_ed25519', auth_ref='secret-ref')
+    assert result['status'] == 'unusable'
+    assert seen['identity_file'] == '/keys/id_ed25519'
+    assert seen['auth_ref'] == 'secret-ref'
+
+
+def test_provision_passes_ssh_credentials_into_existing_observation(monkeypatch):
+    seen = {}
+
+    def observe(target, **kwargs):
+        seen.update(kwargs)
+        return {'status': 'unusable', 'reason': 'container is not running normally'}
+
+    monkeypatch.setattr(existing, 'observe_existing', observe)
+    remote = Mock(side_effect=[
+        RemoteResult(TARGET, 0, '', '', {'success': True, 'suggested_port': 2201}),
+        RemoteResult(TARGET, 0, '', '', {'success': True}),
+        RemoteResult(TARGET, 0, '', '', {'success': True}),
+    ])
+    monkeypatch.setattr(provision.host_ops, 'run_remote_script', remote)
+    monkeypatch.setattr(provision.host_ops, 'ensure_key', lambda _: ('unused', 'ssh-ed25519 test'))
+    result = provision.provision_user_container(
+        host=TARGET.host, image=IMAGE, user='alice', ssh_port=2201, machines=Mock(),
+        identity_file='/keys/id_ed25519', auth_ref='secret-ref',
+        reserve_port=Mock(return_value={'port': 2201}))
+    assert result['state'] == 'ready'
+    assert seen['identity_file'] == '/keys/id_ed25519'
+    assert seen['auth_ref'] == 'secret-ref'

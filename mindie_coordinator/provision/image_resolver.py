@@ -16,7 +16,7 @@ helpers used by host provisioning.
 [Timeouts & Locks]
 - Release metadata lookups use `LATEST_RELEASE_TIMEOUT_SECONDS` (10s).
 - `run_local` defaults to a bounded 120s subprocess timeout and never uses a
-  shell.
+  shell. On Windows it passes ``CREATE_NO_WINDOW``.
 
 [Side-Effect Policy]
 - Network reads are limited to the pinned GitHub release endpoints; no remote
@@ -675,6 +675,7 @@ def run_local(
             env=env,
             stdin=stdin_source,
             timeout=timeout_seconds,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
     except FileNotFoundError as exc:
         raise MachineManagementError(

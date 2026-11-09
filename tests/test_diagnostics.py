@@ -65,6 +65,220 @@ def test_stage_duration_uses_monotonic_and_restart_has_explicit_gap(owned, monke
     assert row["stage_history"][-1]["timing_incomplete"]
 
 
+def test_known_cache_failure_is_terminal_failed_not_uncertain(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    from mindie_coordinator.service import DONE
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    stopped = []
+
+    def stop_jobs(store, row, force):
+        stopped.append((force, list((row.get("preparation_jobs") or {}).get("worker") or {})))
+        return True
+
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", stop_jobs)
+    reply = owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed: OSError: No space left on device"))
+    assert reply["state"] == "failed"
+    assert row["phase"] == "failed"
+    assert row["phase"] in DONE
+    assert stopped == [(False, ["j1"])]
+
+
+def test_unconfirmed_stop_retries_reclaim_without_demoting_failed(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    stopped = []
+
+    def stop_jobs(store, row, force):
+        stopped.append(force)
+        return False
+
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", stop_jobs)
+    reply = owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed: OSError: No space left on device"))
+    assert reply["state"] == "failed"
+    assert reply["resources_released"] is False
+    assert stopped == [False]
+    reply = owner._advance_locked(str(store.state_dir), "alice", row["id"])
+    assert reply["state"] == "failed"
+    assert stopped == [False, False]
+    reply = owner._observe(str(store.state_dir), "alice", row["id"], action="status", refresh=True)
+    assert reply["state"] == "failed"
+    assert stopped == [False, False, False]
+
+
+def test_reconcile_retries_unconfirmed_stop_on_terminal_failed(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    stopped = []
+
+    def stop_jobs(store, row, force):
+        stopped.append(force)
+        return False
+
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", stop_jobs)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    assert stopped == [False]
+    stopped.clear()
+    owner.reconcile()
+    assert stopped == [False]
+    with store.transaction() as db:
+        latest = store.get(db, "execution", row["id"])
+    assert latest["phase"] == "failed"
+
+
+def test_explicit_stop_does_not_demote_failed_to_uncertain(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    reply = owner._request_stop(str(store.state_dir), "alice", row["id"], False)
+    assert reply["state"] == "failed"
+    assert reply["resources_released"] is False
+    with store.transaction() as db:
+        row = store.get(db, "execution", row["id"])
+    row["roles"] = [{"name": "default", "managed_job": "job", "binding": {},
+                     "observation": {"state": "uncertain", "quiet": False}}]
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner.pool, "managed_control",
+                        lambda *a, **k: {"state": "uncertain", "quiet": False, "lease_state": "active"})
+    reply = owner._observe(str(store.state_dir), "alice", row["id"], action="status", refresh=True)
+    assert reply["state"] == "failed"
+
+
+def test_finish_stays_finishing_while_failed_jobs_are_unreleased(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    result = owner.finish(str(store.state_dir), "alice", row["session_id"])
+    assert result["state"] == "finishing"
+    with store.transaction() as db:
+        session = store.get(db, "session", row["session_id"])
+        latest = store.get(db, "execution", row["id"])
+    assert session["state"] == "finishing"
+    assert latest["phase"] == "failed"
+
+
+def test_failed_phase_survives_uncertain_job_observation(owned, monkeypatch):
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    row["roles"] = [{"name": "default", "managed_job": "job", "binding": {},
+                     "observation": {"state": "uncertain", "quiet": False}}]
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner.pool, "managed_control",
+                        lambda *a, **k: {"state": "uncertain", "quiet": False, "lease_state": "active"})
+    reply = owner._advance_locked(str(store.state_dir), "alice", row["id"])
+    assert reply["state"] == "failed"
+
+
+def test_cleanup_sqlite_locked_does_not_demote_failed(owned, monkeypatch):
+    import sqlite3
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    original = row["error"]
+    assert row["phase"] == "failed"
+
+    def stop_locked(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", stop_locked)
+    owner.reconcile()
+    with store.transaction() as db:
+        latest = store.get(db, "execution", row["id"])
+    assert latest["phase"] == "failed"
+    assert original in latest["error"]
+    reply = owner._advance_locked(str(store.state_dir), "alice", row["id"])
+    assert reply["state"] == "failed"
+    assert original in reply["error"]
+    assert "database is locked" in (reply.get("recording_error") or {}).get("error", "")
+    reply = owner._observe(str(store.state_dir), "alice", row["id"], action="status", refresh=True)
+    assert reply["state"] == "failed"
+    assert original in reply["error"]
+    reply = owner._record_execution_error(store, latest, sqlite3.OperationalError("database is locked"))
+    assert reply["state"] == "failed"
+    assert original in reply["error"]
+    assert reply["recording_error"]["artifact"] == "execution-state"
+
+
+def test_scheduled_worker_sqlite_locked_does_not_demote_failed(owned, monkeypatch):
+    import sqlite3
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    owner, store, _, row = owned
+    row["preparation_jobs"] = {"worker": {"j1": {
+        "quiet": False, "job_id": "j1", "step": "shared-native-restore",
+        "endpoint": {"host": "host", "port": 22, "user": "root"}}}}
+    owner._save_execution(store, row)
+    monkeypatch.setattr(owner, "_stop_preparation_jobs", lambda *a, **k: False)
+    owner._record_execution_error(
+        store, row, ExecutionRequestError("shared native cache restore failed"))
+    original = row["error"]
+    assert row["phase"] == "failed"
+
+    def boom(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(owner, "_advance_locked", boom)
+    stub = {"id": row["id"], "user": "alice", "diagnostics_context": {}}
+    owner._tick_one(str(store.state_dir), stub, threading.Lock())
+    with store.transaction() as db:
+        latest = store.get(db, "execution", row["id"])
+    assert latest["phase"] == "failed"
+    assert original in latest["error"]
+    assert "phase" not in stub
+    assert "database is locked" in (latest.get("recording_error") or {}).get("error", "")
+    assert latest.get("preparation_jobs")
+
+
+def test_task_root_busy_waits_instead_of_permanent_failed(owned):
+    from mindie_coordinator.provision.task_environment import TaskRootBusy
+    from mindie_coordinator.service import DONE, PERMANENT_ERRORS
+    owner, store, _, row = owned
+    assert TaskRootBusy not in PERMANENT_ERRORS
+    reply = owner._record_execution_error(store, row, TaskRootBusy("execution root is busy"))
+    assert reply["state"] == "waiting"
+    assert row["phase"] == "waiting"
+    assert row["phase"] not in DONE
+    assert "TaskRootBusy" in reply["error"]
+
+
 def test_diagnostic_disk_failure_preserves_error_and_authoritative_failure(owned, monkeypatch):
     owner, store, client, row = owned
     blocked = owner.state_dir / "runs"

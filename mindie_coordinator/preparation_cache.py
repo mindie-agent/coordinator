@@ -493,6 +493,22 @@ def restore_shared_native(root: Path, cache: Path, preparation: dict, image_dige
     return receipt
 
 
+def _abi_compatibility_miss(exc: BaseException) -> bool:
+    """True when a ValueError is an ABI/profile mismatch that another donor may satisfy."""
+    if not isinstance(exc, ValueError):
+        return False
+    text = str(exc)
+    return any(token in text for token in (
+        'cached Python ABI differs',
+        'cached package ABI differs',
+        'cached CANN/driver support differs',
+        'does not satisfy requested',
+        'cached SoC differs',
+        'cached machine type differs',
+        'cached native inputs or image differ',
+    ))
+
+
 REMOTE_SHARED_SUFFIX = r'''
 import sys
 args = json.loads(sys.argv[1])
@@ -509,8 +525,24 @@ try:
     else:
         result = restore_shared_native(root, cache, args['preparation'], args['image_digest'], args['versions'],
                                        args.get('machine_type'), args.get('candidate'))
+except TimeoutError:
+    raise
+except json.JSONDecodeError as exc:
+    result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}', 'linked_files': 0,
+              'error_type': type(exc).__name__}
+except FileNotFoundError as exc:
+    result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}', 'linked_files': 0,
+              'error_type': type(exc).__name__}
+except ValueError as exc:
+    if _abi_compatibility_miss(exc):
+        result = {'status': 'miss', 'reason': str(exc), 'linked_files': 0}
+    else:
+        result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}', 'linked_files': 0,
+                  'error_type': type(exc).__name__}
 except Exception as exc:
-    result = {'status': 'miss', 'reason': str(exc), 'linked_files': 0}
+    result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}', 'linked_files': 0,
+              'error_type': type(exc).__name__}
+if result.get('status') in {'miss', 'failed'} and 'cache_key' not in result:
     try:
         result['cache_key'] = native_content_key(args.get('preparation', {}))
     except (TypeError, ValueError):

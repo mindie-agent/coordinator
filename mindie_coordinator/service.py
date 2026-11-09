@@ -56,7 +56,6 @@ from mindie_coordinator.execution_sources import source_paths, validate_source_s
 from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERMINAL
 from mindie_coordinator.parity import materialize_command
 from mindie_coordinator.placement import extract_topology_spec, requested_hardware, role_plan, runtime_matches
-from mindie_coordinator.provision.task_environment import TaskRootBusy
 from mindie_coordinator.ready_runtime import RuntimePool
 from mindie_coordinator.task_messages import TaskMessages
 
@@ -96,7 +95,7 @@ _PROCESS_CLOCK_DOMAIN = uuid.uuid4().hex
 STATUS_CACHE_SECONDS = 2.0
 DONE = {"succeeded", "failed", "timeout", "cancelled", "inconclusive"}
 LIVE = {"running"}
-PERMANENT_ERRORS = (ValueError, PermissionError, ExecutionRequestError, TaskRootBusy)
+PERMANENT_ERRORS = (ValueError, PermissionError, ExecutionRequestError)
 STOP_WAIT_SECONDS = 30.0
 LOADED_RUNTIMES = [process_identity(name) for name in ("mindie-coordinator", "remote-dev")]
 
@@ -246,7 +245,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             for row in store.all_executions():
                 if row.get("session_id") in finishing:
                     continue
-                if not row.get("admitted") or row.get("phase") in DONE:
+                if not self._progress_due(row):
                     continue
                 try:
                     self.advance(directory, row.get("user") or "", row["id"], action="progress")
@@ -384,10 +383,19 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             return self._observe(sessions_dir, user, execution_id, "status")
         return self.advance(sessions_dir, user, execution_id, action="progress")
 
+    def _progress_due(self, row) -> bool:
+        """Admitted live work, or terminal failed/unreleased leftovers still to reclaim."""
+        if not row.get("admitted"):
+            return False
+        if row.get("phase") not in DONE:
+            return True
+        return not self._reply(row).get("resources_released")
+
     def _schedule_progress(self, sessions_dir, user, execution_id) -> None:
         lock = self._lock_for("execution", execution_id)
         if lock.locked():
             return
+        # Worker payload is a stub; error recording reloads persisted execution.
         threading.Thread(
             target=wrap_context(self._tick_one),
             args=(sessions_dir, {"id": execution_id, "user": user, "diagnostics_context": current_context()}, lock),
@@ -448,6 +456,9 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             return self._reply(row)
         if not row.get("roles"):
             if row.get("preparation_jobs"):
+                if row.get("phase") in DONE:
+                    self._reclaim_preparation_jobs(store, row)
+                    return self._reply(row)
                 row["phase"] = "uncertain"
                 row["error"] = "retained preparation jobs require stop/quiet cleanup before a new execution"
                 self._save_execution(store, row)

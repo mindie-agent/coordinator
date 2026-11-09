@@ -55,3 +55,69 @@ def test_large_internal_copy_list_is_not_emitted_or_removed_from_result_object(m
     assert json.loads(outputs[0]) == {key: value for key, value in receipt.items() if key != 'copied'}
     assert receipt['copied'] is copied and len(copied) == 1103
     assert len(outputs[0]) < 1000 < len(json.dumps(receipt))
+
+
+def _run_shared_suffix(monkeypatch, *, action='restore', restore=None, error=None):
+    monkeypatch.setattr(sys, 'argv', ['shared-native', json.dumps({
+        'action': action, 'root': '/execution', 'preparation': {},
+        'image_digest': 'image', 'versions': {},
+    })])
+    namespace = vars(cache).copy()
+    outputs = []
+    def restore_fn(*a, **k):
+        if error is not None:
+            raise error
+        return restore
+    namespace.update(print=outputs.append, restore_shared_native=restore_fn)
+    exec(compile(cache.REMOTE_SHARED_SUFFIX, '<shared-native>', 'exec'), namespace)
+    return json.loads(outputs[0])
+
+
+def test_shared_restore_disk_error_is_failed_not_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=OSError(28, 'No space left on device'))
+    assert reply['status'] == 'failed'
+    assert reply['error_type'] == 'OSError'
+    assert 'No space left on device' in reply['reason']
+
+
+def test_shared_restore_permission_error_is_failed_not_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=PermissionError('cache not writable'))
+    assert reply['status'] == 'failed'
+    assert 'PermissionError' in reply['reason']
+
+
+def test_shared_restore_missing_file_is_failed_not_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=FileNotFoundError('bundle missing'))
+    assert reply['status'] == 'failed'
+    assert reply['error_type'] == 'FileNotFoundError'
+    assert 'bundle missing' in reply['reason']
+
+
+def test_shared_restore_corrupt_index_is_failed_not_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=json.JSONDecodeError('Expecting value', '', 0))
+    assert reply['status'] == 'failed'
+    assert reply['error_type'] == 'JSONDecodeError'
+
+
+def test_shared_restore_abi_mismatch_is_still_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=ValueError('cached Python ABI differs'))
+    assert reply['status'] == 'miss'
+    assert 'Python ABI' in reply['reason']
+
+
+def test_shared_restore_integrity_valueerror_is_failed_not_miss(monkeypatch):
+    reply = _run_shared_suffix(monkeypatch, error=ValueError('invalid shared native cache pointer'))
+    assert reply['status'] == 'failed'
+    assert reply['error_type'] == 'ValueError'
+    assert 'invalid shared native cache pointer' in reply['reason']
+
+
+def test_shared_restore_timeout_is_not_converted_to_miss(monkeypatch):
+    monkeypatch.setattr(sys, 'argv', ['shared-native', json.dumps({
+        'action': 'restore', 'root': '/execution', 'preparation': {},
+        'image_digest': 'image', 'versions': {},
+    })])
+    namespace = vars(cache).copy()
+    namespace['restore_shared_native'] = lambda *a, **k: (_ for _ in ()).throw(TimeoutError('cache read timed out'))
+    with pytest.raises(TimeoutError, match='timed out'):
+        exec(compile(cache.REMOTE_SHARED_SUFFIX, '<shared-native>', 'exec'), namespace)

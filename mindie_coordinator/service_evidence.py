@@ -2,8 +2,7 @@
 
 [Role]
 `ServiceEvidenceMixin` supplies bounded wait/observe/tail reads, evidence and
-status projection, explicit placement capacity/topology observations, error and
-finish-session reporting to
+status projection, explicit placement observations, and error reporting to
 `CoordinatorService`.
 
 [Invariants]
@@ -12,6 +11,7 @@ finish-session reporting to
 - Evidence is built only from recorded local inputs and receipts, never by
   re-probing a mutable remote root.
 - A terminal wait may enrich logs but never replaces newer lifecycle facts.
+- ``finish`` stays ``finishing`` while leftover jobs remain unreleased.
 
 [Timeouts & Locks]
 - Wait deadlines are bounded by `STATUS_CACHE_SECONDS` wakeups and the caller's
@@ -24,6 +24,8 @@ finish-session reporting to
 [Side-Effect Policy]
 - Persists terminal log caches, error logs, and finish-session state through
   `AgentSessions`; evidence reads never validate or mutate remote artifacts.
+  A permanent cache/request failure still stops already-started preparation
+  jobs; leftover sqlite locks and unverified quiet do not demote `failed`.
 """
 
 from __future__ import annotations
@@ -146,7 +148,9 @@ class ServiceEvidenceMixin:
                 continue
             specs[host] = normalize_remote_probe_spec(snapshot)
             reports.append({"host": host, "state": "observed",
-                            "cache_hit": bool(snapshot.get("cache_hit"))})
+                            "cache_hit": bool(snapshot.get("cache_hit")),
+                            **({"usage_parse_error": snapshot["usage_parse_error"]}
+                               if snapshot.get("usage_parse_error") else {})})
         if len(records) > probe_limit:
             reports.extend({"host": str((record.get("host") or {}).get("ip") or "").strip(), "state": "skipped",
                             "error": f"not probed: bounded observation window of {probe_limit} hosts"}
@@ -271,7 +275,7 @@ class ServiceEvidenceMixin:
                     row = self._refresh_jobs(store, user, row)
                     refreshed = bool(row.get("jobs_observed_at"))
                 elif row.get("preparation_jobs") and not row.get("roles") and (action != "status" or refresh):
-                    self._refresh_preparation_jobs(store, row)
+                    (self._reclaim_preparation_jobs if row.get("phase") == "failed" else self._refresh_preparation_jobs)(store, row)
             if action == "tail":
                 return self._tail(store, user, row, role=role)
             reply = self._reply(row, role=role)
@@ -311,15 +315,17 @@ class ServiceEvidenceMixin:
         return self._reply(latest)
 
     def _record_execution_error(self, store, row, exc) -> dict[str, Any]:
-        permanent = isinstance(exc, _service_module().PERMANENT_ERRORS)
-        # A build/preparation command that exited nonzero has a known result.
-        # Repeating the same source preparation cannot resolve that failure.
-        # Lost SSH transport (255) and already-bound/live work remain recoverable.
-        if (isinstance(exc, RemoteCommandError) and exc.returncode != 255
+        from mindie_coordinator.managed_execution import ExecutionRequestError
+        from mindie_coordinator.provision.task_environment import TaskRootBusy
+        already_failed = row.get("phase") == "failed"
+        waiting = isinstance(exc, TaskRootBusy)
+        permanent = already_failed or ((not waiting) and isinstance(exc, _service_module().PERMANENT_ERRORS))
+        if (not waiting and isinstance(exc, RemoteCommandError) and exc.returncode != 255
                 and row.get("phase") == "preparing" and not row.get("roles")):
             permanent = True
-        if any(not job.get("quiet") for records in (row.get("preparation_jobs") or {}).values()
-               for job in records.values()):
+        if (not already_failed and not isinstance(exc, ExecutionRequestError)
+                and any(not job.get("quiet") for records in (row.get("preparation_jobs") or {}).values()
+                        for job in records.values())):
             permanent = False
         path = self.state_dir / "runs" / row["id"] / "error.log"
         try:
@@ -331,16 +337,33 @@ class ServiceEvidenceMixin:
             raise
         except OSError as log_exc:
             get_recorder("mindie-coordinator").event("WARNING", "diagnostics.persistence_failed", error_type=type(log_exc).__name__)
-        row["error"] = f"{type(exc).__name__}: {exc}"[:500]
-        details = error_details(exc)
-        if isinstance(exc, GangLeaseError):
-            details.setdefault("code", exc.code)
-            for key, value in exc.details.items():
-                if key not in details:
-                    details[key] = value
-        row["error_details"] = details
-        row["phase"] = "failed" if permanent else "uncertain"
+        message = f"{type(exc).__name__}: {exc}"[:500]
+        if already_failed:
+            row["recording_error"] = {"artifact": "execution-state", "error": message}
+        else:
+            row["error"] = message
+            details = error_details(exc)
+            if isinstance(exc, GangLeaseError):
+                details.setdefault("code", exc.code)
+                for key, value in exc.details.items():
+                    if key not in details:
+                        details[key] = value
+            row["error_details"] = details
+        if waiting:
+            row["phase"] = "waiting"
+        else:
+            row["phase"] = "failed" if permanent else "uncertain"
         self._save_execution(store, row)
+        if permanent and not already_failed and row.get("preparation_jobs"):
+            try:
+                self._reclaim_preparation_jobs(store, row)
+            except TimeoutError:
+                raise
+            except Exception as stop_exc:
+                get_recorder("mindie-coordinator").event(
+                    "WARNING", "preparation.stop_after_failure", error_type=type(stop_exc).__name__)
+                row["phase"] = "failed"
+                self._save_execution(store, row)
         return self._reply(row)
 
     def _record_daemon_error(self, message: str) -> None:
@@ -688,7 +711,7 @@ class ServiceEvidenceMixin:
             store.put(db, "session", session)
         states = []
         for row in store.executions(session_id):
-            if row.get("phase") in service_module.DONE:
+            if row.get("phase") in service_module.DONE and not self._progress_due(row):
                 continue
             states.append(self.advance(sessions_dir, user, row["id"], action="stop", force=force))
         completed = self._complete_finishing_session(sessions_dir, store, session_id)
@@ -697,7 +720,6 @@ class ServiceEvidenceMixin:
         return {"state": "finishing", "executions": states, "worktrees_preserved": True}
 
     def _resume_finishing_sessions(self, sessions_dir, store) -> None:
-        service_module = _service_module()
         for session in store.sessions():
             if session.get("state") != "finishing":
                 continue
@@ -705,7 +727,7 @@ class ServiceEvidenceMixin:
             user = intent.get("user") or ""
             force = bool(intent.get("force"))
             for row in store.executions(session["id"]):
-                if not row.get("admitted") or row.get("phase") in service_module.DONE:
+                if not self._progress_due(row):
                     continue
                 if self._lock_for("execution", row["id"]).locked():
                     continue
@@ -720,7 +742,6 @@ class ServiceEvidenceMixin:
                 self._record_daemon_error(f"finish {session.get('id')}: {exc}")
 
     def _complete_finishing_session(self, sessions_dir, store, session_id) -> dict[str, Any]:
-        service_module = _service_module()
         with store.transaction() as db:
             session = store.get(db, "session", session_id)
         if session["state"] == "finished":
@@ -731,7 +752,7 @@ class ServiceEvidenceMixin:
         rows = store.executions(session_id)
         finishing = {"state": "finishing", "executions": [self._reply(row) for row in rows],
                      "worktrees_preserved": True}
-        if any(row.get("admitted") and row.get("phase") not in service_module.DONE for row in rows):
+        if any(self._progress_due(row) for row in rows):
             return finishing
         acquired = []
         try:
@@ -743,7 +764,7 @@ class ServiceEvidenceMixin:
             rows = store.executions(session_id)
             finishing = {"state": "finishing", "executions": [self._reply(row) for row in rows],
                          "worktrees_preserved": True}
-            if any(row.get("admitted") and row.get("phase") not in service_module.DONE for row in rows):
+            if any(self._progress_due(row) for row in rows):
                 return finishing
             user = (session.get("finish") or {}).get("user") or next(
                 (row.get("user") for row in rows if row.get("user")), "")

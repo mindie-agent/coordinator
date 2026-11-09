@@ -11,7 +11,11 @@ preflight, host queue, and remote shell adapters.
   donor interpreter.
 - Every installed/captured artifact is verified against the same fixed
   execution view before it is returned; uncertain/cancelled preparation is
-  propagated, not converted into an ordinary cache miss.
+  propagated, not converted into an ordinary cache miss. Disk, permission, and
+  transport failures return ``status='failed'``, raise
+  ``ExecutionRequestError`` (terminal ``failed``, never ``uncertain``), and
+  abort later restore/revalidate/export/compile and the donor loop. Export
+  ``timeout``/``uncertain`` raises ``PreparationUncertain`` and never compiles.
 - Remote script text and heredoc delimiters are preserved byte-for-byte from
   the former backend module; the facade keeps its explicit `timeout=30,
   stdin=subprocess.DEVNULL` git calls.
@@ -53,6 +57,22 @@ class PreparedNativeView:
     """Internal completed native proof, never a registration argument."""
     attestation: dict
     native_cache_receipt: dict | None = None
+
+
+def _raise_failed_shared_cache(cache, action: str) -> None:
+    """A known cache failure is a permanent request error, never a miss or wait."""
+    from mindie_coordinator.managed_execution import ExecutionRequestError
+    from mindie_coordinator.preparation_process import PreparationUncertain
+    if not isinstance(cache, dict):
+        return
+    status = cache.get('status')
+    if status == 'failed':
+        raise ExecutionRequestError(
+            f'shared native cache {action} failed: ' + str(cache.get('reason') or 'unknown')[:500])
+    if status in {'timeout', 'uncertain'} or cache.get('remote_outcome') == 'unknown':
+        raise PreparationUncertain(
+            f'shared native cache {action} did not complete: '
+            + str(cache.get('reason') or cache.get('error') or status)[:500])
 
 
 def _captured_manifest(output: str) -> dict:
@@ -286,6 +306,7 @@ class BackendPreparationMixin:
 
         def accept_cache(cache):
             nonlocal cached_native, compiled_native, incremental_native
+            _raise_failed_shared_cache(cache, 'restore')
             progress('shared-native-cache', cache)
             cached_native = cache.get('status') in {'hit', 'incremental'}
             if not cached_native:
@@ -298,6 +319,7 @@ class BackendPreparationMixin:
                 install('verify-deps')
                 validated = self._shared_native(spec, 'revalidate', versions,
                     process=owned_process('shared-native-revalidate-after-dependencies'))
+                _raise_failed_shared_cache(validated, 'revalidate')
                 if validated.get('status') != 'validated':
                     # Imports or broad requirement ranges cannot establish the
                     # original bundle's ABI after a dependency overlay changed.
@@ -321,6 +343,7 @@ class BackendPreparationMixin:
                 progress('shared-native-export', {key: value for key, value in exported.items()
                                                    if key != 'remaining_donors'})
                 check_cancel()
+                _raise_failed_shared_cache(exported, 'export')
                 if exported.get('status') != 'stored':
                     break
                 cache = self._shared_native(spec, 'restore', versions,
@@ -328,6 +351,7 @@ class BackendPreparationMixin:
                     process=owned_process('shared-native-restore-after-export'))
                 if not remaining_donors:
                     break
+            _raise_failed_shared_cache(cache, 'restore')
             if accept_cache(cache):
                 # Profile capture below performs this execution's real import
                 # once. No editable install or repeated native smoke is needed.
@@ -408,8 +432,10 @@ class BackendPreparationMixin:
             return json.loads(result.stdout)
         except (PreparationCancelled, PreparationUncertain):
             raise
+        except TimeoutError:
+            raise
         except Exception as exc:
-            return {'status': 'miss', 'reason': str(exc)[:500]}
+            return {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}'[:500]}
 
     def _export_shared_native(self, spec, *, donors=None):
         """An existing verified donor is exported only when the cache missed."""
@@ -422,7 +448,17 @@ class BackendPreparationMixin:
         # Separate compile units preserve module-level future imports.
         for name in ('build_inputs.py', 'native_incremental.py', 'native_cache_pool.py', 'preparation_cache.py'):
             source += '\nexec(' + repr(_package_file(name).read_text(encoding='utf-8')) + ', globals())\n'
-        source += "\nimport signal\nsignal.alarm(45)\nargs=json.loads(sys.argv[1])\nprint(json.dumps(store_shared_native(Path(args['root']),Path(SHARED_NATIVE_CACHE))))\n"
+        source += (
+            "\nimport signal\nsignal.alarm(45)\nargs=json.loads(sys.argv[1])\n"
+            "try:\n"
+            "    result = store_shared_native(Path(args['root']), Path(SHARED_NATIVE_CACHE))\n"
+            "except TimeoutError:\n"
+            "    raise\n"
+            "except Exception as exc:\n"
+            "    result = {'status': 'failed', 'reason': type(exc).__name__ + ': ' + str(exc),\n"
+            "              'error_type': type(exc).__name__}\n"
+            "print(json.dumps(result))\n"
+        )
         module = _package_file('shared_native_discovery.py').read_text(encoding='utf-8')
         script = module + '\nimport sys\nprint(json.dumps(export_verified_donor(json.load(sys.stdin))))\n'
         request = {'preparation': spec.get('preparation', {}), 'image_digest': image,
@@ -432,7 +468,8 @@ class BackendPreparationMixin:
         reply = run_remote_python(resolve_endpoint(host), script, request, timeout_ms=120000)
         if reply.get('status') == 'cancelled':
             raise PreparationCancelled('shared native export cancelled')
-        if reply.get('status') == 'uncertain' or reply.get('remote_outcome') == 'unknown':
+        if (reply.get('status') in {'uncertain', 'timeout'}
+                or reply.get('remote_outcome') == 'unknown'):
             raise PreparationUncertain('shared native export outcome is uncertain')
         return reply
 

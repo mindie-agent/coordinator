@@ -6,11 +6,12 @@ physical `Phy-ID`, preserving process attribution so occupied Dies are excluded.
 
 [Invariants]
 - A2 has one Chip per NPU card; A3 exposes two sibling Chips (`2k`, `2k+1`).
-- A Die is free only when health is OK, HBM is below 8192 MB, and no active
-  process row remains. `VLLMWorker_*`, `VLLMEngine*`, and user processes all
-  block the Die. A fleet snapshot that already classified a Die busy is kept
-  busy even when its process attribution is incomplete. Phy-ID collisions fail
-  the parse instead of guessing.
+- A Die is free only when health is OK, HBM capacity is measured and below
+  8192 MB, and no active process row remains. Unmeasured HBM (`hbm_total_mb`
+  0/absent) is never free. `VLLMWorker_*`, `VLLMEngine*`, and user processes
+  all block the Die. A fleet snapshot that already classified a Die busy is
+  kept busy even when its process attribution is incomplete. Phy-ID
+  collisions fail the parse instead of guessing.
 - Parsing is read-only and never infers free capacity from logical NPU IDs.
 
 [Timeouts & Locks]
@@ -71,6 +72,8 @@ class DieObservation:
         reasons: list[str] = []
         if self.health.strip().upper() != "OK":
             reasons.append(f"health={self.health or 'unknown'}")
+        if int(self.hbm_total_mb or 0) <= 0:
+            reasons.append("HBM capacity was not measured")
         if self.hbm_used_mb >= BUSY_HBM_THRESHOLD_MB:
             reasons.append(
                 f"hbm={self.hbm_used_mb}/{self.hbm_total_mb}MB >= {BUSY_HBM_THRESHOLD_MB}MB"

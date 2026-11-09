@@ -103,7 +103,7 @@ def test_repeated_provision_preserves_verified_container_interpreter_and_key(tmp
     monkeypatch.setattr(host_ops, 'ensure_key', lambda _: ('/keys/container', 'ssh-ed25519 test'))
     options = dict(host='example.invalid', image='registry.example/image:fixed', user='alice',
                    ssh_port=46000, machines=directory, reserve_port=lambda **_: {'port': 46000})
-    monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'unknown'})
+    monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'unusable'})
     first = provision.provision_user_container(**options)
     monkeypatch.setattr(existing_container, 'observe_existing', lambda *a, **k: {'status': 'match'})
     second = provision.provision_user_container(**options)

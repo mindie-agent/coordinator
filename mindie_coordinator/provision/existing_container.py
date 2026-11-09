@@ -3,8 +3,12 @@
 [Role] Observes one existing container and decides whether it can be reused
 without provisioning another.
 
-[Invariants] Observation is read-only; ambiguous or failed observations fall
-back to the provision owner instead of claiming reuse.
+[Invariants] Observation is read-only. Determinate "not reusable" facts return
+`unusable` so the provision owner may create a container. Observation errors,
+timeouts, docker daemon/permission failures, and an SSH listener that exists
+but is not this container's sshd return `failed` and must abort; they are
+never `unknown`. `docker inspect` is `unusable` only when the tool reports the
+named container absent. Observation SSH forwards `identity_file`/`auth_ref`.
 
 [Timeouts & Locks] The whole inspection is bounded to 8 seconds and each
 subprocess receives `min(3, remaining)` seconds.
@@ -19,9 +23,16 @@ import re
 import subprocess
 import time
 
+_MISSING_CONTAINER_MARKERS = ('no such object', 'no such container')
+
+
+def _inspect_reports_absent(exc: subprocess.CalledProcessError) -> bool:
+    text = f"{exc.stderr or ''} {exc.stdout or ''}".lower()
+    return any(marker in text for marker in _MISSING_CONTAINER_MARKERS)
+
 
 def inspect_existing(request, run=subprocess.run):
-    """One host observation; ambiguity falls back to the provision owner."""
+    """One host observation; unusable facts may fall through, failures abort."""
     deadline = time.monotonic() + 8
 
     def output(argv):
@@ -35,16 +46,16 @@ def inspect_existing(request, run=subprocess.run):
         container, port = request['container'], int(request['ssh_port'])
         rows = json.loads(output(['docker', 'inspect', container]))
         if len(rows) != 1:
-            return {'status': 'unknown', 'reason': 'container identity unavailable'}
+            return {'status': 'unusable', 'reason': 'container identity unavailable'}
         info = rows[0]
         identifier = info.get('Id', '')
         if info.get('Name') != '/' + container or not re.fullmatch('[0-9a-f]{64}', identifier):
-            return {'status': 'unknown', 'reason': 'container identity unavailable'}
+            return {'status': 'unusable', 'reason': 'container identity unavailable'}
         config = info.get('Config') or {}
         image = config.get('Image')
         image_id = info.get('Image', '')
         if not image or not re.fullmatch('sha256:[0-9a-f]{64}', image_id):
-            return {'status': 'unknown', 'reason': 'container image unavailable'}
+            return {'status': 'unusable', 'reason': 'container image unavailable'}
         # Same explicit-reference comparison as bootstrap with its current
         # use_prepared_image_cache=false. A base-image label alone is not proof.
         if image not in request['image_request']['candidates']:
@@ -54,13 +65,13 @@ def inspect_existing(request, run=subprocess.run):
         state, labels = info.get('State') or {}, config.get('Labels') or {}
         if (state.get('Running') is not True or state.get('Paused') or state.get('Restarting')
                 or int(state.get('Pid') or 0) <= 0):
-            return {'status': 'unknown', 'reason': 'container is not running normally'}
+            return {'status': 'unusable', 'reason': 'container is not running normally'}
         if (labels.get('com.mindie.managed') != 'true'
                 or labels.get('com.mindie.namespace') != request['user']
                 or labels.get('com.mindie.workdir') != request['workdir']
                 or labels.get('com.mindie.container_ssh_port') != str(port)
                 or (info.get('HostConfig') or {}).get('NetworkMode') != 'host'):
-            return {'status': 'unknown', 'reason': 'managed container or SSH port facts are incomplete'}
+            return {'status': 'unusable', 'reason': 'managed container or SSH port facts are incomplete'}
         expected_machine = (request.get('image_request') or {}).get('machine_type')
         actual_machine = (labels.get('com.mindie.machine_type') or '').strip()
         if expected_machine and actual_machine and actual_machine.upper() != str(expected_machine).strip().upper():
@@ -73,13 +84,13 @@ def inspect_existing(request, run=subprocess.run):
         owned = {int(line.strip()) for line in processes if line.strip().isdigit()}
         listeners = output(['ss', '-ltnpH', 'sport = :' + str(port)]).splitlines()
         if not listeners:
-            return {'status': 'unknown', 'reason': 'configured SSH port is not listening'}
+            return {'status': 'unusable', 'reason': 'configured SSH port is not listening'}
         listener_pids = set()
         for line in listeners:
             pids = {int(value) for value in re.findall(r'pid=(\d+)', line)}
             sshd = {int(value) for value in re.findall(r'\("sshd[^\"]*",pid=(\d+)', line)}
             if not pids or pids != sshd or not pids.issubset(owned):
-                return {'status': 'unknown', 'reason': 'SSH listener ownership is unconfirmed'}
+                return {'status': 'failed', 'reason': 'SSH listener ownership is unconfirmed'}
             listener_pids.update(pids)
         return {'status': 'match', 'container_id': identifier, 'image': image,
                 'image_id': image_id, 'base_image': labels.get('com.mindie.base_image'),
@@ -87,11 +98,23 @@ def inspect_existing(request, run=subprocess.run):
                 'listener_pids': sorted(listener_pids), 'observed_at': time.time()}
     except TimeoutError:
         raise
+    except subprocess.TimeoutExpired as exc:
+        return {'status': 'failed', 'reason': f'existing container observation timed out: {exc}'[:300]}
+    except FileNotFoundError as exc:
+        return {'status': 'failed', 'reason': f'host observation command missing: {exc}'[:300]}
+    except subprocess.CalledProcessError as exc:
+        argv = list(exc.cmd) if isinstance(exc.cmd, (list, tuple)) else [str(exc.cmd)]
+        # Missing container is a determinate non-reuse; docker daemon,
+        # permission, and timeout-as-nonzero failures abort as failed.
+        if argv[:2] == ['docker', 'inspect'] and _inspect_reports_absent(exc):
+            return {'status': 'unusable', 'reason': str(exc)[:300]}
+        return {'status': 'failed', 'reason': str(exc)[:300]}
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
-        return {'status': 'unknown', 'reason': str(exc)[:300]}
+        return {'status': 'failed', 'reason': str(exc)[:300]}
 
 
-def observe_existing(target, *, container, user, ssh_port, workdir, image_request):
+def observe_existing(target, *, container, user, ssh_port, workdir, image_request,
+                     identity_file=None, auth_ref=None):
     """Use the existing cached Python transport, with no host mutation or probe."""
     from remote_dev.core.endpoint import resolve_endpoint
     from remote_dev.core.ssh_transport import run_remote_python
@@ -99,15 +122,23 @@ def observe_existing(target, *, container, user, ssh_port, workdir, image_reques
 
     source = Path(__file__).read_text(encoding='utf-8')
     source += '\nimport sys\nprint(json.dumps(inspect_existing(json.load(sys.stdin))))\n'
-    endpoint = resolve_endpoint({'host': target.host, 'port': target.port,
-                                 'user': target.user, 'root': '/', 'cwd': '/'})
+    endpoint = resolve_endpoint({
+        'host': target.host, 'port': target.port, 'user': target.user,
+        'root': '/', 'cwd': '/',
+        **({'identity_file': identity_file} if identity_file else {}),
+        **({'auth_ref': auth_ref} if auth_ref else {}),
+    })
     try:
         result = run_remote_python(endpoint, source,
             {'container': container, 'user': user, 'ssh_port': ssh_port,
              'workdir': workdir, 'image_request': image_request}, timeout_ms=10000)
+    except TimeoutError:
+        raise
     except Exception as exc:
-        result = {'status': 'unknown', 'reason': str(exc)[:300]}
+        result = {'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}'[:300]}
     cancellation = current_event()
     if cancellation is not None and cancellation.is_set():
         return {'status': 'cancelled'}
-    return result if isinstance(result, dict) else {'status': 'unknown', 'reason': 'invalid host observation'}
+    if isinstance(result, dict):
+        return result
+    return {'status': 'failed', 'reason': 'invalid host observation'}

@@ -13,7 +13,9 @@ import pytest
 
 from mindie_coordinator.agent_session import AgentSessions
 from mindie_coordinator.fleet_probe import (
+    apply_hbm_usage_supplement,
     device_occupancy_inventory,
+    find_fleet_capacity,
     parse_fleet_probe_output,
     parse_npu_smi_usages,
 )
@@ -190,6 +192,128 @@ def _usages(rate_pct: int, aicore_pct: int = 0) -> str:
             f"\tAicore Usage Rate(%)              : {aicore_pct}\n")
 
 
+def test_usages_supplement_timeout_does_not_publish_idle_zero_hbm():
+    raw = (
+        "===NPU_USAGE:0===\n"
+        "timeout: failed\n"
+        "===NPU_USAGE_RC:0:124===\n"
+    )
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        raw,
+        [0],
+    )
+    card = snapshot["npus"][0]
+    assert card["hbm_total_mb"] == 0
+    assert card["busy"] is True
+    assert "exited 124" in card["hbm_probe_error"]
+    assert snapshot["free_npu_ids"] == [] and snapshot["busy_npu_ids"] == [0]
+    assert snapshot["free_phy_ids"] == [] and snapshot["busy_phy_ids"] == [0]
+    assert "exited 124" in snapshot["usage_parse_error"]
+    spec = normalize_remote_probe_spec(snapshot)
+    assert spec["free_npus"] == 0 and spec["vram_free_mb"] == 0
+
+
+def test_usages_supplement_missing_status_is_not_idle_zero_hbm():
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        "===NPU_USAGE:0===\n",
+        [0],
+    )
+    assert snapshot["npus"][0]["busy"] is True
+    assert snapshot["free_npu_ids"] == []
+    assert "no exit status" in snapshot["usage_parse_error"]
+
+
+def test_usages_supplement_rc0_without_capacity_is_not_idle_zero_hbm():
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        "===NPU_USAGE:0===\nNPU ID                         : 0\n===NPU_USAGE_RC:0:0===\n",
+        [0],
+    )
+    card = snapshot["npus"][0]
+    assert card["busy"] is True
+    assert snapshot["free_npu_ids"] == [] and snapshot["busy_npu_ids"] == [0]
+    assert "no HBM capacity" in card["hbm_probe_error"]
+    assert "no HBM capacity" in snapshot["usage_parse_error"]
+    spec = normalize_remote_probe_spec(snapshot)
+    assert spec["free_npus"] == 0 and spec["vram_free_mb"] == 0
+
+
+def test_usages_supplement_rc0_unattributable_multi_die_is_not_leasable():
+    dual = {"npu_id": 0, "phy_ids": [0, 1], "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0,
+            "die_count": 2, "aicore_pct": 0.0, "processes": [],
+            "dies": [{"chip_id": 0, "phy_id": 0, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0},
+                     {"chip_id": 1, "phy_id": 1, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0}]}
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [dual], "online": True},
+        f"===NPU_USAGE:0===\n{_usages(80)}===NPU_USAGE_RC:0:0===\n",
+        [0],
+    )
+    assert "no HBM capacity" in snapshot["usage_parse_error"]
+    assert snapshot["npus"][0]["busy"] is True
+    spec = normalize_remote_probe_spec(snapshot)
+    assert spec["free_npus"] == 0
+    assert spec["vram_free_observed"] is False
+
+
+def test_fleet_capacity_unsatisfied_preserves_hbm_probe_error(tmp_path, monkeypatch):
+    from mindie_coordinator import fleet_probe
+    from mindie_coordinator.machine_directory import MachineDirectory
+
+    store = MachineDirectory(path=tmp_path / "machines.json")
+    store.upsert_machine({"alias": "a", "host": {"ip": "10.0.0.1", "port": 22}})
+    snap = apply_hbm_usage_supplement(
+        {"alias": "a", "host": "10.0.0.1", "online": True, "npus": [_zero_hbm_single_die_card()],
+         "chip_summary": "Ascend910B", "containers": [], "mounts": [], "bound_container": None},
+        "===NPU_USAGE:0===\ntimeout\n===NPU_USAGE_RC:0:124===\n",
+        [0],
+    )
+    monkeypatch.setattr(fleet_probe, "probe_machine_record", lambda *a, **k: snap)
+    result = find_fleet_capacity(count=1, directory=store, state_dir=tmp_path, use_npu_top=False)
+    assert result["matched_count"] == 0
+    assert "exited 124" in result["unsatisfied"][0]["reason"]
+    assert "exited 124" in result["unsatisfied"][0]["usage_parse_error"]
+
+
+def test_observe_host_specs_surfaces_hbm_probe_error(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    from mindie_coordinator.service import CoordinatorService
+
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "online": True, "npus": [_zero_hbm_single_die_card()], "alias": HOST},
+        "===NPU_USAGE:0===\ntimeout\n===NPU_USAGE_RC:0:124===\n",
+        [0],
+    )
+    snapshot["online"] = True
+    service = CoordinatorService(tmp_path / "coordinator", pool=MagicMock())
+    monkeypatch.setattr(service, "_topology_host_records",
+                        lambda *a, **k: [{"host": {"ip": HOST}}])
+    monkeypatch.setattr(service, "_probe_host_record", lambda record: snapshot)
+    specs, reports = service._observe_host_specs(
+        "alice", [{"name": "w", "npu_count": 1, "hbm_mb": 8192}], {})
+    assert reports[0]["state"] == "observed"
+    assert "exited 124" in reports[0]["usage_parse_error"]
+    assert specs[HOST]["free_npus"] == 0
+
+
+def test_usages_supplement_success_still_recovers_capacity():
+    raw = (
+        "===NPU_USAGE:0===\n"
+        f"{_usages(5)}"
+        "===NPU_USAGE_RC:0:0===\n"
+    )
+    snapshot = apply_hbm_usage_supplement(
+        {"host": HOST, "npus": [_zero_hbm_single_die_card()], "online": True},
+        raw,
+        [0],
+    )
+    assert snapshot["npus"][0]["hbm_total_mb"] == 98304
+    assert snapshot["npus"][0]["busy"] is False
+    assert snapshot["free_npu_ids"] == [0]
+    assert "usage_parse_error" not in snapshot
+
+
 def test_usages_supplement_publishes_capacity_to_the_die_row():
     """A card-only update would leave the normalizer reading 0/0 per Die."""
     enriched = parse_npu_smi_usages(_usages(5), _zero_hbm_single_die_card())
@@ -266,12 +390,33 @@ def test_usages_supplement_keeps_observed_facts_and_ambiguous_dies_unsplit():
             "dies": [{"chip_id": 0, "phy_id": 0, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0},
                      {"chip_id": 1, "phy_id": 1, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0}]}
     assert parse_npu_smi_usages(_usages(80), dual) == dual
-    # The Dies stay leasable with unmeasured headroom, crediting no capacity.
+    # Unattributable card-wide figures are not split, and unmeasured Dies
+    # are not recommended as free capacity.
     dual_spec = normalize_remote_probe_spec(
         {"host": HOST, "npus": [dual], **device_occupancy_inventory([dual])})
-    assert dual_spec["free_npus"] == 2
+    assert dual_spec["free_npus"] == 0
     assert dual_spec["vram_free_mb"] == 0
     assert dual_spec["vram_free_observed"] is False
+
+
+def test_half_measured_die_does_not_inherit_card_capacity():
+    """A sibling-measured dual-Die card must not lease the unmeasured Die."""
+    card = {
+        "npu_id": 0, "phy_ids": [0, 1], "busy": False,
+        "hbm_used_mb": 1000, "hbm_total_mb": 65536,
+        "die_count": 2, "aicore_pct": 0.0, "processes": [],
+        "dies": [
+            {"chip_id": 0, "phy_id": 0, "busy": False, "hbm_used_mb": 1000, "hbm_total_mb": 65536},
+            {"chip_id": 1, "phy_id": 1, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0},
+        ],
+    }
+    inventory = device_occupancy_inventory([card])
+    assert inventory["free_phy_ids"] == []
+    assert inventory["busy_phy_ids"] == [0, 1]
+    assert inventory["free_npu_ids"] == []
+    spec = normalize_remote_probe_spec({"host": HOST, "npus": [card], **inventory})
+    assert spec["free_npus"] == 0
+    assert spec["free_phy_ids"] == []
 
 
 def _hardware_client(tmp_path, *, busy=(), prepared=True):
