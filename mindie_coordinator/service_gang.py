@@ -10,10 +10,9 @@ preparation, and managed-lease start/stop orchestration to `CoordinatorService`.
 - Group start authorization is persisted only after every role holds an active
   lease and a prepared/running job.
 - Preparation job references are retained and never silently replayed.
-- A terminal ``failed`` execution retries preparation-job stop until quiet
-  (including automatic DONE ticks and finish) and never lets job observation,
-  an unconfirmed explicit stop, or a later status refresh rewrite that phase
-  to ``uncertain``.
+- A terminal ``failed`` execution retries leftover-job stop until quiet
+  (DONE ticks and finish) and never lets job observation, unconfirmed stop,
+  status refresh, or a cleanup sqlite lock rewrite that phase to ``uncertain``.
 
 [Timeouts & Locks]
 - `GANG_PLAN_RETRY_SECONDS` gates retryable topology wait retries.
@@ -34,6 +33,7 @@ preparation, and managed-lease start/stop orchestration to `CoordinatorService`.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -64,9 +64,7 @@ from mindie_coordinator.provision.task_environment import TaskRootBusy
 from mindie_coordinator.ready_runtime import user_container_name
 from mindie_coordinator.topology_gang_common import GangLeaseError
 
-# A gang refusal that can become satisfiable when another lease releases or a
-# host comes back is retried on the ordinary progress cadence, but not faster
-# than this window, so a waiting execution never becomes an SSH probe loop.
+# Retryable gang refusals wait at least this window so progress is not an SSH loop.
 GANG_PLAN_RETRY_SECONDS = 15.0
 GANG_RETRYABLE_CODES = frozenset({
     "insufficient_free_dies",
@@ -81,11 +79,8 @@ GANG_RETRYABLE_CODES = frozenset({
 })
 MAX_GANG_PROBE_HOSTS = 8
 
-
 def _service_module():
-    """Resolve mutable public service globals only at call time."""
     from mindie_coordinator import service
-
     return service
 
 
@@ -100,8 +95,7 @@ class ServiceGangMixin:
         if row.get("phase") in _service_module().DONE:
             locked = row.get("phase")
             released = self._reply(row).get("resources_released")
-            # Terminal failed retries leftover-job stop even when a stale
-            # resources_released snapshot would otherwise skip the tick.
+            # Terminal failed retries leftover-job stop even if a stale released snapshot would skip.
             if locked == "failed" or not released:
                 if locked == "failed":
                     self._reclaim_preparation_jobs(store, row)
@@ -732,7 +726,16 @@ class ServiceGangMixin:
         locked = row.get("phase")
         if not row.get("preparation_jobs"):
             return True
-        quiet = self._stop_preparation_jobs(store, row, False)
+        try:
+            quiet = self._stop_preparation_jobs(store, row, False)
+        except TimeoutError:
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            if locked != "failed":
+                raise
+            row["phase"] = "failed"
+            row["recording_error"] = {"artifact": "execution-state", "error": str(exc)[:500]}
+            return False
         if locked == "failed" and row.get("phase") != "failed":
             row["phase"] = "failed"
             self._save_execution(store, row)

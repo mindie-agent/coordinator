@@ -25,7 +25,7 @@ status projection, explicit placement observations, and error reporting to
 - Persists terminal log caches, error logs, and finish-session state through
   `AgentSessions`; evidence reads never validate or mutate remote artifacts.
   A permanent cache/request failure still stops already-started preparation
-  jobs; it does not demote `failed` to `uncertain` when quiet is unverified.
+  jobs; leftover sqlite locks and unverified quiet do not demote `failed`.
 """
 
 from __future__ import annotations
@@ -317,19 +317,13 @@ class ServiceEvidenceMixin:
     def _record_execution_error(self, store, row, exc) -> dict[str, Any]:
         from mindie_coordinator.managed_execution import ExecutionRequestError
         from mindie_coordinator.provision.task_environment import TaskRootBusy
-        # TaskRootBusy is a transient local wait, never a terminal tombstone.
+        already_failed = row.get("phase") == "failed"
         waiting = isinstance(exc, TaskRootBusy)
-        permanent = (not waiting) and isinstance(exc, _service_module().PERMANENT_ERRORS)
-        # A build/preparation command that exited nonzero has a known result.
-        # Repeating the same source preparation cannot resolve that failure.
-        # Lost SSH transport (255) and already-bound/live work remain recoverable.
+        permanent = already_failed or ((not waiting) and isinstance(exc, _service_module().PERMANENT_ERRORS))
         if (not waiting and isinstance(exc, RemoteCommandError) and exc.returncode != 255
                 and row.get("phase") == "preparing" and not row.get("roles")):
             permanent = True
-        # Retained jobs must not demote a known-invalid cache/request into
-        # uncertain: retry cannot repair it, and leftover jobs would otherwise
-        # pin the execution out of DONE forever.
-        if (not isinstance(exc, ExecutionRequestError)
+        if (not already_failed and not isinstance(exc, ExecutionRequestError)
                 and any(not job.get("quiet") for records in (row.get("preparation_jobs") or {}).values()
                         for job in records.values())):
             permanent = False
@@ -343,20 +337,24 @@ class ServiceEvidenceMixin:
             raise
         except OSError as log_exc:
             get_recorder("mindie-coordinator").event("WARNING", "diagnostics.persistence_failed", error_type=type(log_exc).__name__)
-        row["error"] = f"{type(exc).__name__}: {exc}"[:500]
-        details = error_details(exc)
-        if isinstance(exc, GangLeaseError):
-            details.setdefault("code", exc.code)
-            for key, value in exc.details.items():
-                if key not in details:
-                    details[key] = value
-        row["error_details"] = details
+        message = f"{type(exc).__name__}: {exc}"[:500]
+        if already_failed:
+            row["recording_error"] = {"artifact": "execution-state", "error": message}
+        else:
+            row["error"] = message
+            details = error_details(exc)
+            if isinstance(exc, GangLeaseError):
+                details.setdefault("code", exc.code)
+                for key, value in exc.details.items():
+                    if key not in details:
+                        details[key] = value
+            row["error_details"] = details
         if waiting:
             row["phase"] = "waiting"
         else:
             row["phase"] = "failed" if permanent else "uncertain"
         self._save_execution(store, row)
-        if permanent and row.get("preparation_jobs"):
+        if permanent and not already_failed and row.get("preparation_jobs"):
             try:
                 self._reclaim_preparation_jobs(store, row)
             except TimeoutError:
