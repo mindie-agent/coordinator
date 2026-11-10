@@ -1,18 +1,19 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  actions: read
+  checks: read
+  deployments: read
 
 jobs:
   release:
-    uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@484b80621aaf9293c559786d0ef2174c79a0dbb4
+    uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@main
     with:
       release-notes-path: docs/releases/coordinator-0.7.6.md
-      benchmark-ref: 484b80621aaf9293c559786d0ef2174c79a0dbb4
       setup-command: |
         uv venv --python 3.13 && uv pip install -e ".[test]"
       test-command: |

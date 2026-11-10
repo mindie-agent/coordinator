@@ -130,3 +130,13 @@ jobs:
         with:
           name: macos-coordinator-results
           path: macos-coordinator.xml
+
+  release-ready:
+    name: release-ready
+    needs: [developer-setup, wheel, windows, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python -c 'import json,os; assert all(job["result"] == "success" for job in json.loads(os.environ["RESULTS"]).values()), "required CI failed or was skipped"'
