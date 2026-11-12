@@ -19,8 +19,11 @@ from mindie_diagnostics import get_recorder, wrap_context, bind_context
 from remote_dev.observability import protocol_streams, observed_tool
 
 from mindie_coordinator.host_queue import SCHEMA_VERSION
-from mindie_coordinator.agent_session import AgentSessions
-from mindie_coordinator.ops import ENV_TOOLS, TOOL_DESCRIPTIONS, TOOL_SCHEMAS, mindie_call, LOADED_RUNTIMES
+from mindie_coordinator.agent_session import AgentSessions, ManagedTaskContextRequired
+from mindie_coordinator.ops import (
+    ENV_TOOLS, TOOL_DESCRIPTIONS, TOOL_SCHEMAS, mindie_call, LOADED_RUNTIMES,
+    context_required_result,
+)
 
 SERVICE_NAME = "mindie-coordinator-task"
 PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
@@ -28,8 +31,9 @@ ALIASES = {name.replace(".", "_"): name for name in TOOL_SCHEMAS}
 INSTRUCTIONS = (
     "Host inventory, probes, containers and bare-metal leases work without a task binding; "
     "omit context_file for these independent environment operations. "
-    "For managed task tools, native hooks attach the task; no session-creation call is needed. "
-    "Supported task hooks supply context_file; otherwise use the native hook's context. "
+    "Managed task tools require a proven native task attachment or its registered context_file. "
+    "Knowledge activation does not establish that attachment; repeating an activation "
+    "command cannot repair it. A missing task attachment only blocks dependent managed calls. "
     "Never guess a task from cwd or history. Sessions with no managed "
     "hosts stay local. Normal run/status calls receive coordination messages "
     "opportunistically; use mindie_message only for a substantive request or reply."
@@ -88,7 +92,18 @@ def canonical_name(name: str) -> str:
 
 def call_tool(name: str, arguments: dict[str, Any] | None, metadata: dict | None = None) -> dict[str, Any]:
     with bind_context((metadata or {}).get("mindie_diagnostics") or {}):
-        return _call_tool(name, arguments, metadata)
+        try:
+            return _call_tool(name, arguments, metadata)
+        except ManagedTaskContextRequired as exc:
+            return tool_result(context_required_result(canonical_name(name), arguments or {}, exc))
+
+
+def tool_result(result):
+    return {
+        "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
+        "structuredContent": result,
+        "isError": result.get("outcome") not in {"success", "cancelled"},
+    }
 
 
 @observed_tool(lambda name, arguments, metadata=None: canonical_name(name), component="mindie-coordinator")
@@ -127,14 +142,8 @@ def _call_tool(name, arguments, metadata=None):
             raise ValueError("context_file differs from this native Codex caller")
         arguments["context_file"] = context["context_file"]
     payload = mindie_call(canonical, arguments, allow_native_context=False)
-    result = payload["result"]
-    return {
-        # Some native clients expose text only, including Grok 1.0.25.
-        # Keep the same compact/full facts visible through both MCP channels.
-        "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
-        "structuredContent": result,
-        "isError": result.get("outcome") not in {"success", "cancelled"},
-    }
+    # Some native clients expose text only, including Grok 1.0.25.
+    return tool_result(payload["result"])
 
 
 def handle(message: dict[str, Any]) -> dict[str, Any] | None:

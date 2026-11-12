@@ -41,6 +41,27 @@ CLIENTS = {"claude", "grok", "kimi", "codex", "cursor", "dsh", "agy", "antigravi
 _CLIENT_ALIASES = {"antigravity": "agy", "workbuddy": "wb"}
 
 
+class ManagedTaskContextRequired(ValueError):
+    """A managed request has no uniquely proven native task association."""
+
+    def __init__(self, reason="missing"):
+        self.reason = reason
+        super().__init__(
+            "native session association is missing or ambiguous "
+            f"({reason}); managed task tools require an explicit registered "
+            "context_file or the native task hook. Knowledge activation does "
+            "not create this association. Independent hosts/probe/container/"
+            "lease tools remain available without context_file."
+        )
+
+    def details(self):
+        return {
+            "type": type(self).__name__, "category": "validation",
+            "error_code": "managed_task_context_required", "reason": self.reason,
+            "submission_state": "not_sent", "retryable": False,
+        }
+
+
 def _normalize_client(client: str) -> str:
     return _CLIENT_ALIASES.get(client, client)
 
@@ -243,8 +264,7 @@ class AgentSessions:
                        if row["client"] == client and row["native_session_id"] == native_session_id
                        and (row.get("agent_id") or "") == agent_id and row["state"] == "attached"]
         if len(matches) != 1:
-            raise ValueError("native session association is missing or ambiguous; recover by passing the "
-                             "task context file explicitly (context_file argument or MINDIE_CONTEXT_FILE)")
+            raise ManagedTaskContextRequired("missing" if not matches else "ambiguous")
         return self.context(matches[0]["id"])
 
     def bind_user(self, context: dict, user: str, *, github_identity: dict | None = None,
@@ -466,7 +486,7 @@ def load_context(context_file: str = "", *, allow_native_context: bool = True) -
         client, native = callers[0] if callers else ("codex", "")
         session = os.environ.get("CODEX_SESSION_ID", "").strip() if client == "codex" else ""
         if not native or not allow_native_context:
-            raise ValueError("MindIE context is required; use the native session hook or explicit task association")
+            raise ManagedTaskContextRequired()
         if client == "cursor" and str(uuid.UUID(native)) != native:
             # Cursor encodes/truncates arbitrary ids before shell export.
             # Its native UUID is lossless; never guess an encoded identity.
@@ -482,7 +502,9 @@ def load_context(context_file: str = "", *, allow_native_context: bool = True) -
             store = AgentSessions()
         try:
             existing = store.native_context(client, native)
-        except ValueError:
+        except ManagedTaskContextRequired as exc:
+            if exc.reason != "missing":
+                raise
             context = store.attach(client, native, str(Path.cwd()),
                                    parent_context=parent, association=association)
             try:
