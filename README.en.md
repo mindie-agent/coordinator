@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.6-blue" alt="Release v0.7.6"></a>
+  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.7-blue" alt="Release v0.7.7"></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI%20%7C%20Python%20SDK-00ADD8" alt="MCP, CLI & SDK">
   <img src="https://img.shields.io/badge/Hardware-Ascend%20NPU-FF6F00" alt="Ascend NPU">
@@ -174,6 +174,8 @@ run = client.run(
 ## MCP Tools & CLI Overview
 
 ### 1. Remote SSH Environment, Container & NPU Capacity Management (No Pre-Attached Session Required)
+
+These four interfaces require no MindIE task binding in either CLI or MCP. Omit `context_file` for independent environment operations; native call metadata does not add task admission. An explicit `context_file` still requires matching task ownership. Inspect resources first, then acquire a lease based on actual availability. Missing task attachment must not block container inspection, source/model discovery or tests that do not use devices.
 
 | MCP Tool | CLI Entry | What It Does |
 | --- | --- | --- |

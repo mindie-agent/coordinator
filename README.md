@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.6-blue" alt="Release v0.7.6"></a>
+  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.7-blue" alt="Release v0.7.7"></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI%20%7C%20Python%20SDK-00ADD8" alt="MCP, CLI & SDK">
   <img src="https://img.shields.io/badge/Hardware-Ascend%20NPU-FF6F00" alt="Ascend NPU">
@@ -176,6 +176,8 @@ run = client.run(
 ## MCP 工具与 CLI 一览
 
 ### 1. 远端 SSH 环境、容器与 NPU 算力管理（无需前置会话即可直接调用）
+
+这四类接口在 CLI 和 MCP 中均不要求 MindIE 任务绑定；省略 `context_file` 即使用独立环境管理入口，原生调用携带的会话元数据不会额外触发任务准入。显式传入 `context_file` 时仍核验对应任务归属。资源探测可先行完成，再按实际空闲情况申请租约；缺少任务绑定不应阻止查看容器、定位源码和模型目录或执行无需上卡的测试。
 
 | MCP 工具名 | 对应的 CLI 入口 | 它能帮你做什么 |
 | --- | --- | --- |

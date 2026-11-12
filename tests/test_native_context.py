@@ -118,6 +118,118 @@ def codex_call_metadata(native):
                 "model": "fixture", "codex_version": "0.154.0-alpha.6.2", "reasoning_effort": "medium"}}
 
 
+@pytest.fixture(params=["none", "codex", "kimi", "kimi-child"])
+def unattached_environment_caller(request):
+    if request.param == "none":
+        return None
+    if request.param == "codex":
+        return codex_call_metadata("unattached")
+    return {"kimi_code/session_id": "unattached",
+            "kimi_code/agent_id": "child" if request.param == "kimi-child" else "main"}
+
+
+@pytest.mark.parametrize("tool,arguments", [
+    ("mindie_hosts", {"action": "list"}),
+    ("mindie_probe", {"action": "hosts", "mode": "cache"}),
+])
+def test_environment_discovery_without_task_attachment(
+    native_env, unattached_environment_caller, tool, arguments,
+):
+    from mindie_coordinator.task_server import handle
+    response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": tool, "arguments": arguments, "_meta": unattached_environment_caller}})
+    assert "error" not in response, response
+    reply = response["result"]
+    assert not reply["isError"], reply
+    data = reply["structuredContent"]["data"]
+    assert data["machines" if tool == "mindie_hosts" else "hosts"] == []
+    assert not native_env.exists()
+    assert "context_file" not in arguments
+
+
+def test_container_binding_without_task_attachment(native_env, unattached_environment_caller):
+    from mindie_coordinator.task_server import call_tool
+    metadata = unattached_environment_caller
+    registered = call_tool("mindie_hosts", {
+        "action": "upsert", "alias": "test-host", "host": "192.0.2.1",
+    }, metadata)
+    assert not registered["isError"], registered
+    bound = call_tool("mindie_container", {
+        "action": "bind", "alias": "test-host", "container_name": "test-container",
+        "mode": "docker_exec", "workdir": "/source",
+    }, metadata)
+    assert not bound["isError"], bound
+    inventory = call_tool("mindie_hosts", {"action": "list"}, metadata)["structuredContent"]["data"]
+    assert inventory["remote_dev_endpoints"]["test-host"]["container"]["name"] == "test-container"
+    assert not native_env.exists()
+
+
+def test_lease_missing_host_reports_environment_input(
+    native_env, unattached_environment_caller,
+):
+    from mindie_coordinator.task_server import handle
+    response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "mindie_lease", "arguments": {"action": "status"},
+        "_meta": unattached_environment_caller}})
+    assert "error" not in response, response
+    reply = response["result"]
+    assert reply["isError"]
+    assert "no machine registered or specified" in reply["structuredContent"]["summary"]
+    assert not native_env.exists()
+
+
+@pytest.mark.parametrize("client", ["codex", "kimi"])
+def test_environment_explicit_context_still_checks_native_owner(native_env, tmp_path, client):
+    from mindie_coordinator.task_server import call_tool
+    store = AgentSessions(native_env)
+    first = store.attach(client, "first", str(tmp_path / "first"))
+    second = store.attach(client, "second", str(tmp_path / "second"))
+    metadata = (codex_call_metadata("first") if client == "codex"
+                else {"kimi_code/session_id": "first", "kimi_code/agent_id": "main"})
+    reply = call_tool("mindie_hosts", {
+        "action": "list", "context_file": first["context_file"],
+    }, metadata)
+    assert not reply["isError"], reply
+    with pytest.raises(ValueError, match="differs from this native"):
+        call_tool("mindie_hosts", {
+            "action": "list", "context_file": second["context_file"],
+        }, metadata)
+    assert len(store.sessions()) == 2
+
+
+@pytest.mark.parametrize("client", ["codex", "kimi"])
+def test_stdio_environment_calls_continue_without_attachment(native_env, client):
+    import json
+    import subprocess
+    import sys
+    metadata = (codex_call_metadata("unattached") if client == "codex" else {
+        "kimi_code/session_id": "unattached", "kimi_code/agent_id": "child"})
+    messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
+    for request_id, tool, arguments in (
+        (2, "mindie_hosts", {"action": "list"}),
+        (3, "mindie_probe", {"action": "hosts", "mode": "cache"}),
+        (4, "mindie_session", {}),
+    ):
+        messages.append({"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                         "params": {"name": tool, "arguments": arguments, "_meta": metadata}})
+    messages.append({"jsonrpc": "2.0", "id": 5, "method": "ping"})
+    process = subprocess.run(
+        [sys.executable, "-m", "mindie_coordinator", "task-server"],
+        input="".join(json.dumps(message) + "\n" for message in messages),
+        capture_output=True, text=True, timeout=10,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert process.returncode == 0, process.stderr
+    replies = {reply["id"]: reply for reply in map(json.loads, process.stdout.splitlines())}
+    assert set(replies) == {1, 2, 3, 4, 5}
+    for request_id in (2, 3):
+        assert "result" in replies[request_id], replies[request_id]
+        assert not replies[request_id]["result"]["isError"], replies[request_id]
+    assert "missing or ambiguous" in replies[4]["error"]["message"]
+    assert replies[5]["result"] == {}
+    assert AgentSessions(native_env).sessions() == []
+
+
 def test_codex_native_call_metadata_routes_each_call_to_existing_attachment(native_env, monkeypatch, tmp_path):
     import json
     from mindie_coordinator.task_server import handle
