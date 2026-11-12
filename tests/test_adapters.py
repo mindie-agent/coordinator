@@ -221,7 +221,8 @@ class ResultAndToolContractTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             payload = mindie_call("mindie.session", {})
         self.assertEqual(payload["result"]["outcome"], "blocked")
-        self.assertEqual(payload["result"]["status"], "unavailable")
+        self.assertEqual(payload["result"]["status"], "managed_task_context_required")
+        self.assertEqual(payload["result"]["error_details"]["submission_state"], "not_sent")
 
 
 

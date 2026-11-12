@@ -304,8 +304,8 @@ class DispatchTests(unittest.TestCase):
         response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "mindie_session"}})
         result = response["result"]
         self.assertTrue(result["isError"])
-        self.assertEqual(result["structuredContent"]["status"], "unavailable")
-        self.assertIn("context is required", result["structuredContent"]["summary"])
+        self.assertEqual(result["structuredContent"]["status"], "managed_task_context_required")
+        self.assertEqual(result["structuredContent"]["error_details"]["reason"], "missing")
 
     def test_call_tool_uses_the_remote_dev_result_envelope(self):
         result = call_tool("mindie_session", {"context_file": self.registry.context_file})

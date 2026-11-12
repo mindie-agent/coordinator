@@ -15,6 +15,7 @@ from remote_dev.observability import observed_tool
 from remote_dev.core.errors import error_details, caller_error
 from remote_dev.mcp.source_context import NATIVE_CONTINUATION_GUIDANCE
 from mindie_coordinator.continuation import continuation
+from mindie_coordinator.agent_session import ManagedTaskContextRequired
 from remote_dev.runtime import process_identity, runtime_status
 from mindie_coordinator.presentation import present
 from mindie_coordinator.placement import ENVIRONMENT_KEYS
@@ -42,6 +43,17 @@ for _name in ENV_TOOLS:
     TOOL_DESCRIPTIONS[_name] += (
         " Available without a native task binding. Omit context_file for independent "
         "environment operations; managed task setup is not a prerequisite."
+    )
+
+
+def context_required_result(name, arguments, error):
+    """The MCP identity boundary and CLI return the same pre-dispatch recovery."""
+    details = error.details()
+    return make_result(
+        tool=name, target={}, outcome="blocked", status=details["error_code"],
+        summary=str(error), duration_ms=0,
+        next=continuation(name, arguments, details=details),
+        extra={"error_details": details},
     )
 
 
@@ -304,12 +316,15 @@ def mindie_call(name, args, *, allow_native_context=True):
                              duration_ms=int((time.monotonic() - started) * 1000), extra={"data": value},
                              next=continuation(name, args, value) if outcome in {"failed", "blocked", "timeout"} else None)
     except Exception as exc:
-        details = error_details(exc)
-        result = make_result(tool=name, target=target, outcome="blocked", status="unavailable",
-                             summary=str(exc), duration_ms=int((time.monotonic() - started) * 1000),
-                             warnings=["Local file and shell tools remain available. No remote success is implied."],
-                             next=continuation(name, args, details=details),
-                             extra={"error_details": details})
+        if isinstance(exc, ManagedTaskContextRequired):
+            result = context_required_result(name, args, exc)
+        else:
+            details = error_details(exc)
+            result = make_result(tool=name, target=target, outcome="blocked", status="unavailable",
+                                 summary=str(exc), duration_ms=int((time.monotonic() - started) * 1000),
+                                 warnings=["Local file and shell tools remain available. No remote success is implied."],
+                                 next=continuation(name, args, details=details),
+                                 extra={"error_details": details})
     result["runtime"] = {"client": [runtime_status(item) for item in LOADED_RUNTIMES]}
     if client is not None:
         service = client._service

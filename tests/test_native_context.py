@@ -47,7 +47,7 @@ def test_missing_or_conflicting_identity_does_not_create_state(native_env, monke
         load_context()
     assert not native_env.exists()
     monkeypatch.delenv("CODEX_THREAD_ID")
-    with pytest.raises(ValueError, match="MindIE context is required"):
+    with pytest.raises(ValueError, match="managed task tools require"):
         load_context()
     assert not native_env.exists()
 
@@ -102,8 +102,10 @@ def test_kimi_mcp_call_metadata_is_per_call_and_visible_as_text(native_env, monk
         assert json.loads(reply["content"][0]["text"]) == reply["structuredContent"]
     with pytest.raises(ValueError, match="differs from this native Kimi caller"):
         call_tool("mindie_session", {"context_file": first["context_file"]}, {"kimi_code/session_id": "second"})
-    with pytest.raises(ValueError, match="missing or ambiguous"):
-        call_tool("mindie_session", {}, {"kimi_code/session_id": "first", "kimi_code/agent_id": "unknown-child"})
+    reply = call_tool("mindie_session", {}, {
+        "kimi_code/session_id": "first", "kimi_code/agent_id": "unknown-child"})
+    assert reply["isError"]
+    assert reply["structuredContent"]["error_details"]["reason"] == "missing"
 
 
 def codex_call_metadata(native):
@@ -225,7 +227,8 @@ def test_stdio_environment_calls_continue_without_attachment(native_env, client)
     for request_id in (2, 3):
         assert "result" in replies[request_id], replies[request_id]
         assert not replies[request_id]["result"]["isError"], replies[request_id]
-    assert "missing or ambiguous" in replies[4]["error"]["message"]
+    assert replies[4]["result"]["isError"]
+    assert replies[4]["result"]["structuredContent"]["status"] == "managed_task_context_required"
     assert replies[5]["result"] == {}
     assert AgentSessions(native_env).sessions() == []
 
@@ -286,8 +289,9 @@ def test_codex_unknown_metadata_does_not_create_or_reassign_attachment(native_en
     known = store.attach("codex", "known", str(tmp_path))
     metadata = codex_call_metadata("unknown")
     metadata["threadId"] = metadata["x-codex-turn-metadata"]["session_id"] = "known"
-    with pytest.raises(ValueError, match="missing or ambiguous"):
-        call_tool("mindie_session", {"context_file": known["context_file"]}, metadata)
+    reply = call_tool("mindie_session", {"context_file": known["context_file"]}, metadata)
+    assert reply["isError"]
+    assert reply["structuredContent"]["error_details"]["submission_state"] == "not_sent"
     assert len(store.sessions()) == 1
     assert store.native_context("codex", "known")["context_file"] == known["context_file"]
 

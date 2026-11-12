@@ -32,6 +32,28 @@ def continuation(name, arguments, value=None, details=None):
                           "scope": "new managed executions after existing work is reconciled"},
         "native_tools": ["remote.bash", "native_shell_or_ssh"],
     }
+    if (details or {}).get("error_code") == "managed_task_context_required":
+        result.update(
+            suggested_action="continue_independent_environment_work",
+            submission_state="not_sent",
+            task_context={
+                "reason": details["reason"],
+                "recovery": "Use a registered context_file belonging to this native caller, "
+                            "or repair its native task hook for managed execution.",
+                "knowledge_activation_repairs_binding": False,
+                "repeat_activation_required": False,
+            },
+            environment_routes=[
+                {"tool": "mindie.container", "action": "inspect", "requires": ["host_or_alias"],
+                 "omit": ["context_file"]},
+                {"tool": "mindie.lease", "action": "status", "requires": ["host_or_alias"],
+                 "omit": ["context_file"]},
+            ],
+        )
+        result["custom_script"] = {
+            "tool": "remote.bash", "scope": "authorized existing endpoint and source directory",
+            "device_work": "Acquire and retain the actual host lease before device execution.",
+        }
     if (details or {}).get("submission_state") == "uncertain":
         result.update(submission_state="uncertain",
                       suggested_action="inspect_existing_task_before_replacement",
