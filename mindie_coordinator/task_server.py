@@ -1,6 +1,6 @@
 """Stdio MCP server for task lifecycle and optional coordination messages.
 
-[Role] Exposes `mindie_session`, `mindie_run`, `mindie_execution`, and `mindie_finish` over JSON-RPC 2.0 stdio.
+[Role] Exposes task lifecycle and independent host/environment tools over JSON-RPC 2.0 stdio.
 [Invariants] Auto-detects `Content-Length` vs line-delimited JSON framing from the first bytes; never mixes stdout protocol frames with diagnostics.
 [Timeouts & Locks] Request dispatch runs on a bounded `ThreadPoolExecutor` with serialized stdout writes (`_write_lock`).
 [Side-Effect Policy] Delegates tool side effects to `ops.py` and `CoordinatorService`.
@@ -20,14 +20,16 @@ from remote_dev.observability import protocol_streams, observed_tool
 
 from mindie_coordinator.host_queue import SCHEMA_VERSION
 from mindie_coordinator.agent_session import AgentSessions
-from mindie_coordinator.ops import TOOL_DESCRIPTIONS, TOOL_SCHEMAS, mindie_call, LOADED_RUNTIMES
+from mindie_coordinator.ops import ENV_TOOLS, TOOL_DESCRIPTIONS, TOOL_SCHEMAS, mindie_call, LOADED_RUNTIMES
 
 SERVICE_NAME = "mindie-coordinator-task"
 PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 ALIASES = {name.replace(".", "_"): name for name in TOOL_SCHEMAS}
 INSTRUCTIONS = (
-    "MindIE task tools. Native hooks automatically attach the task; no session-creation call is needed. "
-    "Supported tool hooks supply context_file; otherwise use the native hook's context. "
+    "Host inventory, probes, containers and bare-metal leases work without a task binding; "
+    "omit context_file for these independent environment operations. "
+    "For managed task tools, native hooks attach the task; no session-creation call is needed. "
+    "Supported task hooks supply context_file; otherwise use the native hook's context. "
     "Never guess a task from cwd or history. Sessions with no managed "
     "hosts stay local. Normal run/status calls receive coordination messages "
     "opportunistically; use mindie_message only for a substantive request or reply."
@@ -97,7 +99,10 @@ def _call_tool(name, arguments, metadata=None):
     # A persistent MCP server's environment can outlive the native caller.
     # It must use the caller's context, never the thread that launched it.
     arguments = dict(arguments or {})
-    if metadata and "kimi_code/session_id" in metadata:
+    # Environment operations do not act on a task. Resolve native ownership
+    # only when a task is needed or the caller explicitly selects its state.
+    needs_context = canonical not in ENV_TOOLS or bool(arguments.get("context_file"))
+    if needs_context and metadata and "kimi_code/session_id" in metadata:
         native = metadata["kimi_code/session_id"]
         agent = metadata.get("kimi_code/agent_id", "")
         if not isinstance(native, str) or not native.strip() or not isinstance(agent, str):
@@ -109,7 +114,7 @@ def _call_tool(name, arguments, metadata=None):
         if supplied and supplied != context["context_file"]:
             raise ValueError("context_file differs from this native Kimi caller")
         arguments["context_file"] = context["context_file"]
-    elif metadata and "x-codex-turn-metadata" in metadata:
+    elif needs_context and metadata and "x-codex-turn-metadata" in metadata:
         # Native Codex tools/call supplies this object per invocation, including
         # calls inside functions.exec which do not pass through PreToolUse.
         turn = metadata["x-codex-turn-metadata"]

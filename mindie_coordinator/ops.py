@@ -38,6 +38,11 @@ for _name in ("mindie.run", "mindie.execution", "mindie.container", "mindie.prob
     TOOL_DESCRIPTIONS[_name] += NATIVE_CONTINUATION_GUIDANCE
 
 ENV_TOOLS = frozenset({"mindie.hosts", "mindie.probe", "mindie.container", "mindie.lease"})
+for _name in ENV_TOOLS:
+    TOOL_DESCRIPTIONS[_name] += (
+        " Available without a native task binding. Omit context_file for independent "
+        "environment operations; managed task setup is not a prerequisite."
+    )
 
 
 def task_schema(properties: dict, required: tuple[str, ...] = ()) -> dict:
@@ -205,6 +210,11 @@ TOOL_SCHEMAS["mindie.execution"]["oneOf"] = [
     {"required": ["run_id"], "not": {"anyOf": [{"required": ["service"]}, {"required": ["execution_id"]}]}},
     {"required": ["service"], "not": {"anyOf": [{"required": ["execution_id"]}, {"required": ["run_id"]}]}},
 ]
+for _name in ENV_TOOLS:
+    TOOL_SCHEMAS[_name]["properties"]["context_file"]["description"] = (
+        "Optional registered task context to select its coordinator state. "
+        "Omit for independent host, probe, container or lease operations; no task binding is needed."
+    )
 
 
 @observed_tool(lambda name, args, **kwargs: name, component="mindie-coordinator")

@@ -20,8 +20,14 @@ def continuation(name, arguments, value=None, details=None):
             "CLIs or task-local scripts through remote-dev or authorized native SSH. "
             "Retain source/interpreter choices and confirmed results. Device work "
             "still needs its actual lease or verified reservation; uncertain writes "
-            "and live jobs must be observed before any replacement or retry."
+            "and live jobs must be observed before any replacement or retry. "
+            "Independent hosts/probe/container/lease operations need no managed task "
+            "binding; omit context_file when using those environment interfaces."
         ),
+        "environment_operations": [
+            {"tool": "mindie.hosts", "arguments": {"action": "list"}},
+            {"tool": "mindie.probe", "arguments": {"action": "hosts"}},
+        ],
         "custom_script": {"tool": "mindie.run", "parameter": "script_file",
                           "scope": "new managed executions after existing work is reconciled"},
         "native_tools": ["remote.bash", "native_shell_or_ssh"],
