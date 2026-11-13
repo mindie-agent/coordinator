@@ -74,6 +74,7 @@ def provision_user_container(
     reserve_port=None,
     on_progress=None,
     alias: str | None = None,
+    privileged: bool = True,
 ) -> dict[str, Any]:
     """Create or reuse `mindie-<user>` on `host` from a named image/recipe."""
     timings, observation = {}, {}
@@ -166,7 +167,8 @@ def provision_user_container(
             ssh_port=int(ssh_port), workdir=DEFAULT_WORKDIR,
             image_request=image_request,
             identity_file=authentication.get('identity_file'),
-            auth_ref=authentication.get('auth_ref')))
+            auth_ref=authentication.get('auth_ref'),
+            privileged=privileged))
         if existing.get('status') == 'cancelled':
             raise host_ops.MachineManagementError('existing container verification cancelled')
         if existing.get('status') == 'match':
@@ -178,7 +180,8 @@ def provision_user_container(
             resolved_machine = requested_type if selected_family in {'mindie', 'mindiesd'} else normalized_machine_type
             return {**_record_ready_container(host, image, user, host_user, host_port,
                                              chosen_port, resolved_machine, machines, alias=alias,
-                                             authentication=authentication, reuse_existing=True),
+                                             authentication=authentication, reuse_existing=True,
+                                             privileged=privileged),
                     'image_verification': existing}
         if existing.get('status') != 'unusable':
             raise host_ops.MachineManagementError(
@@ -231,6 +234,9 @@ def provision_user_container(
             "false",
             machine_type or "",
             "",
+            "false",
+            "",
+            "true" if privileged else "false",
         ],
         timeout_seconds=host_ops.DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS,
         stream_progress=False,
@@ -250,12 +256,13 @@ def provision_user_container(
     return _record_ready_container(host, image, user, host_user, host_port,
                                    chosen_port, machine_type, machines, alias=alias,
                                    authentication=authentication, container_identity=container_identity,
-                                   python_path=readiness.get('python_path'))
+                                   python_path=readiness.get('python_path'),
+                                   privileged=privileged)
 
 
 def _record_ready_container(host, image, user, host_user, host_port, chosen_port, machine_type, machines,
                             alias=None, authentication=None, container_identity=None, python_path=None,
-                            reuse_existing=False):
+                            reuse_existing=False, privileged=True):
     container = user_container_name(user)
     directory = machines or MachineDirectory()
     if reuse_existing:
@@ -281,6 +288,7 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
             "ssh_port": chosen_port,
             "user": "root",
             "workdir": DEFAULT_WORKDIR,
+            "privileged": bool(privileged),
             "runtime_env_file": "/etc/profile.d/mindie-ascend-env.sh",
             **({"identity_file": container_identity} if container_identity else {}),
             **({"python": python_path} if python_path else {}),
@@ -296,6 +304,7 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "ssh_port": chosen_port,
         "image": image,
         "workdir": DEFAULT_WORKDIR,
+        "privileged": bool(privileged),
         "state": "ready",
         **({"python": python_path} if python_path else {}),
     }

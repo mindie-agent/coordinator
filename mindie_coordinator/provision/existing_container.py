@@ -63,6 +63,7 @@ def inspect_existing(request, run=subprocess.run):
                     'image_id': image_id,
                     'reason': 'existing container image does not match the requested selector'}
         state, labels = info.get('State') or {}, config.get('Labels') or {}
+        host_config = info.get('HostConfig') or {}
         if (state.get('Running') is not True or state.get('Paused') or state.get('Restarting')
                 or int(state.get('Pid') or 0) <= 0):
             return {'status': 'unusable', 'reason': 'container is not running normally'}
@@ -70,8 +71,23 @@ def inspect_existing(request, run=subprocess.run):
                 or labels.get('com.mindie.namespace') != request['user']
                 or labels.get('com.mindie.workdir') != request['workdir']
                 or labels.get('com.mindie.container_ssh_port') != str(port)
-                or (info.get('HostConfig') or {}).get('NetworkMode') != 'host'):
+                or host_config.get('NetworkMode') != 'host'
+                or not isinstance(host_config.get('Privileged'), bool)):
             return {'status': 'unusable', 'reason': 'managed container or SSH port facts are incomplete'}
+        expected_privileged = bool(request.get('privileged', True))
+        actual_privileged = bool(host_config.get('Privileged'))
+        if actual_privileged != expected_privileged:
+            return {
+                'status': 'mismatch',
+                'container_id': identifier,
+                'image': image,
+                'image_id': image_id,
+                'privileged': actual_privileged,
+                'reason': (
+                    f'existing container privileged={str(actual_privileged).lower()} '
+                    f'does not match requested privileged={str(expected_privileged).lower()}'
+                ),
+            }
         expected_machine = (request.get('image_request') or {}).get('machine_type')
         actual_machine = (labels.get('com.mindie.machine_type') or '').strip()
         if expected_machine and actual_machine and actual_machine.upper() != str(expected_machine).strip().upper():
@@ -95,6 +111,7 @@ def inspect_existing(request, run=subprocess.run):
         return {'status': 'match', 'container_id': identifier, 'image': image,
                 'image_id': image_id, 'base_image': labels.get('com.mindie.base_image'),
                 'base_image_id': labels.get('com.mindie.base_image_id'), 'ssh_port': port,
+                'privileged': actual_privileged,
                 'listener_pids': sorted(listener_pids), 'observed_at': time.time()}
     except TimeoutError:
         raise
@@ -114,7 +131,7 @@ def inspect_existing(request, run=subprocess.run):
 
 
 def observe_existing(target, *, container, user, ssh_port, workdir, image_request,
-                     identity_file=None, auth_ref=None):
+                     identity_file=None, auth_ref=None, privileged=True):
     """Use the existing cached Python transport, with no host mutation or probe."""
     from remote_dev.core.endpoint import resolve_endpoint
     from remote_dev.core.ssh_transport import run_remote_python
@@ -131,7 +148,8 @@ def observe_existing(target, *, container, user, ssh_port, workdir, image_reques
     try:
         result = run_remote_python(endpoint, source,
             {'container': container, 'user': user, 'ssh_port': ssh_port,
-             'workdir': workdir, 'image_request': image_request}, timeout_ms=10000)
+             'workdir': workdir, 'image_request': image_request,
+             'privileged': bool(privileged)}, timeout_ms=10000)
     except TimeoutError:
         raise
     except Exception as exc:
