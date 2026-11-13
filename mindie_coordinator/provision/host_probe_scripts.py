@@ -45,7 +45,9 @@ prefix="$3"
 export PATH="/usr/local/bin:/usr/local/sbin:${PATH:-}"
 export LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64:${LD_LIBRARY_PATH:-}"
 if [ -z "${ASCEND_HOME_PATH:-}" ]; then
-  if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+  if [ -d /usr/local/Ascend/cann ]; then
+    export ASCEND_HOME_PATH=/usr/local/Ascend/cann
+  elif [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
   elif [ -d /usr/local/Ascend/ascend-toolkit ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
@@ -64,6 +66,7 @@ safe_source() {
   fi
 }
 safe_source /etc/profile.d/mindie-ascend-env.sh
+safe_source /usr/local/Ascend/cann/set_env.sh
 safe_source /usr/local/Ascend/ascend-toolkit/set_env.sh
 safe_source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 safe_source /usr/local/Ascend/nnal/atb/set_env.sh "--cxx_abi=${MINDIE_ATB_CXX_ABI:-1}"
@@ -219,7 +222,7 @@ if result["docker"]["present"]:
     result["image"]["present_local"] = bool(present_local_candidates)
     rc, out, _ = run(["docker", "ps", "-a", "--format", "{{.Names}}	{{.Status}}	{{.Image}}"])
     if rc == 0:
-        rows = []
+        matched: list[tuple[str, str, str]] = []
         for line in out.splitlines():
             if not line:
                 continue
@@ -228,8 +231,36 @@ if result["docker"]["present"]:
                 continue
             name, status, actual_image = parts
             if name.startswith(prefix):
-                rows.append({"name": name, "status": status, "image": actual_image})
-        result["managed_containers"] = rows
+                matched.append((name, status, actual_image))
+        priv_map: dict[str, Optional[bool]] = {}
+        if matched:
+            priv_rc, priv_out, _ = run(
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{.Name}}	{{.HostConfig.Privileged}}",
+                    *[item[0] for item in matched],
+                ]
+            )
+            if priv_rc == 0:
+                for pline in priv_out.splitlines():
+                    pparts = pline.split("	", 1)
+                    if len(pparts) != 2:
+                        continue
+                    cname = pparts[0].strip().lstrip("/")
+                    pval = pparts[1].strip()
+                    if pval in ("true", "false"):
+                        priv_map[cname] = pval == "true"
+        result["managed_containers"] = [
+            {
+                "name": name,
+                "status": status,
+                "image": actual_image,
+                "privileged": priv_map.get(name),
+            }
+            for name, status, actual_image in matched
+        ]
 
 fresh_probe_text: list[str] = []
 

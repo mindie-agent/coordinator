@@ -187,6 +187,24 @@ PY
       exit 21
     fi
   fi
+  if [ "$container_exists" = "true" ]; then
+    if ! current_privileged="$(docker inspect -f '{{.HostConfig.Privileged}}' "$container" 2>/dev/null)" \
+       || { [ "$current_privileged" != "true" ] && [ "$current_privileged" != "false" ]; }; then
+      emit_json '{"success": false, "error": "failed to inspect existing container privileged state", "phase": "container"}'
+      exit 22
+    fi
+    if [ "$current_privileged" != "$privileged" ]; then
+      if [ "$replace_on_image_change" = "true" ]; then
+        emit_progress "container" "running" "existing container privileged=$current_privileged does not match requested privileged=$privileged; recreating container" 60
+        docker rm -f "$container" >/dev/null
+        actions+=("removed-container-for-privilege-change")
+        container_exists=false
+      else
+        emit_json "{\"success\": false, \"error\": \"existing container privileged=${current_privileged} does not match requested privileged=${privileged}\", \"phase\": \"container\", \"existing_privileged\": ${current_privileged}, \"requested_privileged\": ${privileged}}"
+        exit 22
+      fi
+    fi
+  fi
 fi
 
 if [ "$container_exists" = "true" ]; then
@@ -291,11 +309,19 @@ else
   if [ -e /dev/devmm_svm ]; then
     device_args+=(--device=/dev/devmm_svm)
   fi
+  if [ "$privileged" != "true" ]; then
+    for dev_node in /dev/davinci[0-9]*; do
+      if [ -e "$dev_node" ] && [[ "$(basename "$dev_node")" =~ ^davinci[0-9]+$ ]]; then
+        device_args+=("--device=$dev_node")
+      fi
+    done
+  fi
 
   emit_progress "container" "running" "creating managed container" 45
   docker run --name "$container" -it -d --network host --shm-size=500g \
-    --privileged=true \
+    --privileged="$privileged" \
     --label com.mindie.managed=true \
+    --label com.mindie.privileged="$privileged" \
     --label com.mindie.container_ssh_port="$port" \
     --label com.mindie.workdir="$workdir" \
     --label com.mindie.namespace="$namespace" \
@@ -379,7 +405,7 @@ elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 
   firewall="firewalld"
 fi
 
-payload=$(python3 - <<'PY' "$container" "$port" "$image_request_json" "$selected_image" "$image_resolution" "$workdir" "$namespace" "$created" "$started" "$pulled" "$installed_ssh" "$firewall" "${actions[*]}" "$previous_image" "$replace_on_image_change" "$machine_type" "$container_type" "$soc" "$host_env_file" "$host_metadata_file" "$container_env_file" "$container_metadata_file" "$package_bootstrap" "$run_image" "$prepared_image" "$use_prepared_image_cache" "$used_prepared_image_cache" "$created_prepared_image_cache" "$docker_pull_policy" "$visible_devices" "$selected_image_id" "$runtime_image_candidates_json" "$local_image_discovery"
+payload=$(python3 - <<'PY' "$container" "$port" "$image_request_json" "$selected_image" "$image_resolution" "$workdir" "$namespace" "$created" "$started" "$pulled" "$installed_ssh" "$firewall" "${actions[*]}" "$previous_image" "$replace_on_image_change" "$machine_type" "$container_type" "$soc" "$host_env_file" "$host_metadata_file" "$container_env_file" "$container_metadata_file" "$package_bootstrap" "$run_image" "$prepared_image" "$use_prepared_image_cache" "$used_prepared_image_cache" "$created_prepared_image_cache" "$docker_pull_policy" "$visible_devices" "$selected_image_id" "$runtime_image_candidates_json" "$local_image_discovery" "$privileged"
 import json
 import sys
 (
@@ -416,12 +442,14 @@ import sys
     selected_image_id,
     runtime_image_candidates_json,
     local_image_discovery_json,
+    privileged,
 ) = sys.argv[1:]
 image_request = json.loads(image_request_json)
 print(json.dumps({
     "success": True,
     "container": container,
     "container_ssh_port": int(port),
+    "privileged": privileged == "true",
     "image": selected_image,
     "requested_image": image_request.get("requested"),
     "requested_selector": image_request.get("selector"),

@@ -33,6 +33,15 @@ machine_type_input="${8:-}"
 soc_input="${9:-}"
 use_prepared_image_cache="${10:-false}"
 visible_devices="${11:-}"
+privileged_input="${12:-${MINDIE_DOCKER_PRIVILEGED:-true}}"
+case "${privileged_input,,}" in
+  false|0|no)
+    privileged="false"
+    ;;
+  *)
+    privileged="true"
+    ;;
+esac
 
 emit_json() {
   python3 - "$1" <<'PY'
@@ -420,7 +429,7 @@ INNER_PKG
 }
 
 configure_container_state() {
-  docker exec -i "$container" bash -s -- "$port" "$pubkey" "$machine_type" "$container_type" "$soc" "$selected_image" "$workdir" "$namespace" "$visible_devices" <<'INNER_CFG'
+  docker exec -i "$container" bash -s -- "$port" "$pubkey" "$machine_type" "$container_type" "$soc" "$selected_image" "$workdir" "$namespace" "$visible_devices" "$privileged" <<'INNER_CFG'
 set -euo pipefail
 port="$1"
 pubkey="$2"
@@ -431,10 +440,13 @@ image="$6"
 workdir="$7"
 namespace="$8"
 visible_devices="$9"
+privileged="${10:-true}"
 export PATH="/usr/local/bin:/usr/local/sbin:${PATH:-}"
 export LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64:${LD_LIBRARY_PATH:-}"
 if [ -z "${ASCEND_HOME_PATH:-}" ]; then
-  if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+  if [ -d /usr/local/Ascend/cann ]; then
+    export ASCEND_HOME_PATH=/usr/local/Ascend/cann
+  elif [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
   elif [ -d /usr/local/Ascend/ascend-toolkit ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
@@ -493,11 +505,16 @@ cat > /etc/profile.d/mindie-ascend-env.sh <<EOF_CONTAINER_ENV
 #!/bin/sh
 export MINDIE_ATB_CXX_ABI="\${MINDIE_ATB_CXX_ABI:-$_mindie_atb_cxx_abi}"
 if [ -z "\${ASCEND_HOME_PATH:-}" ]; then
-  if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+  if [ -d /usr/local/Ascend/cann ]; then
+    export ASCEND_HOME_PATH=/usr/local/Ascend/cann
+  elif [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
   elif [ -d /usr/local/Ascend/ascend-toolkit ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
   fi
+fi
+if [ -f /usr/local/Ascend/cann/set_env.sh ]; then
+  . /usr/local/Ascend/cann/set_env.sh >/dev/null 2>&1 || true
 fi
 if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
   . /usr/local/Ascend/ascend-toolkit/set_env.sh >/dev/null 2>&1 || true
@@ -528,10 +545,10 @@ if [ -n "$visible_devices" ]; then
 fi
 EOF_CONTAINER_ENV
 chmod 0644 /etc/profile.d/mindie-ascend-env.sh
-python3 - "$machine_type" "$container_type" "$soc" "$image" "$workdir" "$namespace" "$_mindie_atb_cxx_abi" "$visible_devices" > /etc/mindie/container-info.json <<'PY'
+python3 - "$machine_type" "$container_type" "$soc" "$image" "$workdir" "$namespace" "$_mindie_atb_cxx_abi" "$visible_devices" "$privileged" > /etc/mindie/container-info.json <<'PY'
 import json
 import sys
-machine_type, container_type, soc, image, workdir, namespace, atb_cxx_abi, visible_devices = sys.argv[1:]
+machine_type, container_type, soc, image, workdir, namespace, atb_cxx_abi, visible_devices, privileged = sys.argv[1:]
 print(json.dumps({
     "machine_type": machine_type or None,
     "container_type": container_type or None,
@@ -540,6 +557,7 @@ print(json.dumps({
     "workdir": workdir,
     "namespace": namespace or None,
     "atb_cxx_abi": atb_cxx_abi or None,
+    "privileged": privileged == "true",
     "visible_devices": [int(item) for item in visible_devices.split(",") if item] if visible_devices else [],
     "env_file": "/etc/profile.d/mindie-ascend-env.sh",
 }, ensure_ascii=False, indent=2))

@@ -24,10 +24,10 @@ def request(image=IMAGE):
             'image_request': provision.host_ops.image_request_payload(image)}
 
 
-def container(image=IMAGE):
+def container(image=IMAGE, *, privileged=True):
     return {'Name': '/mindie-alice', 'Id': 'a' * 64, 'Image': 'sha256:' + 'b' * 64,
             'State': {'Running': True, 'Paused': False, 'Restarting': False, 'Pid': 101},
-            'HostConfig': {'NetworkMode': 'host'},
+            'HostConfig': {'NetworkMode': 'host', 'Privileged': privileged},
             'Config': {'Image': image, 'Labels': {'com.mindie.managed': 'true',
                 'com.mindie.namespace': 'alice', 'com.mindie.workdir': provision.DEFAULT_WORKDIR,
                 'com.mindie.container_ssh_port': '2201', 'com.mindie.base_image': image,
@@ -67,7 +67,7 @@ def test_different_image_is_rejected_even_if_base_label_claims_the_requested_ima
 
 
 @pytest.mark.parametrize('damage', ['name', 'id', 'image-id', 'stopped', 'paused', 'restarting',
-                                  'pid', 'label', 'user', 'port', 'workdir', 'network'])
+                                  'pid', 'label', 'user', 'port', 'workdir', 'network', 'privileged-missing'])
 def test_incomplete_container_facts_cannot_skip_bootstrap(damage):
     info = container()
     if damage == 'name':
@@ -84,10 +84,45 @@ def test_incomplete_container_facts_cannot_skip_bootstrap(damage):
         info['State']['Pid'] = 0
     elif damage == 'network':
         info['HostConfig']['NetworkMode'] = 'bridge'
+    elif damage == 'privileged-missing':
+        del info['HostConfig']['Privileged']
     else:
         key = {'label': 'managed', 'user': 'namespace', 'port': 'container_ssh_port', 'workdir': 'workdir'}[damage]
         info['Config']['Labels']['com.mindie.' + key] = 'different'
     assert existing.inspect_existing(request(), run=command_results(info))['status'] == 'unusable'
+
+
+def test_unprivileged_existing_container_is_rejected_for_default_privileged_policy():
+    info = container(privileged=False)
+    run = command_results(info)
+    inspected = existing.inspect_existing(request(), run=run)
+    assert inspected['status'] == 'mismatch'
+    assert inspected['privileged'] is False
+    assert 'privileged=false' in inspected['reason']
+    assert run.call_count == 1
+
+
+def test_default_bootstrap_passes_privileged_true_and_records_container_metadata(monkeypatch):
+    monkeypatch.setattr(existing, 'observe_existing', lambda *a, **k: {'status': 'unusable'})
+    remote = Mock(side_effect=[
+        RemoteResult(TARGET, 0, '', '', {'success': True, 'suggested_port': 2299}),
+        RemoteResult(TARGET, 0, '', '', {'success': True, 'privileged': True}),
+        RemoteResult(TARGET, 0, '', '', {'success': True}),
+    ])
+    monkeypatch.setattr(provision.host_ops, 'run_remote_script', remote)
+    monkeypatch.setattr(provision.host_ops, 'ensure_key', lambda _: ('unused', 'ssh-ed25519 test'))
+    directory = Mock()
+    result = provision.provision_user_container(
+        host=TARGET.host,
+        image=IMAGE,
+        user='alice',
+        ssh_port=2201,
+        machines=directory,
+        reserve_port=Mock(return_value={'port': 2201}),
+    )
+    assert result['privileged'] is True
+    assert directory.upsert_machine.call_args.args[0]['container']['privileged'] is True
+    assert remote.call_args_list[1].kwargs['args'][11] == 'true'
 
 
 def test_missing_listener_is_unusable_and_does_not_establish_reuse():
@@ -271,3 +306,12 @@ def test_provision_passes_ssh_credentials_into_existing_observation(monkeypatch)
     assert result['state'] == 'ready'
     assert seen['identity_file'] == '/keys/id_ed25519'
     assert seen['auth_ref'] == 'secret-ref'
+
+
+def test_bootstrap_and_probe_scripts_guard_privilege_inspect_and_batch_probe():
+    bootstrap = provision.host_ops.render_bootstrap_host_script()
+    assert 'failed to inspect existing container privileged state' in bootstrap
+    assert 'for dev_node in /dev/davinci[0-9]*; do' in bootstrap
+    probe = provision.host_ops.render_host_probe_script()
+    assert '{{.Name}}\\t{{.HostConfig.Privileged}}' in probe or '{{.Name}}\t{{.HostConfig.Privileged}}' in probe
+    assert '*[item[0] for item in matched]' in probe

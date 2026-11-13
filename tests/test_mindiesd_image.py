@@ -179,7 +179,7 @@ def test_mindiesd_fast_path_reuse_preserves_inferred_machine_and_rejects_label_m
         'Id': 'a' * 64,
         'Image': 'sha256:' + 'b' * 64,
         'State': {'Running': True, 'Paused': False, 'Restarting': False, 'Pid': 101},
-        'HostConfig': {'NetworkMode': 'host'},
+        'HostConfig': {'NetworkMode': 'host', 'Privileged': True},
         'Config': {
             'Image': ref,
             'Labels': {
