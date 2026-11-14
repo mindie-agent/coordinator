@@ -319,6 +319,17 @@ def mindie_call(name, args, *, allow_native_context=True):
         if isinstance(exc, ManagedTaskContextRequired):
             result = context_required_result(name, args, exc)
         else:
+            from mindie_coordinator.diagnostics import (
+                is_internal_coordinator_exception,
+                record_coordinator_failure,
+            )
+            if is_internal_coordinator_exception(exc):
+                record_coordinator_failure(
+                    name if name in TOOL_SCHEMAS else "mindie.tool",
+                    stage="tool_call",
+                    category="internal_exception",
+                    exception=exc,
+                )
             details = error_details(exc)
             result = make_result(tool=name, target=target, outcome="blocked", status="unavailable",
                                  summary=str(exc), duration_ms=int((time.monotonic() - started) * 1000),

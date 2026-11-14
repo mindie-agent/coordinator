@@ -22,6 +22,30 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     from mindie_coordinator._stdio import configure_stdio
     configure_stdio()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return _dispatch_cli(parser, args)
+    except Exception as exc:
+        from mindie_coordinator.diagnostics import (
+            is_internal_coordinator_exception,
+            record_coordinator_failure,
+        )
+        if is_internal_coordinator_exception(exc):
+            ref = record_coordinator_failure(
+                "mindie." + str(args.command or "cli"),
+                stage="cli_dispatch",
+                category="internal_exception",
+                exception=exc,
+            )
+            inc = ref.get("incident_id") if isinstance(ref, dict) else None
+            if isinstance(inc, str) and len(inc) == 32 and all(c in "0123456789abcdef" for c in inc):
+                sys.stderr.write(f"mindie-diagnostic-incident: {inc}\n")
+                sys.stderr.flush()
+        raise
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mindie-coordinator",
         description="Local MindIE coordinator: persistent environment, task isolation and resource placement.",
@@ -76,7 +100,10 @@ def main(argv: list[str] | None = None) -> int:
         ep.add_argument("--user")
         ep.add_argument("--full", action="store_true", default=None)
         ep.add_argument("--json", default="{}", help="Structured JSON arguments for the operation")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "daemon":
         from mindie_coordinator.service import main as daemon_main
         return daemon_main(["--state-dir", args.state_dir, "--action", args.action])
@@ -86,7 +113,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"hosts", "probe", "container", "lease"}:
         from mindie_coordinator.ops import mindie_call
 
-        extra = json.loads(args.json or "{}")
+        try:
+            extra = json.loads(args.json or "{}")
+        except ValueError as exc:
+            parser.error(f"--json must be valid JSON: {exc}")
+        if not isinstance(extra, dict):
+            parser.error("--json must decode to a JSON object")
         merged = {
             **extra,
             **{

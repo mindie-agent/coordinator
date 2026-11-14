@@ -247,9 +247,31 @@ class MachineDirectory:
                 f"machine directory is empty at {path}; pass a document to "
                 "MachineDirectory.replace() or MachineDirectory(document=...)"
             )
-        inventory = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            inventory = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            from mindie_coordinator.diagnostics import record_coordinator_failure
+            record_coordinator_failure(
+                "mindie.hosts",
+                stage="inventory_load",
+                category="contract_violation",
+                exception=exc,
+                contract_name="machines_inventory_json",
+                reason_code="corrupt_machines_json",
+            )
+            raise
         if not isinstance(inventory, dict) or not isinstance(inventory.get("machines"), list):
-            raise ValueError(f"{path} is not a machine inventory document")
+            exc = ValueError(f"{path} is not a machine inventory document")
+            from mindie_coordinator.diagnostics import record_coordinator_failure
+            record_coordinator_failure(
+                "mindie.hosts",
+                stage="inventory_load",
+                category="contract_violation",
+                exception=exc,
+                contract_name="machines_inventory_json",
+                reason_code="invalid_machines_schema",
+            )
+            raise exc
         return inventory, path
 
     def machines(self) -> list[dict[str, Any]]:
