@@ -58,8 +58,27 @@ def no_window_kwargs() -> dict[str, int]:
     return {"creationflags": CREATE_NO_WINDOW} if _is_windows() else {}
 
 
+def _env_get(env_map: Mapping[str, str], key: str, default: str | None = None) -> str | None:
+    if key in env_map:
+        return env_map[key]
+    if _is_windows() or _is_windows_fs():
+        folded = key.casefold()
+        for existing_key, value in env_map.items():
+            if existing_key.casefold() == folded:
+                return value
+    return default
+
+
 def utf8_python_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
-    env = dict(os.environ if base is None else base)
+    source = os.environ if base is None else base
+    if _is_windows() or _is_windows_fs():
+        env = {
+            k: v
+            for k, v in source.items()
+            if k.casefold() not in {"pythonutf8", "pythonioencoding"}
+        }
+    else:
+        env = dict(source)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     return env
@@ -198,7 +217,7 @@ def is_pe_executable(value: str | os.PathLike[str]) -> bool:
 def _which_windows(command: str, *, path: str | None = None, pathext_override: str | None = None) -> str | None:
     if not command:
         return None
-    pathext_raw = pathext_override or os.environ.get("PATHEXT") or _WIN_DEFAULT_PATHEXT
+    pathext_raw = pathext_override or _env_get(os.environ, "PATHEXT") or _WIN_DEFAULT_PATHEXT
     pathext: list[str] = []
     for raw_ext in pathext_raw.split(";"):
         if not raw_ext:
@@ -214,7 +233,7 @@ def _which_windows(command: str, *, path: str | None = None, pathext_override: s
             if _is_regular_file(cand):
                 return cand if ("\\" in cand or "/" in cand) else os.path.abspath(cand)
         return None
-    search_path = os.environ.get("PATH", None) if path is None else path
+    search_path = _env_get(os.environ, "PATH", None) if path is None else path
     if search_path is None:
         search_path = os.defpath
     if not search_path:
@@ -277,6 +296,7 @@ def _is_windows_wsl_bash_stub(candidate: str) -> bool:
 
 def _win_git_roots(env_map: Mapping[str, str]) -> list[str]:
     roots: list[str] = []
+    seen: set[str] = set()
     for key, rel_parts in (
         ("LOCALAPPDATA", ("Programs", "Git")),
         ("ProgramFiles", ("Git",)),
@@ -285,24 +305,28 @@ def _win_git_roots(env_map: Mapping[str, str]) -> list[str]:
         ("USERPROFILE", ("AppData", "Local", "Programs", "Git")),
         ("USERPROFILE", ("scoop", "apps", "git", "current")),
     ):
-        base = env_map.get(key)
+        base = _env_get(env_map, key)
         if base:
             sep_b = "/" if (base.startswith("/") and "\\" not in base) else "\\"
             trimmed = base.rstrip("/\\")
-            roots.append(sep_b.join((trimmed, *rel_parts)))
+            cand = sep_b.join((trimmed, *rel_parts))
+            folded = cand.casefold()
+            if folded not in seen:
+                seen.add(folded)
+                roots.append(cand)
     return roots
 
 
 def resolve_git(*, path: str | None = None, env: Mapping[str, str] | None = None) -> str:
     env_map = os.environ if env is None else env
-    search_path = env_map.get("PATH", None) if path is None else path
+    search_path = _env_get(env_map, "PATH", None) if path is None else path
     if not _is_windows_fs():
         found = which_native("git", path=search_path)
         if found:
             return found
         raise FileNotFoundError("Native POSIX git executable not found on PATH (Windows PE/DrvFS shims ignored)")
     effective_path = os.defpath if search_path is None else search_path
-    found = _which_windows("git", path=effective_path, pathext_override=env_map.get("PATHEXT")) if effective_path else None
+    found = _which_windows("git", path=effective_path, pathext_override=_env_get(env_map, "PATHEXT")) if effective_path else None
     if found:
         return found
     if path is None:
@@ -317,7 +341,7 @@ def resolve_git(*, path: str | None = None, env: Mapping[str, str] | None = None
 
 def resolve_bash(*, path: str | None = None, env: Mapping[str, str] | None = None) -> str:
     env_map = os.environ if env is None else env
-    search_path = env_map.get("PATH", None) if path is None else path
+    search_path = _env_get(env_map, "PATH", None) if path is None else path
     if not _is_windows_fs():
         found = which_native("bash", path=search_path)
         if found:

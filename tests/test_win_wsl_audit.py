@@ -130,33 +130,68 @@ def test_wsl2_which_native_preserves_relpath_and_symlink_dotdot_and_skips_drvfs(
     assert local_exec.which_native("./git") == "./git"
 
 
+def test_resolve_git_and_bash_handle_uppercase_copied_windows_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_exec, "_IS_WINDOWS_OVERRIDE", True)
+    git_exe = r"C:\Program Files\Git\cmd\git.exe"
+    bash_exe = r"C:\Program Files\Git\bin\bash.exe"
+    files = {git_exe, bash_exe}
+    monkeypatch.setattr(local_exec, "_is_regular_file", lambda p, **kw: p in files)
+    copied_env = {
+        "PATH": r"C:\Windows\System32",
+        "PATHEXT": ".EXE",
+        "PROGRAMFILES": r"C:\Program Files",
+        "USERPROFILE": r"C:\Users\alice",
+        "LOCALAPPDATA": r"C:\Users\alice\AppData\Local",
+        "pythonutf8": "0",
+        "pythonioencoding": "cp936",
+    }
+    assert local_exec.resolve_git(env=copied_env) == git_exe
+    assert local_exec.resolve_bash(env=copied_env) == bash_exe
+    utf8_env = local_exec.utf8_python_env(copied_env)
+    assert utf8_env["PYTHONUTF8"] == "1"
+    assert utf8_env["PYTHONIOENCODING"] == "utf-8"
+    assert "pythonutf8" not in utf8_env
+    assert "pythonioencoding" not in utf8_env
+
+
 def test_execution_slots_script_handles_parentheses_and_globs_in_path(tmp_path: Path) -> None:
-    from mindie_coordinator.local_exec import resolve_bash_or_none
+    from mindie_coordinator.local_exec import no_window_kwargs, resolve_bash_or_none
 
     bash = resolve_bash_or_none()
     if bash is None:
         pytest.skip("Bash required for execution_slots shell script test")
-    weird_dir = tmp_path / "Program Files (x86)" / "glob*[test]"
-    weird_dir.mkdir(parents=True)
-    snippet = execution_slots._SLOT_HELPER_SCRIPT if hasattr(execution_slots, "_SLOT_HELPER_SCRIPT") else None
-    if snippet is None:
-        src = Path(execution_slots.__file__).read_text(encoding="utf-8")
-        assert "set -f" in src
+    slot_bin = tmp_path / "slot" / "bin"
+    slot_site = tmp_path / "slot" / "site"
+    real_bin = tmp_path / "real_bin"
+    paren_dir = tmp_path / "work" / "Program Files (x86)"
+    decoy_a1 = tmp_path / "work" / "a1"
+    decoy_a2 = tmp_path / "work" / "a2"
+    for d in (slot_bin, slot_site, real_bin, paren_dir, decoy_a1, decoy_a2):
+        d.mkdir(parents=True)
+    wrapper = slot_bin / "python3"
+    wrapper.write_text("#!/usr/bin/env bash\n" + execution_slots.SLOT_PYTHON_WRAPPER_SH, encoding="utf-8", newline="\n")
+    wrapper.chmod(0o755)
+    poison_py = decoy_a1 / "python3"
+    poison_py.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8", newline="\n")
+    poison_py.chmod(0o755)
+    real_py = real_bin / "python3"
+    real_py.write_text('#!/usr/bin/env bash\nprintf "REAL_PY_OK:%s\\n" "$*"\n', encoding="utf-8", newline="\n")
+    real_py.chmod(0o755)
     proc = subprocess.run(
         [
             bash,
             "-c",
-            'old_opts=$-; set -f; IFS=:; count=0; for d in $PATH; do count=$((count+1)); done; '
-            'case $old_opts in *f*) ;; *) set +f ;; esac; unset IFS; printf "%d\\n" "$count"',
+            'PATH="[ab][12]:Program Files (x86):../real_bin:$PATH" ../slot/bin/python3 -I -c ok',
         ],
-        env={**os.environ, "PATH": f"{weird_dir}:/usr/bin:/bin"},
+        cwd=str(tmp_path / "work"),
         capture_output=True,
         text=True,
         encoding="utf-8",
         timeout=10.0,
         check=True,
+        **no_window_kwargs(),
     )
-    assert int(proc.stdout.strip()) >= 3
+    assert proc.stdout.strip() == "REAL_PY_OK:-s -c ok"
 
 
 def test_npu_top_bridge_propagates_timeout_error_and_service_client_keeps_no_window() -> None:
