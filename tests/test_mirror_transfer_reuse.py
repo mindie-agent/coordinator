@@ -24,7 +24,9 @@ def snapshot(repo, name):
 
 @pytest.fixture
 def local_peer(monkeypatch):
-    bash = str(Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe') if os.name == 'nt' else shutil.which('bash')
+    from mindie_coordinator.local_exec import resolve_bash_or_none
+
+    bash = resolve_bash_or_none()
     if not bash or not Path(bash).is_file():
         pytest.skip('local remote-shell fixture requires Bash')
     commands, transfers = [], []

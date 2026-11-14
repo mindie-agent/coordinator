@@ -562,12 +562,14 @@ def _fixed_inline_pack(repo, commit, carrier, previous, *, limit=65536):
         return None
     # A temporary file bounds memory even when a nominal edit contains a large
     # new blob. No network or shared refs are mutated while constructing it.
+    from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
     with tempfile.TemporaryFile() as output:
         result = subprocess.run(
-            ['git', '-C', str(repo), 'pack-objects', '--stdout', '--revs', '--delta-base-offset', '--compression=1'],
+            [resolve_git(), '-C', strip_windows_extended_prefix(repo), 'pack-objects', '--stdout', '--revs', '--delta-base-offset', '--compression=1'],
             input=(commit + '\n' + carrier + '\n^' + previous + '\n').encode('ascii'),
             stdout=output, stderr=subprocess.PIPE, timeout=DEFAULT_GIT_TRANSPORT_TIMEOUT_SECONDS,
-            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+            **no_window_kwargs(),
         )
         if result.returncode:
             raise RuntimeError('fixed source pack failed: ' + result.stderr.decode('utf-8', errors='replace'))
@@ -594,14 +596,16 @@ def _clean_head_snapshot_base(record):
         deadline = time.monotonic() + 5
 
         def objects(*args, data=None, env=None):
+            from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('optional clean snapshot hint exceeded its budget')
             return subprocess.run(
-                ['git', '--no-replace-objects', '-C', record.source_path, *args],
+                [resolve_git(env=env), '--no-replace-objects', '-C', strip_windows_extended_prefix(record.source_path), *args],
                 input=data if data is not None else b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 check=True, timeout=remaining, env=env,
-                **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+                **no_window_kwargs(),
             ).stdout
 
         raw = objects('cat-file', 'commit', record.commit)

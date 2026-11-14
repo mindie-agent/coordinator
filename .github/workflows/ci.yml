@@ -85,7 +85,25 @@ jobs:
         with:
           python-version: '3.13'
           activate-environment: false
-      - name: Install and validate native local control plane
+      - name: Install native local control plane
+        env:
+          HOME: ${{ runner.temp }}/coordinator-test-home
+          USERPROFILE: ${{ runner.temp }}/coordinator-test-home
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null
+          uv venv
+          uv pip install -e ".[test]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate Git Bash and UTF-8 resolution under Windows PowerShell 5.1
+        shell: powershell
+        env:
+          HOME: ${{ runner.temp }}/coordinator-test-home
+          USERPROFILE: ${{ runner.temp }}/coordinator-test-home
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\.venv\Scripts\python.exe -c "from mindie_coordinator.local_exec import resolve_bash, resolve_git; g = resolve_git(); b = resolve_bash(); assert 'system32' not in b.lower() and b.lower().endswith('bash.exe'), b; print('PS51_GIT_BASH_OK', g, b)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run Windows coordinator test suite
         env:
           HOME: ${{ runner.temp }}/coordinator-test-home
           USERPROFILE: ${{ runner.temp }}/coordinator-test-home
@@ -97,10 +115,6 @@ jobs:
             throw 'Git Bash is required by the local Linux-peer test fixtures'
           }
           $env:PATH = "$gitBin;$env:PATH"
-          New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null
-          uv venv
-          uv pip install -e ".[test]"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .venv/Scripts/python.exe -m pytest -q tests -m "not live_npu" --durations=20 --junitxml=windows-coordinator.xml
       - uses: actions/upload-artifact@v4
         if: always()

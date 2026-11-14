@@ -32,10 +32,18 @@ class RepoNode:
 
 
 def git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
+    try:
+        git_exe = resolve_git()
+    except FileNotFoundError as exc:
+        if check:
+            raise
+        return subprocess.CompletedProcess(["git", "-C", str(repo), *args], 127, "", str(exc))
     return subprocess.run(
-        ["git", "-C", str(repo), *args], check=check,
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=30,
-        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+        [git_exe, "-C", strip_windows_extended_prefix(repo), *args], check=check,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        **no_window_kwargs(),
     )
 
 

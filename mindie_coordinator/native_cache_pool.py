@@ -138,7 +138,7 @@ def _read_native_content(entry: Path, expected_key: str) -> dict | None:
     manifest_path = entry / 'manifest.json'
     if not entry.is_dir() or not metadata_path.is_file() or not manifest_path.is_file():
         raise ValueError('native content entry is incomplete: ' + entry.name)
-    metadata = json.loads(metadata_path.read_text())
+    metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
     if metadata.get('schema_version') != NATIVE_CONTENT_SCHEMA or metadata.get('cache_key') != expected_key:
         raise ValueError('native content entry key changed: ' + entry.name)
     manifest_bytes = manifest_path.read_bytes()

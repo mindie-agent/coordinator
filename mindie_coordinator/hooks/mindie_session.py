@@ -93,14 +93,16 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
     cwd, project = cwd.resolve(), project.resolve()
     if cwd == project:
         return True
-    flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
+    from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
+    flags = no_window_kwargs()
     if sources is not None:
         # The consumer supplies explicitly prepared roots. Never discover
         # arbitrary nested repositories or infer task association from them.
         try:
             actual = subprocess.run(
-                ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+                [resolve_git(), "-C", strip_windows_extended_prefix(cwd), "rev-parse", "--show-toplevel"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=True,
                 **flags,
             ).stdout.strip()
             if Path(client_path(actual)).resolve() in {Path(client_path(path)).resolve() for path in sources.values()}:
@@ -119,14 +121,15 @@ def in_project_scope(cwd: Path, project: Path, *, sources: dict[str, str] | None
         return inside
     try:
         current = cwd
+        git_exe = resolve_git()
         for _ in range(8):
             if git_common_directory(current).samefile(common):
                 return True
             # Registered submodules belong to the workspace too. An unrelated
             # nested clone has no superproject and must not inherit its hooks.
             parent = subprocess.run(
-                ["git", "-C", str(current), "rev-parse", "--show-superproject-working-tree"],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+                [git_exe, "-C", strip_windows_extended_prefix(current), "rev-parse", "--show-superproject-working-tree"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=True,
                 **flags,
             ).stdout.strip()
             if not parent:
@@ -260,7 +263,7 @@ def handle(client: str, payload: dict, store: AgentSessions | None = None, *,
         else os.environ.get("CLAUDE_ENV_FILE")
     )
     if client in {"claude", "wb", "workbuddy"} and normalized == "sessionstart" and env_file_path:
-        with Path(client_path(env_file_path)).open("a") as stream:
+        with Path(client_path(env_file_path)).open("a", encoding="utf-8", newline="\n") as stream:
             stream.write("\nexport MINDIE_CONTEXT_FILE=" + shlex.quote(context["context_file"]) + "\n")
     if normalized in {"sessionstart", "subagentstart", "userpromptsubmit"}:
         canonical = {"sessionstart": "SessionStart", "subagentstart": "SubagentStart", "userpromptsubmit": "UserPromptSubmit"}[normalized]

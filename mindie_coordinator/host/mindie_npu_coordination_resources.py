@@ -16,9 +16,9 @@ COMPILE_WORKER_MEMORY_MB = 2048
 def _cgroup_directories():
     """Resolve this process's v2 group and ancestors, including delegated mounts."""
     try:
-        membership = next(line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines()
+        membership = next(line[3:] for line in Path('/proc/self/cgroup').read_text(encoding='utf-8').splitlines()
                           if line.startswith('0::'))
-        mounts = Path('/proc/self/mountinfo').read_text().splitlines()
+        mounts = Path('/proc/self/mountinfo').read_text(encoding='utf-8').splitlines()
     except TimeoutError:
         raise
     except (FileNotFoundError, StopIteration):
@@ -43,7 +43,7 @@ def _cgroup_cpu_cores() -> int:
     cores = len(affinity(0)) if affinity else (os.cpu_count() or 1)
     for directory in _cgroup_directories():
         try:
-            quota, period = (directory / 'cpu.max').read_text().split()
+            quota, period = (directory / 'cpu.max').read_text(encoding='utf-8').split()
         except FileNotFoundError:
             continue
         if quota != 'max':
@@ -55,7 +55,7 @@ def _available_memory_mb() -> int | None:
     """Observed host headroom, bounded by every finite cgroup memory limit."""
     available = None
     try:
-        for line in Path('/proc/meminfo').read_text().splitlines():
+        for line in Path('/proc/meminfo').read_text(encoding='utf-8').splitlines():
             if line.startswith('MemAvailable:'):
                 available = int(line.split()[1]) // 1024
                 break
@@ -93,11 +93,11 @@ def _available_memory_mb() -> int | None:
                         libc.mach_port_deallocate(ctypes.c_uint32.in_dll(libc, 'mach_task_self_').value, host)
     for directory in _cgroup_directories():
         try:
-            maximum = (directory / 'memory.max').read_text().strip()
+            maximum = (directory / 'memory.max').read_text(encoding='utf-8').strip()
         except FileNotFoundError:
             continue
         if maximum != 'max':
-            current = int((directory / 'memory.current').read_text())
+            current = int((directory / 'memory.current').read_text(encoding='utf-8'))
             remaining = max(0, int(maximum) - current) // (1024 * 1024)
             if available is not None:
                 available = min(available, remaining)

@@ -199,7 +199,7 @@ def shared_base_key(preparation: dict, image_digest: str) -> str:
 
 def store_shared_native(root: Path, cache: Path) -> dict:
     """Automatically cache only the existing verified output bundle and metadata."""
-    manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text())
+    manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))
     manifest = _with_distribution_metadata(manifest)
     bundle = publish(root, cache / 'bundles', manifest)
     result = _index_native_bundle(cache, manifest, bundle)
@@ -257,7 +257,7 @@ def discard_shared_native(root: Path) -> None:
     marker = root / '.mindie-runtime/shared-native.json'
     if not marker.is_file():
         return
-    receipt = json.loads(marker.read_text())
+    receipt = json.loads(marker.read_text(encoding='utf-8'))
     for relative in receipt.get('copied', []):
         safe_destination(root, relative).unlink(missing_ok=True)
     metadata = safe_destination(root, '.mindie-runtime/metadata')
@@ -320,7 +320,7 @@ def verify_recipient_native_abi(profile: dict) -> None:
 
 def revalidate_shared_native(root: Path, cache: Path) -> dict:
     """Recheck the fixed selected bundle after pip or dependency-overlay repair."""
-    receipt = json.loads(safe_destination(root, '.mindie-runtime/shared-native.json').read_text())
+    receipt = json.loads(safe_destination(root, '.mindie-runtime/shared-native.json').read_text(encoding='utf-8'))
     name = receipt.get('bundle', '')
     if not re.fullmatch('[0-9a-f]{64}', name):
         raise ValueError('shared native receipt has no fixed bundle')
@@ -383,7 +383,7 @@ def restore_shared_native(root: Path, cache: Path, preparation: dict, image_dige
         if not index.is_file():
             index = cache / ('base-' + shared_base_key(preparation, image_digest) + '.json')
         if index.is_file():
-            pointer = json.loads(index.read_text())
+            pointer = json.loads(index.read_text(encoding='utf-8'))
         else:
             return {'status': 'miss', 'reason': 'no matching compiled outputs',
                     'cache_key': requested_content_key or '', 'linked_files': 0}
@@ -678,7 +678,7 @@ def prepare_native_view(root: Path, source_root: Path, donor: dict, args: dict) 
 REMOTE_NATIVE_VIEW_SUFFIX = r'''
 args = json.loads(sys.argv[1])
 source_root = Path(args['source_root'])
-donor = json.loads((source_root / '.mindie-runtime/ready-profile.json').read_text())
+donor = json.loads((source_root / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))
 print(json.dumps(prepare_native_view(Path(args['root']), source_root, donor, args)))
 '''
 
@@ -688,7 +688,7 @@ import subprocess, sys, sysconfig
 args = json.loads(sys.argv[1])
 root = Path(args['root'])
 source_root = Path(args['source_root'])
-manifest = json.loads((source_root / '.mindie-runtime/ready-profile.json').read_text())
+manifest = json.loads((source_root / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))
 if args['kind'] == 'native':
     result = copy_native_view(root, source_root, manifest, args['versions'])
     compatibility = native_compatibility_receipt(source_root, manifest)

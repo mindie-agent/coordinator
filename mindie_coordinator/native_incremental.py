@@ -177,9 +177,9 @@ def merge_kernel_outputs(root: Path, plan: dict) -> list[str]:
     replacements = {}
     affected_types = set()
     for name in ('binary_info_config.json', 'relocatable_kernel_info_config.json'):
-        before = json.loads(_child(config, name).read_text())
+        before = json.loads(_child(config, name).read_text(encoding='utf-8'))
         after_path = _child(generated, name)
-        after = json.loads(after_path.read_text()) if after_path.is_file() else {}
+        after = json.loads(after_path.read_text(encoding='utf-8')) if after_path.is_file() else {}
         if not isinstance(before, dict) or not isinstance(after, dict):
             raise ValueError('unsupported kernel config shape')
         selected = {key for key, row in before.items() if isinstance(row, dict) and any(
@@ -207,10 +207,10 @@ def merge_kernel_outputs(root: Path, plan: dict) -> list[str]:
     if not affected_types:
         raise ValueError('baseline has no matching operator dispatch')
     per_op = _child(generated, op + '.json')
-    if not per_op.is_file() or not json.loads(per_op.read_text()).get('binList'):
+    if not per_op.is_file() or not json.loads(per_op.read_text(encoding='utf-8')).get('binList'):
         raise ValueError('incremental build returned no per-operator config')
-    prior_variants = json.loads(_child(config, op + '.json').read_text())['binList']
-    variants = json.loads(per_op.read_text())['binList']
+    prior_variants = json.loads(_child(config, op + '.json').read_text(encoding='utf-8'))['binList']
+    variants = json.loads(per_op.read_text(encoding='utf-8'))['binList']
     if _dispatch_identity(prior_variants, {'binInfo'}) != _dispatch_identity(variants, {'binInfo'}):
         raise ValueError('incremental per-operator configuration changed variant coverage')
     for variant in variants:
@@ -233,7 +233,7 @@ def merge_kernel_outputs(root: Path, plan: dict) -> list[str]:
 
 def build_incremental_kernel(root: Path, *, compile_recipe=None) -> dict:
     plan_path = _child(root, '.mindie-runtime/native-incremental.json')
-    plan = json.loads(plan_path.read_text())
+    plan = json.loads(plan_path.read_text(encoding='utf-8'))
     _validate_operator(plan)
     source = _child(root, 'vllm-ascend/' + plan['source'])
     if hashlib.sha256(source.read_bytes()).hexdigest() != plan['source_sha256']:

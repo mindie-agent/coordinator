@@ -50,7 +50,9 @@ def test_materialize_reuses_only_a_verified_remote_snapshot(tmp_path, monkeypatc
 
 
 def test_remote_snapshot_probe_detects_tracked_and_untracked_changes(tmp_path, monkeypatch):
-    bash = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
+    from mindie_coordinator.local_exec import resolve_bash_or_none
+
+    bash = resolve_bash_or_none()
     if not bash or not Path(bash).is_file():
         pytest.skip("local Linux-peer fixture requires Bash")
     repo = tmp_path / "vllm"

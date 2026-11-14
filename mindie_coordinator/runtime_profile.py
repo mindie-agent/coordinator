@@ -726,7 +726,7 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
     cache.mkdir(parents=True, exist_ok=True)
     destination = cache / manifest["build_key"]
     if destination.exists():
-        existing = json.loads((destination / "manifest.json").read_text())
+        existing = json.loads((destination / "manifest.json").read_text(encoding='utf-8'))
         # A new successful smoke log can contain a new timestamp/PID without
         # changing native outputs. Keep the original verified evidence bundle.
         identity_fields = ("schema_version", "profile", "profile_key", "build_inputs", "build_key", "runtime_root", "files")
@@ -760,7 +760,7 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
             # replace it or mistake a failed/partial destination for success.
             if not destination.is_dir():
                 raise
-            existing = json.loads((destination / 'manifest.json').read_text())
+            existing = json.loads((destination / 'manifest.json').read_text(encoding='utf-8'))
             identity_fields = ('schema_version', 'profile', 'profile_key', 'build_inputs', 'build_key', 'runtime_root', 'files')
             if any(existing.get(key) != manifest.get(key) for key in identity_fields):
                 raise ValueError('concurrent publication produced different artifacts')
@@ -772,7 +772,7 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
 
 def restore(root: Path, bundle: Path, expected_build_key: str) -> None:
     """Preparation-only restoration, after owner proves all its workers stopped."""
-    manifest = json.loads((bundle / "manifest.json").read_text())
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding='utf-8'))
     if manifest["build_key"] != expected_build_key or str(root.resolve()) != manifest["runtime_root"]:
         raise ValueError("cache miss: build identity or installation path differs")
     verify(bundle, manifest, check_environment=False)

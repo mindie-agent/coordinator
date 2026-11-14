@@ -44,12 +44,20 @@ class CodeIdentityError(RuntimeError):
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
+    try:
+        git_exe = resolve_git()
+    except FileNotFoundError as exc:
+        if check:
+            raise CodeIdentityError(str(exc)) from exc
+        return subprocess.CompletedProcess(["git", "-C", str(repo), *args], 127, "", str(exc))
     result = subprocess.run(
-        ["git", "-C", str(repo), *args],
+        [git_exe, "-C", strip_windows_extended_prefix(repo), *args],
         stdin=subprocess.DEVNULL, capture_output=True,
-        text=True, encoding="utf-8",
+        text=True, encoding="utf-8", errors="replace",
         check=False, timeout=30,
-        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+        **no_window_kwargs(),
     )
     if check and result.returncode != 0:
         message = (result.stderr or result.stdout).strip()

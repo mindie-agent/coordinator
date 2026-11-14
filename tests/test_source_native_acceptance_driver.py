@@ -85,8 +85,11 @@ def test_source_deployment_proof_reads_actual_git_heads_and_files(tmp_path):
         subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
     environment = {**os.environ, "MINDIE_PYTHON": sys.executable,
                    "MINDIE_RUN_ID": "debug-source-deploy"}
-    bash = (str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe")
-            if os.name == "nt" else "bash")
+    from mindie_coordinator.local_exec import resolve_bash_or_none
+
+    bash = resolve_bash_or_none()
+    if bash is None:
+        pytest.skip("local Bash required for source native acceptance driver test")
     result = subprocess.run([bash, "-c", driver._source_command(None)], cwd=root, env=environment,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

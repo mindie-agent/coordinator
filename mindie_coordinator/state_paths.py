@@ -33,15 +33,19 @@ def shared_workspace_root(repo_root: Path | None = None) -> Path:
     """
     repo_root = Path(client_path(repo_root or Path.cwd())).expanduser().resolve()
     try:
+        from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
         result = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"],
+            [resolve_git(), "-C", strip_windows_extended_prefix(repo_root), "rev-parse", "--git-common-dir"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, encoding="utf-8", timeout=5, check=False,
-            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+            **no_window_kwargs(),
         )
+    except subprocess.TimeoutExpired:
+        return repo_root
     except TimeoutError:
         raise
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return repo_root
     if result.returncode != 0 or not result.stdout.strip():
         return repo_root

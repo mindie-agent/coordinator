@@ -41,7 +41,7 @@ class NativeViewPublication:
     def _publish_program(self) -> str:
         return (self.modules + '\n_native_args = ' + repr(self.request) + '\n'
                 + "_native_source = Path(_native_args['source_root'])\n"
-                + "_native_donor = json.loads((_native_source / '.mindie-runtime/ready-profile.json').read_text())\n"
+                + "_native_donor = json.loads((_native_source / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))\n"
                 + "_native_reply = prepare_native_view(Path(_native_args['root']), _native_source, _native_donor, _native_args)\n")
 
     def _shell(self, program: str) -> str:

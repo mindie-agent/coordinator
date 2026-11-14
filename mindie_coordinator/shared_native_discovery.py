@@ -38,7 +38,7 @@ result=[]
 for pattern in ('tasks/*/*/*/.mindie-runtime/ready-profile.json','executions/*/*/*/.mindie-runtime/ready-profile.json'):
     for marker in base.glob(pattern):
         try:
-            manifest=json.loads(marker.read_text())
+            manifest=json.loads(marker.read_text(encoding='utf-8'))
             profile=manifest['profile']
             previous=manifest['preparation']
             requested=args['preparation']

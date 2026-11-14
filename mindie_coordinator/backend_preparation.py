@@ -254,8 +254,8 @@ class BackendPreparationMixin:
             previous = reuse['runtime']
             request = {'kind': reuse['kind'], 'root': root, 'source_root': previous['endpoint']['root'],
                        'python': python, 'versions': versions}
-            module = _package_file('runtime_profile.py').read_text()
-            cache_source = _package_file('preparation_cache.py').read_text()
+            module = _package_file('runtime_profile.py').read_text(encoding='utf-8')
+            cache_source = _package_file('preparation_cache.py').read_text(encoding='utf-8')
             previous_env = launch_preamble(previous['attestation']['profile'], python=previous['python'])
             script = (previous_env + '\n' + shlex.quote(previous['python']) + ' - ' + shlex.quote(json.dumps(request))
                       + " <<'MINDIE_REUSE'\n" + module + '\nexec(' + repr(cache_source) + ', globals())\n' + REMOTE_REUSE_SUFFIX + '\nMINDIE_REUSE\n')
@@ -406,11 +406,11 @@ class BackendPreparationMixin:
                 request['candidate'] = candidate
             if action == 'restore':
                 request['image_digest'] = self._preparation_container(spec)['Image']
-            module = _package_file('runtime_profile.py').read_text()
-            build_source = _package_file('build_inputs.py').read_text()
-            incremental = _package_file('native_incremental.py').read_text()
-            pool = _package_file('native_cache_pool.py').read_text()
-            cache = _package_file('preparation_cache.py').read_text()
+            module = _package_file('runtime_profile.py').read_text(encoding='utf-8')
+            build_source = _package_file('build_inputs.py').read_text(encoding='utf-8')
+            incremental = _package_file('native_incremental.py').read_text(encoding='utf-8')
+            pool = _package_file('native_cache_pool.py').read_text(encoding='utf-8')
+            cache = _package_file('preparation_cache.py').read_text(encoding='utf-8')
             preamble = '\n'.join(['set -euo pipefail', 'export MINDIE_RUNTIME_ROOT=' + shlex.quote(root),
                                    *PYTHON_METADATA_PREAMBLE, *task_python_exports(python),
                                    'export PYTHONPATH=' + shlex.quote(':'.join([root + '/.mindie-runtime/metadata',
@@ -486,9 +486,9 @@ class BackendPreparationMixin:
                    'build_inputs': {row['relpath']: row['build_inputs'] for row in snapshot['records']
                                     if row['relpath'] in ('vllm', 'vllm-ascend')},
                    'donor_manifest_digest': digest(donor)}
-        module = _package_file('runtime_profile.py').read_text()
-        build_source = _package_file('build_inputs.py').read_text()
-        cache_source = _package_file('preparation_cache.py').read_text()
+        module = _package_file('runtime_profile.py').read_text(encoding='utf-8')
+        build_source = _package_file('build_inputs.py').read_text(encoding='utf-8')
+        cache_source = _package_file('preparation_cache.py').read_text(encoding='utf-8')
         script = (launch_preamble(donor['profile'], python=previous['python']) + '\n'
                   + shlex.quote(previous['python']) + ' - ' + shlex.quote(json.dumps(request))
                   + " <<'MINDIE_NATIVE_VIEW'\n" + module + '\nexec(' + repr(build_source)
@@ -543,8 +543,8 @@ class BackendPreparationMixin:
         if expected and any(info[key] != expected[key] for key in ('Id', 'Image')):
             raise ValueError('preparation container generation changed before finalization')
         recipe = (environment or {}).get("recipe") or (environment or {}).get("image") or spec.get("recipe")
-        module = _package_file("runtime_profile.py").read_text()
-        build_source = _package_file("build_inputs.py").read_text()
+        module = _package_file("runtime_profile.py").read_text(encoding='utf-8')
+        build_source = _package_file("build_inputs.py").read_text(encoding='utf-8')
         request = json.dumps({
             "root": root,
             "recipe": recipe,
@@ -568,8 +568,8 @@ class BackendPreparationMixin:
         suffix = REMOTE_CAPTURE_SUFFIX if native_recipe else REMOTE_COMMAND_CAPTURE_SUFFIX
         runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n"
         if publish_native_cache:
-            runner += 'exec(' + repr(_package_file('native_cache_pool.py').read_text()) + ', globals())\n'
-            runner += 'exec(' + repr(_package_file('preparation_cache.py').read_text()) + ', globals())\n'
+            runner += 'exec(' + repr(_package_file('native_cache_pool.py').read_text(encoding='utf-8')) + ', globals())\n'
+            runner += 'exec(' + repr(_package_file('preparation_cache.py').read_text(encoding='utf-8')) + ', globals())\n'
         runner += suffix
         preamble_lines = ["set -euo pipefail"]
         if native_recipe:
