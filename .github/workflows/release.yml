@@ -15,7 +15,7 @@ jobs:
     secrets:
       MINDIE_RELEASE_DEPLOY_KEY: ${{ secrets.MINDIE_RELEASE_DEPLOY_KEY }}
     with:
-      release-notes-path: docs/releases/coordinator-0.7.8.md
+      release-notes-path: docs/releases/coordinator-0.7.9.md
       setup-command: |
         uv venv --python 3.13 && uv pip install -e ".[test]"
       test-command: |
