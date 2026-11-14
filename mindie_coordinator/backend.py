@@ -114,7 +114,7 @@ class RemoteBackend(BackendPreparationMixin):
                 after = time.time()
                 if clock["outcome"] != "success":
                     raise RuntimeError("remote clock sample unavailable")
-                remote_now = float(Path(clock["refs"]["stdout"]).read_text().strip())
+                remote_now = float(Path(clock["refs"]["stdout"]).read_text(encoding='utf-8').strip())
                 offset_min, offset_max = before - remote_now, after - remote_now
                 evidence.update(NpuTopObservationClient().telemetry_window(
                     evidence["host"], devices, start + offset_min, end + offset_max))
@@ -197,7 +197,7 @@ class RemoteBackend(BackendPreparationMixin):
             if type(code) is int and code > 0:
                 raise RemoteCommandError(code, message)
             raise RuntimeError(message)
-        return Path(result["refs"]["stdout"]).read_text()
+        return Path(result["refs"]["stdout"]).read_text(encoding='utf-8')
 
     def _inspect_container(self, runtime):
         host = {**runtime["host_endpoint"], "root": "/", "cwd": "/"}
@@ -277,17 +277,17 @@ class RemoteBackend(BackendPreparationMixin):
 
     def _inspect_manifest(self, runtime, *, snapshots=None, expected_digest=None, prepared_view=False):
         python = runtime.get("python") or "python3"
-        module = _package_file("runtime_profile.py").read_text()
+        module = _package_file("runtime_profile.py").read_text(encoding='utf-8')
         request = json.dumps({"root": runtime["endpoint"].get("cwd") or runtime["endpoint"]["root"],
                               "snapshots": snapshots or {}, "prepared_view": prepared_view,
                               **({"expected_manifest_digest": expected_digest} if expected_digest is not None else {})})
-        build_source = _package_file("build_inputs.py").read_text()
+        build_source = _package_file("build_inputs.py").read_text(encoding='utf-8')
         runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n" + '''
 import subprocess
 import sys
 args = json.loads(sys.argv[1])
 root = Path(args["root"])
-manifest = json.loads((root / ".mindie-runtime/ready-profile.json").read_text())
+manifest = json.loads((root / ".mindie-runtime/ready-profile.json").read_text(encoding='utf-8'))
 if args.get('prepared_view') and 'expected_manifest_digest' in args and digest(manifest) != args['expected_manifest_digest']:
     raise ValueError('runtime changed before launch')
 if args.get('prepared_view'):
@@ -328,13 +328,13 @@ else:
         for record in records:
             validate_relative_posix_path(record['relpath'], label='artifact donor source')
         request = {'root': runtime['endpoint']['root'], 'records': records, 'include_manifest': include_manifest}
-        module = _package_file('runtime_profile.py').read_text()
-        build_source = _package_file('build_inputs.py').read_text()
+        module = _package_file('runtime_profile.py').read_text(encoding='utf-8')
+        build_source = _package_file('build_inputs.py').read_text(encoding='utf-8')
         runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n" + r'''
 import subprocess, sys
 args = json.loads(sys.argv[1])
 root = Path(args['root'])
-manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text())
+manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))
 verify(root, manifest)
 if _build_namespace['runtime_build_inputs'](root, manifest['profile'], manifest['profile_key']) != manifest['build_inputs']:
     print(json.dumps({'qualified': False, 'reason': 'installed native artifacts do not match current source inputs'}))

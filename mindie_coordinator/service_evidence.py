@@ -370,7 +370,7 @@ class ServiceEvidenceMixin:
         get_recorder("mindie-coordinator").event("ERROR", "daemon.error", message=message)
         path = self.state_dir / "daemon.log"
         try:
-            with path.open("a") as stream:
+            with path.open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(datetime.now(timezone.utc).isoformat() + " " + message[:500] + "\n")
         except TimeoutError:
             raise

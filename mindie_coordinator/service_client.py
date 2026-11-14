@@ -305,8 +305,10 @@ def _ensure_daemon_locked(state_dir: Path, client: CoordinatorClient) -> Coordin
             time.sleep(0.05)
         if service_module.socket_path(state_dir).exists():
             raise RuntimeError("daemon shutdown is still pending")
+    from mindie_coordinator.local_exec import utf8_python_env
+
     log_path = Path(state_dir) / "daemon.log"
-    environment = dict(os.environ)
+    environment = utf8_python_env()
     environment.setdefault("REMOTE_DEV_STATE_DIR", str(Path(state_dir).resolve().parent / "remote-dev-state"))
     options = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
                if os.name == "nt" else {"start_new_session": True})

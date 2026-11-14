@@ -787,14 +787,9 @@ class ServiceGangMixin:
             entry = (assignment.get("roles") or [{}] * len(jobs))
             if index < len(entry):
                 entry[index].update({
-                    "name": role["name"],
-                    "runtime_id": role["runtime_id"],
-                    "host": role["binding"]["endpoint"]["host"],
-                    "root": role["binding"]["endpoint"]["cwd"],
-                    "rank": index,
-                    "devices": devices,
+                    "name": role["name"], "runtime_id": role["runtime_id"],
+                    "host": role["binding"]["endpoint"]["host"], "root": role["binding"]["endpoint"]["cwd"],
+                    "rank": index, "devices": devices, "service_port": job.get("service_port"), "state": job["state"],
                     **({"allow_external_busy": True} if role.get("allow_external_busy") else {}),
-                    "service_port": job.get("service_port"),
-                    "state": job["state"],
                 })
         row["assignment"] = assignment

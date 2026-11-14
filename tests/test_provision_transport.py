@@ -28,7 +28,9 @@ def _local_bash(_endpoint, script, *, timeout_ms=None):
     assert script is None
     # Resolve PATH ourselves: CreateProcess searches System32 before PATH and
     # can otherwise select its unconfigured WSL alias instead of Git Bash.
-    bash = shutil.which("bash") or "bash"
+    from mindie_coordinator.local_exec import resolve_bash_or_none
+
+    bash = resolve_bash_or_none() or "bash"
     return [bash, "-s"]
 
 
@@ -119,10 +121,15 @@ if __name__ == "__main__":
 
 
 def test_cached_probe_executes_literal_arguments_and_preserves_channels(monkeypatch):
+    from mindie_coordinator.local_exec import resolve_bash_or_none
+
+    bash = resolve_bash_or_none()
+    if bash is None:
+        pytest.skip("local remote-shell fixture requires Bash")
     calls = []
     def rpc(endpoint, script, *, timeout_ms):
         calls.append((endpoint, timeout_ms))
-        done = subprocess.run([shutil.which('bash'), '-s'], input=script,
+        done = subprocess.run([bash, '-s'], input=script,
                               capture_output=True, text=True, encoding='utf-8', timeout=5)
         return SimpleNamespace(returncode=done.returncode, stdout=done.stdout, stderr=done.stderr,
                                timed_out=False, cancelled=False)

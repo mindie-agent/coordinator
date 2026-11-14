@@ -145,12 +145,14 @@ if [ -n "${MINDIE_PYTHON:-}" ] && [ -x "$MINDIE_PYTHON" ] && [ "$(dirname "$MIND
 else
   _old_ifs="$IFS"
   IFS=":"
+  case "$-" in *f*) _had_f=1 ;; *) _had_f=0; set -f ;; esac
   for _dir in $PATH; do
     if [ -n "$_dir" ] && [ "$_dir" != "$_slot_bin" ] && [ -x "$_dir/python3" ]; then
       _real_py="$_dir/python3"
       break
     fi
   done
+  [ "$_had_f" -eq 0 ] && set +f
   IFS="$_old_ifs"
 fi
 if [ -z "$_real_py" ]; then

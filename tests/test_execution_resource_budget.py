@@ -173,8 +173,11 @@ def test_captured_build_environment_cannot_override_granted_or_smaller_jobs(tmp_
         container_identity='test-container', step='check-build-compat')
     script += '\nprintf "%s,%s,%s\\n" "$MAX_JOBS" "$MINDIE_BUILD_JOBS" "$CMAKE_BUILD_PARALLEL_LEVEL"\n'
     env = compile_environment({'status': 'granted', 'jobs_per_slot': 8}, {'MAX_JOBS': '2'})
-    bash = (str(Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe')
-            if os.name == 'nt' else 'bash')
+    from mindie_coordinator.local_exec import resolve_bash_or_none
+
+    bash = resolve_bash_or_none()
+    if bash is None:
+        pytest.skip('local Bash required for runtime_install_step_script check')
     result = subprocess.run([bash, '-c', script], text=True, capture_output=True,
                             env={**os.environ, **env}, timeout=5)
     assert result.returncode == 0, result.stderr

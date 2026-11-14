@@ -436,11 +436,13 @@ class ProfileTests(unittest.TestCase):
                     verify(root, manifest)
             with self.assertRaises(ValueError):
                 capture(root, profile, inputs, {"kernels.so": "library"}, {})
+            from mindie_coordinator.local_exec import resolve_bash_or_none
             from mindie_coordinator.runtime_profile import launch_preamble
             import os, subprocess
             profile["launch_env"]["PYTHONPATH"] = "/scoped/source"
             script = "export PYTHONPATH=/base/acl:/base/native-compat\n" + launch_preamble(profile) + '\nprintf "%s" "$PYTHONPATH"'
-            result = subprocess.run([shutil.which("bash") or "bash", "-s"], input=script.encode("utf-8"), check=True,
+            bash = resolve_bash_or_none() or "bash"
+            result = subprocess.run([bash, "-s"], input=script.encode("utf-8"), check=True,
                                     capture_output=True,
                                     env={**os.environ, "PYTHONPATH": "/base/acl:/base/native-compat"}).stdout.decode("utf-8")
             self.assertEqual(result, "/scoped/source:/base/acl:/base/native-compat")

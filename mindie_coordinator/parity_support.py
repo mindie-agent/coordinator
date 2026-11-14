@@ -99,16 +99,18 @@ def run(
     stdin: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
+        from mindie_coordinator.local_exec import no_window_kwargs
+
         result = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
             env=env,
             check=False,
             capture_output=capture_output,
-            text=True, encoding="utf-8",
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
             stdin=stdin,
-            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+            **no_window_kwargs(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
@@ -134,8 +136,10 @@ def git(
     check: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    from mindie_coordinator.local_exec import resolve_git, strip_windows_extended_prefix
+
     options = ['-c', 'core.longpaths=true'] if os.name == 'nt' else []
-    return run(['git', *options, '-C', str(repo), *args], env=env, check=check, timeout=timeout,
+    return run([resolve_git(env=env), *options, '-C', strip_windows_extended_prefix(repo), *args], env=env, check=check, timeout=timeout,
                stdin=subprocess.DEVNULL)
 
 
@@ -328,7 +332,7 @@ def _materialize_fixed(request):
     @contextlib.contextmanager
     def lock(path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'a') as handle:
+        with open(path, 'a', encoding='utf-8') as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             yield
 
@@ -374,7 +378,7 @@ def _materialize_fixed(request):
                 refs = ('start\nupdate refs/mindie/snapshots/' + row['commit'] + ' ' + row['commit']
                         + '\nupdate ' + request['carrier_ref'] + ' ' + pack['carrier'] + '\nprepare\ncommit\n')
                 updated = subprocess.run(['git', '-C', str(mirror), 'update-ref', '--stdin'],
-                                         input=refs, text=True, capture_output=True, timeout=30)
+                                         input=refs, text=True, encoding='utf-8', errors='replace', capture_output=True, timeout=30)
                 if updated.returncode:
                     raise ValueError('fixed source refs rejected: ' + updated.stderr)
         tree = git(mirror, 'rev-parse', '--verify', row['commit'] + '^{tree}', check=False)

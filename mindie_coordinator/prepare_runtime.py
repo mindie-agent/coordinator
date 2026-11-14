@@ -92,13 +92,13 @@ if not compiler:
     # Use the actual custom-op build selection when no compiler was exported.
     cache = root / "vllm-ascend/csrc/build/CMakeCache.txt"
     if cache.is_file():
-        for line in cache.read_text().splitlines():
+        for line in cache.read_text(encoding='utf-8').splitlines():
             if line.startswith("CMAKE_CXX_COMPILER:FILEPATH="):
                 compiler = line.partition("=")[2].strip()
                 break
 toolchain = build_toolchain_from_logs(root) if not soc or not compiler else {}
 reuse_file = root / '.mindie-runtime/reuse.json'
-reuse = json.loads(reuse_file.read_text()) if reuse_file.is_file() else {}
+reuse = json.loads(reuse_file.read_text(encoding='utf-8')) if reuse_file.is_file() else {}
 soc = soc or toolchain.get("soc")
 compiler = compiler or "; ".join(toolchain.get("compilers") or [])
 soc = soc or reuse.get('soc')
@@ -155,12 +155,12 @@ smoke_started = time.monotonic()
 if args.get('managed_finalize'):
     print('finalize-runtime: native smoke/proof', file=sys.stderr, flush=True)
 if reuse.get('kind') == 'native' and reuse.get('compatibility_evidence') and not upgraded_loader:
-    compatibility = json.loads(checked_file(root, reuse['compatibility_evidence']).read_text())
+    compatibility = json.loads(checked_file(root, reuse['compatibility_evidence']).read_text(encoding='utf-8'))
     smoke = {'kind': 'native-compatibility-reuse', 'python_import_executed': False,
              'profile_key': profile_key(profile), 'build_inputs': inputs,
              'compatibility': compatibility, 'source_mapping': native_source_mapping(root)}
 else:
-    compatibility = (json.loads(checked_file(root, reuse['import_evidence']).read_text())
+    compatibility = (json.loads(checked_file(root, reuse['import_evidence']).read_text(encoding='utf-8'))
                      if reuse.get('import_evidence') else None)
     candidate = {'runtime_root': str(root), 'profile': profile, 'build_inputs': inputs,
                  'files': {name: {'sha256': file_digest(checked_file(root, name)), 'role': role}
@@ -341,11 +341,11 @@ def main():
     if args.action == "attest":
         if args.spec is None:
             parser.error("attest requires --spec")
-        result = attest(root, json.loads(args.spec.read_text()))
+        result = attest(root, json.loads(args.spec.read_text(encoding='utf-8')))
     elif args.action == "publish":
         if args.cache is None:
             parser.error("publish requires --cache")
-        manifest = json.loads((root / ".mindie-runtime/ready-profile.json").read_text())
+        manifest = json.loads((root / ".mindie-runtime/ready-profile.json").read_text(encoding='utf-8'))
         result = {"bundle": str(publish(root, args.cache, manifest)), "build_key": manifest["build_key"]}
     else:
         if args.cache is None or not args.build_key:
@@ -353,7 +353,7 @@ def main():
         if len(args.build_key) != 64 or any(c not in "0123456789abcdef" for c in args.build_key):
             parser.error("build key must be a SHA256 digest")
         bundle = args.cache / args.build_key
-        manifest = json.loads((bundle / "manifest.json").read_text())
+        manifest = json.loads((bundle / "manifest.json").read_text(encoding='utf-8'))
         if runtime_build_inputs(root, manifest["profile"], manifest["profile_key"]) != manifest["build_inputs"]:
             raise ValueError("cache miss: current source inputs differ from the requested bundle")
         restore(root, bundle, args.build_key)

@@ -232,7 +232,9 @@ def test_windows_script_bom_and_crlf_executes_as_shell_text(owned, tmp_path):
     assert spec["script"]["sha256"] == hashlib.sha256(raw).hexdigest()
     assert spec["script"]["bytes"] == len(raw)
     assert spec["script"]["command_sha256"] == hashlib.sha256(normalized.encode()).hexdigest()
-    bash = shutil.which("bash")
+    from mindie_coordinator.local_exec import resolve_bash_or_none
+
+    bash = resolve_bash_or_none()
     if bash is None:
         pytest.skip("Bash is not available for the plain-shell execution check")
     result = subprocess.run([bash, "-c", spec["command"]], capture_output=True, text=True, encoding="utf-8", timeout=15)

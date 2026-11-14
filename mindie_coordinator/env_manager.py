@@ -735,15 +735,12 @@ def handle_lease(
         stored = leases.get(f"{alias}:{lease_id}") or leases.get(lease_id) or {}
         fence_token = args.get("fence_token") if args.get("fence_token") is not None else stored.get("fence_token")
         if fence_token is None:
-            snap = host_queue.request(host_spec, {"action": "status", "task_id": lease_id, "no_probe": True, **remote_sd})
-            tasks = snap.get("tasks") or []
-            if tasks:
-                fence_token = tasks[0].get("fence_token")
+            tasks = host_queue.request(host_spec, {"action": "status", "task_id": lease_id, "no_probe": True, **remote_sd}).get("tasks") or []
+            fence_token = tasks[0].get("fence_token") if tasks else None
         if fence_token is None:
             raise caller_error(f"no fence_token found for lease {lease_id!r}; pass `fence_token` or acquire the lease first")
         response = host_queue.request(
-            host_spec,
-            {"action": "heartbeat", "task_id": lease_id, "fence_token": int(fence_token), "heartbeat_ttl_seconds": ttl_seconds, **remote_sd},
+            host_spec, {"action": "heartbeat", "task_id": lease_id, "fence_token": int(fence_token), "heartbeat_ttl_seconds": ttl_seconds, **remote_sd}
         )
         task = response.get("task") or {}
         raw_state = str(task.get("state") or response.get("status") or "active")
@@ -765,23 +762,17 @@ def handle_lease(
         stored = leases.get(f"{alias}:{lease_id}") or leases.get(lease_id) or {}
         fence_token = args.get("fence_token") if args.get("fence_token") is not None else stored.get("fence_token")
         if fence_token is None:
-            snap = host_queue.request(host_spec, {"action": "status", "task_id": lease_id, "no_probe": True, **remote_sd})
-            tasks = snap.get("tasks") or []
-            if tasks:
-                fence_token = tasks[0].get("fence_token")
+            tasks = host_queue.request(host_spec, {"action": "status", "task_id": lease_id, "no_probe": True, **remote_sd}).get("tasks") or []
+            fence_token = tasks[0].get("fence_token") if tasks else None
         if fence_token is not None:
             response = host_queue.request(
                 host_spec,
-                {
-                    "action": "release", "task_id": lease_id, "fence_token": int(fence_token),
-                    "free_samples": int(args.get("free_samples") or 1),
-                    "interval_seconds": float(args.get("interval_seconds") or 0.0), **remote_sd,
-                },
+                {"action": "release", "task_id": lease_id, "fence_token": int(fence_token), "free_samples": int(args.get("free_samples") or 1), "interval_seconds": float(args.get("interval_seconds") or 0.0), **remote_sd},
             )
         else:
             response = host_queue.request(host_spec, {"action": "cancel", "task_id": lease_id, **remote_sd})
-        leases.pop(f"{alias}:{lease_id}", None)
-        leases.pop(lease_id, None)
+        for key in (f"{alias}:{lease_id}", lease_id):
+            leases.pop(key, None)
         _save_leases(base_dir, leases)
         task = response.get("task") or {}
         raw_state = str(task.get("state") or response.get("status") or "released")
@@ -795,7 +786,6 @@ def handle_lease(
 
 
 __all__ = [
-    "handle_container", "handle_hosts", "handle_lease", "handle_probe",
-    "probe_mindie_sd_runtime_readiness", "probe_xllm_runtime_readiness",
-    "validate_mindie_sd_runtime_env", "validate_vllm_ascend_runtime_env", "validate_xllm_runtime_env",
+    "handle_container", "handle_hosts", "handle_lease", "handle_probe", "probe_mindie_sd_runtime_readiness",
+    "probe_xllm_runtime_readiness", "validate_mindie_sd_runtime_env", "validate_vllm_ascend_runtime_env", "validate_xllm_runtime_env",
 ]

@@ -124,7 +124,7 @@ def prepared_supervisor_host_pid(prepared: dict, process_guard: dict | None) -> 
         raise CoordinationError(f"docker inspect failed for {container_name}: {exc}") from exc
     if info["Id"] != container_id:
         raise CoordinationError("container identity changed before activation")
-    if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != receipt["boot_id"]:
+    if Path("/proc/sys/kernel/random/boot_id").read_text(encoding='utf-8').strip() != receipt["boot_id"]:
         raise CoordinationError("host boot identity changed")
     # Use the inspected immutable ID if the name is reassigned during lookup.
     try:
@@ -143,8 +143,8 @@ def prepared_supervisor_host_pid(prepared: dict, process_guard: dict | None) -> 
         pid = int(row.strip())
         try:
             process = Path(f"/proc/{pid}")
-            fields = (process / "stat").read_text().rsplit(") ", 1)[1].split()
-            status = (process / "status").read_text().splitlines()
+            fields = (process / "stat").read_text(encoding='utf-8').rsplit(") ", 1)[1].split()
+            status = (process / "status").read_text(encoding='utf-8').splitlines()
             namespace = next(line.split()[1:] for line in status if line.startswith("NSpid:"))
             if (int(namespace[-1]) == receipt["pid"] and fields[19] == receipt["start_ticks"]
                     and fields[0] != "Z" and marker in (process / "environ").read_bytes().split(b"\0")):
@@ -170,7 +170,7 @@ def process_guard_busy(value: str | dict | None, *, completion_confirmed: bool =
         guard = json.loads(value) if isinstance(value, str) else value
         if not re.fullmatch(r"[0-9a-f]{32}", guard["marker"]):
             return True
-        if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != guard["boot_id"]:
+        if Path("/proc/sys/kernel/random/boot_id").read_text(encoding='utf-8').strip() != guard["boot_id"]:
             return True
         marker = (JOB_TOKEN_ENV + "=" + guard["marker"]).encode()
         unknown = False
@@ -178,7 +178,7 @@ def process_guard_busy(value: str | dict | None, *, completion_confirmed: bool =
             if not process.name.isdigit():
                 continue
             try:
-                state = (process / "stat").read_text().rsplit(") ", 1)[1].split()[0]
+                state = (process / "stat").read_text(encoding='utf-8').rsplit(") ", 1)[1].split()[0]
                 if state != "Z" and marker in (process / "environ").read_bytes().split(b"\0"):
                     return True
             except (FileNotFoundError, ProcessLookupError):

@@ -177,7 +177,7 @@ def restore_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
     entry = cache / key
     if not entry.is_dir():
         return False
-    manifest = json.loads((entry / KERNEL_CONTENT_MANIFEST).read_text())
+    manifest = json.loads((entry / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
     if (manifest.get('schema_version') != KERNEL_CONTENT_SCHEMA or manifest.get('cache_key') != key
             or manifest.get('operator') != plan['operator'] or manifest.get('unit') != plan['unit']
             or manifest.get('native_to') != plan.get('native_to')):
@@ -228,7 +228,7 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
 
     if destination.exists():
         try:
-            existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text())
+            existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
             observed_files = _kernel_cache_files(destination)
         except TimeoutError:
             raise
@@ -255,7 +255,7 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
         except OSError as exc:
             if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
                 raise
-            check_existing(json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text()),
+            check_existing(json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8')),
                            _kernel_cache_files(destination))
             return {'status': 'present', 'cache_key': key}
     finally:
@@ -441,7 +441,7 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
                 raise subprocess.CalledProcessError(result.returncode, result.args)
             raise RecipeUnavailable('upstream parameter generator rejected installed metadata')
         scripts = sorted(generated.glob('*.sh'))
-        prior = json.loads(_recipe_child(root, plan['kernel_root'] + '/config/' + plan['unit'] + '/' + plan['operator'] + '.json').read_text())
+        prior = json.loads(_recipe_child(root, plan['kernel_root'] + '/config/' + plan['unit'] + '/' + plan['operator'] + '.json').read_text(encoding='utf-8'))
         generated_recipes = [read_recipe(script) for script in scripts]
         if (not scripts or any(row is None for row in generated_recipes)
                 or sorted(generated_recipes, key=lambda row: row['name']) != sorted(variants, key=lambda row: row.get('name', ''))):
@@ -487,7 +487,7 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
             subprocess.run(['bash', str(script), str(dynamic_path), str(output)],
                 cwd=generated, env={**environment, 'MINDIE_KERNEL_SOURCE_PROOF': str(proof)}, check=True,
                 timeout=600, stdin=subprocess.DEVNULL)
-            if json.loads(proof.read_text()) != {'source': str(staged_source.resolve()), 'sha256': plan['source_sha256']}:
+            if json.loads(proof.read_text(encoding='utf-8')) != {'source': str(staged_source.resolve()), 'sha256': plan['source_sha256']}:
                 raise ValueError('variant has no successful fixed CPP compiler proof')
         started = True
         # Wait for every owned compiler even when a sibling fails. The outer

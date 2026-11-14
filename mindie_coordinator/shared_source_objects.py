@@ -38,7 +38,7 @@ def copy_fixed_objects(source, destination, row):
 
     def git(path, *args, check=True):
         result = subprocess.run(['git', '-C', str(path), *args], capture_output=True,
-                                text=True, timeout=60)
+                                text=True, encoding='utf-8', errors='replace', timeout=60, stdin=subprocess.DEVNULL)
         if result.returncode < 0:
             raise subprocess.SubprocessError('fixed object copy interrupted: ' + result.stderr.strip())
         if check and result.returncode:
@@ -54,7 +54,7 @@ def copy_fixed_objects(source, destination, row):
     if tree.stdout.strip() != row['tree']:
         raise ValueError('fixed object source has the wrong tree')
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with open(destination.with_suffix('.init.lock'), 'a') as handle:
+    with open(destination.with_suffix('.init.lock'), 'a', encoding='utf-8') as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         if not destination.exists():
             git(destination.parent, 'init', '--bare', str(destination))

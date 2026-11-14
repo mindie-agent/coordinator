@@ -543,15 +543,9 @@ import importlib.metadata
 import json
 import os
 import sys
-import traceback
 
-PROGRESS = "__PROGRESS__"
 python_path = sys.argv[1]
 sourced_text = sys.argv[2]
-
-def progress(phase: str, message: str) -> None:
-    sys.stderr.write(PROGRESS + json.dumps({"phase": phase, "status": "running", "message": message}, ensure_ascii=False) + "\n")
-    sys.stderr.flush()
 
 def mindiesd_metadata_version():
     if __IMAGE_FAMILY__ not in ('mindie', 'mindiesd'):
@@ -559,7 +553,6 @@ def mindiesd_metadata_version():
     try:
         return importlib.metadata.version('mindiesd')
     except importlib.metadata.PackageNotFoundError:
-        # Legacy MindIE images can contain SD or only the generic runtime.
         if __IMAGE_FAMILY__ == 'mindiesd':
             raise
         return None
@@ -576,20 +569,30 @@ result = {
     "ld_library_path": os.environ.get("LD_LIBRARY_PATH", ""),
     "sourced_scripts": [line for line in sourced_text.splitlines() if line],
 }
-if not __DEVICE_TEST__:
-    # Provisioning has no device grant. Verify the interpreter's package
-    # metadata only; native imports and business execution have later owners.
-    try:
-        result.update(success=True, device_test=False,
-                      torch_version=importlib.metadata.version('torch'),
-                      torch_npu_version=importlib.metadata.version('torch-npu'))
-        version = mindiesd_metadata_version()
-        if version is not None:
-            result['mindiesd_version'] = version
-    except importlib.metadata.PackageNotFoundError as exc:
-        result.update(success=False, device_test=False, error=str(exc))
-    print("__SENTINEL__" + json.dumps(result, ensure_ascii=False))
-    raise SystemExit(0 if result["success"] else 3)
+__SMOKE_BODY__
+print("__SENTINEL__" + json.dumps(result, ensure_ascii=False))
+raise SystemExit(0 if result["success"] else 3)
+PY
+"""
+    if not device_test:
+        smoke_body = """try:
+    result.update(success=True, device_test=False,
+                  torch_version=importlib.metadata.version('torch'),
+                  torch_npu_version=importlib.metadata.version('torch-npu'))
+    version = mindiesd_metadata_version()
+    if version is not None:
+        result['mindiesd_version'] = version
+except importlib.metadata.PackageNotFoundError as exc:
+    result.update(success=False, device_test=False, error=str(exc))"""
+    else:
+        smoke_body = """import traceback
+
+PROGRESS = "__PROGRESS__"
+
+def progress(phase: str, message: str) -> None:
+    sys.stderr.write(PROGRESS + json.dumps({"phase": phase, "status": "running", "message": message}, ensure_ascii=False) + "\\n")
+    sys.stderr.flush()
+
 try:
     progress("smoke", "importing torch and torch_npu")
     import torch
@@ -621,15 +624,13 @@ except Exception as exc:  # pragma: no cover - runtime dependent
             "error": str(exc),
             "traceback_tail": tb[-25:],
         }
-    )
-print("__SENTINEL__" + json.dumps(result, ensure_ascii=False))
-raise SystemExit(0 if result["success"] else 3)
-PY
-"""
-    return template.replace("__PYTHON_SELECTION__", selection_command(required, compact=False)).replace("__DEVICE_TEST__", repr(device_test)).replace(
-        "__IMAGE_FAMILY__", repr(image_family)
-    ).replace("__SENTINEL__", SENTINEL).replace(
-        "__PROGRESS__", PROGRESS_SENTINEL
+    )"""
+    return (
+        template.replace("__SMOKE_BODY__", smoke_body)
+        .replace("__PYTHON_SELECTION__", selection_command(required, compact=False))
+        .replace("__IMAGE_FAMILY__", repr(image_family))
+        .replace("__SENTINEL__", SENTINEL)
+        .replace("__PROGRESS__", PROGRESS_SENTINEL)
     )
 
 

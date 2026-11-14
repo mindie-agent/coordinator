@@ -68,11 +68,13 @@ def _normalize_client(client: str) -> str:
 
 def git_common_directory(path: str | Path) -> Path:
     """Resolve repository identity with Git, including linked-worktree subdirs."""
+    from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
     directory = Path(client_path(path)).expanduser().resolve(strict=True)
     result = subprocess.run(
-        ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
-        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+        [resolve_git(), "-C", strip_windows_extended_prefix(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=True,
+        **no_window_kwargs(),
     )
     return Path(client_path(result.stdout.strip())).resolve(strict=True)
 
@@ -96,17 +98,20 @@ def worktree_reference(path: str) -> dict:
     """Inspect an actual repository; never materialize a second source copy."""
     # Git must not inherit the MCP input pipe while its transport reads it.
     # On Windows that can block Git startup and even timeout cleanup.
-    flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
+    from mindie_coordinator.local_exec import no_window_kwargs, resolve_git, strip_windows_extended_prefix
+
+    flags = no_window_kwargs()
+    git_exe = resolve_git()
     source = Path(client_path(path)).expanduser().resolve(strict=True)
     result = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        [git_exe, "-C", strip_windows_extended_prefix(source), "rev-parse", "--show-toplevel"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=True,
         **flags,
     )
     root = Path(result.stdout.strip()).resolve()
     info = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--git-common-dir", "HEAD"],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+        [git_exe, "-C", strip_windows_extended_prefix(root), "rev-parse", "--git-common-dir", "HEAD"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=True,
         **flags,
     ).stdout.splitlines()
     return {"path": str(root), "git_common_dir": str((root / info[0]).resolve()), "head_at_bind": info[1]}
@@ -523,7 +528,7 @@ def load_context(context_file: str = "", *, allow_native_context: bool = True) -
                                 parent_context=parent, association=association)
         return existing
     path = Path(client_path(filename)).expanduser().resolve(strict=True)
-    reference = json.loads(path.read_text())
+    reference = json.loads(path.read_text(encoding="utf-8"))
     if reference.get("schema_version") != "mindie.agent-context.v1":
         raise ValueError("not a MindIE agent context")
     store = AgentSessions(Path(reference["state_dir"]))

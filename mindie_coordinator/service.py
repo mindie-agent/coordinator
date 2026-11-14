@@ -718,14 +718,16 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                                    runtime_id=binding["runtime_id"], endpoint=endpoint,
                                    sources=source_paths(source_snapshot), source_snapshot=source_snapshot,
                                    workspace_root=directory)
-        environment = {key: value for key, value in os.environ.items() if key not in BUILD_INPUT_ENV_KEYS}
+        from mindie_coordinator.local_exec import no_window_kwargs, utf8_python_env
+
+        environment = utf8_python_env({key: value for key, value in os.environ.items() if key not in BUILD_INPUT_ENV_KEYS})
         environment.update(binding.get("build_env", {}))
         environment.update(binding["environment"])
-        with (directory / "parity.json").open("w") as stdout, (directory / "parity.log").open("w") as stderr:
+        with (directory / "parity.json").open("w", encoding="utf-8") as stdout, (directory / "parity.log").open("w", encoding="utf-8") as stderr:
             result = subprocess.run(
-                args, stdout=stdout, stderr=stderr,
+                args, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                 env=environment, timeout=600, check=False,
-                **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+                **no_window_kwargs(),
             )
         try:
             payload = json.loads((directory / "parity.json").read_text(encoding="utf-8"))
