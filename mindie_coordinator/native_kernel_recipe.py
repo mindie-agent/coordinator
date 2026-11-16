@@ -24,6 +24,8 @@ CMake configure/build tree.
   exclusive); kernel build/publication staging holds its `.staging-*` lock for
   the complete build. Stale staging is removed only after acquiring that lock
   and exceeding the age grace.
+- Kernel restore and publication resolve the same `<cache-root>/.locks/` entry
+  lock as pool eviction; an unacquirable lock is a miss/busy skip, never I/O.
 
 [Side-Effect Policy]
 - Stages intermediate files in a temporary `.mindie-runtime/kernel-recipe-*`
@@ -208,40 +210,38 @@ def _drop_kernel_content(cache: Path, key: str) -> None:
     if entry.parent.resolve() != cache.resolve():
         return
     if entry.is_dir() and not entry.is_symlink():
-        shutil.rmtree(entry)
+        _remove_cache_tree(entry)
     elif entry.exists() or entry.is_symlink():
         entry.unlink()
+    if os.path.lexists(entry):
+        raise OSError('kernel content entry still exists: ' + str(entry))
 
 
-def _kernel_entry_lock(cache: Path, key: str):
-    """Shared entry lock matching eviction's non-blocking exclusive lock."""
+def _kernel_entry_lock(cache: Path, key: str, *, exclusive: bool = False,
+                       blocking: bool = True):
+    """Entry lock resolving to the pool root shared with eviction."""
     helper = globals().get('_cache_entry_lock')
     if helper is None:
         from .native_cache_pool import _cache_entry_lock as helper
-    return helper(cache, 'kernel', key, exclusive=False, blocking=True)
+    return helper(cache, 'kernel', key, exclusive=exclusive, blocking=blocking)
 
 
-def _clear_readonly(func, target, _exc_info) -> None:
-    try:
-        os.chmod(target, 0o700)
-    except TimeoutError:
-        raise
-    except OSError:
-        pass
-    try:
-        func(target)
-    except TimeoutError:
-        raise
-    except OSError:
-        pass
+def _remove_cache_tree(path: Path) -> None:
+    """Use the shared verified cache-tree remover in package/concatenated use."""
+    helper = globals().get('_remove_tree')
+    if helper is None:
+        from .native_cache_pool import _remove_tree as helper
+    helper(Path(path))
 
 
 def _drop_restore_destination(destination: Path) -> None:
     """Remove only a partial kernel output tree this restore just created."""
     if destination.is_dir() and not destination.is_symlink():
-        shutil.rmtree(destination, onerror=_clear_readonly)
+        _remove_cache_tree(destination)
     elif destination.exists() or destination.is_symlink():
         destination.unlink(missing_ok=True)
+    if os.path.lexists(destination):
+        raise OSError('kernel restore destination still exists: ' + str(destination))
 
 
 def restore_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str, *, read_recipe) -> bool:
@@ -316,25 +316,31 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
         if observed_files != existing.get('files') or observed_files != files:
             raise ValueError('same kernel content key produced different artifacts')
 
-    if destination.exists():
-        try:
-            existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
-            observed_files = _kernel_cache_files(destination)
-        except TimeoutError:
-            raise
-        except (OSError, ValueError):
-            # The entry is incomplete/corrupt; rebuild it from this compile.
-            _drop_kernel_content(cache, key)
-        else:
-            check_existing(existing, observed_files)
+    present = False
+    with _kernel_entry_lock(cache, key, exclusive=True) as acquired:
+        if not acquired:
+            return {'status': 'busy', 'cache_key': key}
+        if destination.exists():
             try:
-                os.utime(destination, None)
+                existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
+                observed_files = _kernel_cache_files(destination)
             except TimeoutError:
                 raise
-            except OSError:
-                pass
-            _maintain_kernel_cache(cache, key)
-            return {'status': 'present', 'cache_key': key}
+            except (OSError, ValueError):
+                # The entry is incomplete/corrupt; rebuild it from this compile.
+                _drop_kernel_content(cache, key)
+            else:
+                check_existing(existing, observed_files)
+                try:
+                    os.utime(destination, None)
+                except TimeoutError:
+                    raise
+                except OSError:
+                    pass
+                present = True
+    if present:
+        _maintain_kernel_cache(cache, key)
+        return {'status': 'present', 'cache_key': key}
     temp = Path(tempfile.mkdtemp(prefix='.kernel-content-', dir=cache))
     with _staging_lock(temp):
         try:
@@ -359,7 +365,7 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
         finally:
             if temp.exists():
                 try:
-                    shutil.rmtree(temp)
+                    _remove_cache_tree(temp)
                 except TimeoutError:
                     raise
                 except OSError:
@@ -641,8 +647,14 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
             completed = True
             if cache_key is not None:
                 try:
-                    publish_kernel_recipe_content(root, plan, content_cache, cache_key, generated_recipes)
-                    print('native-incremental: kernel content cache stored ' + cache_key, flush=True)
+                    stored = publish_kernel_recipe_content(root, plan, content_cache, cache_key,
+                                                           generated_recipes)
+                    if stored.get('status') == 'busy':
+                        print('native-incremental: kernel content cache busy; store skipped '
+                              + cache_key, flush=True)
+                    else:
+                        print('native-incremental: kernel content cache stored ' + cache_key,
+                              flush=True)
                 except TimeoutError:
                     raise
                 except (OSError, ValueError, json.JSONDecodeError) as exc:

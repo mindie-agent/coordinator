@@ -21,9 +21,13 @@ hard-link mapping with copy fallback, corruption repair and cache receipts.
   Windows; failure to create/acquire a lock is fail-closed and skips eviction.
 - `cache-root` is a shared lock during restore/store and a non-blocking
   exclusive lock during eviction; every entry has its own shared/exclusive lock.
+- Every `(kind, name)` entry lock resolves to `<cache-root>/.locks/` and
+  `_PROCESS_LOCKS` is keyed by that resolved path, matching cross-process locks.
 - Publication uses a private `mkdtemp` plus `.staging-*` sibling lock and one
   `os.rename`; no partial key is visible. Staging is swept only after a
   non-blocking builder-lock acquisition and the age grace both succeed.
+- `_remove_tree` propagates TimeoutError/non-retryable OSError and verifies the
+  path is gone, so eviction never reports bytes it did not reclaim.
 
 [Side-Effect Policy]
 - Writes only under the supplied cache root and returns paths/receipts.
@@ -126,6 +130,17 @@ def native_cache_receipt(result: dict | None) -> dict:
     }
 
 
+def cache_busy_result(preparation: dict | None = None) -> dict:
+    """Honest result when a shared cache lock could not be acquired."""
+    try:
+        key = native_content_key(preparation) if preparation is not None else ''
+    except (TypeError, ValueError):
+        key = ''
+    return {'status': 'miss' if preparation is not None else 'busy',
+            'reason': 'shared native cache is busy', 'bundle': '',
+            'cache_key': key, 'linked_files': 0}
+
+
 def _link_or_copy(source: Path, target: Path) -> bool:
     try:
         os.link(source, target)
@@ -192,8 +207,27 @@ def _unlock_handle(handle) -> None:
         pass
 
 
+def cache_lock_file(cache: Path, name: str) -> Path:
+    """Canonical `<cache>/.locks/<sha256(name)>.lock` path."""
+    digest = hashlib.sha256(name.encode()).hexdigest()
+    return Path(cache) / '.locks' / (digest + '.lock')
+
+
+def cache_entry_lock_path(cache: Path, kind: str, name: str) -> Path:
+    """Canonical entry lock shared by publish, restore and eviction.
+
+    `native_kernel_recipe` receives the `<root>/kernel` content sub-cache while
+    eviction receives `<root>`; both must resolve to `<root>/.locks/`, or a
+    cross-process eviction can rename the entry during restore.
+    """
+    cache = Path(cache)
+    if kind == 'kernel' and cache.name == 'kernel':
+        cache = cache.parent
+    return cache_lock_file(cache, 'entry-' + kind + '-' + name)
+
+
 @contextlib.contextmanager
-def _advisory_lock(cache: Path, name: str, *, exclusive: bool, blocking: bool = True):
+def _advisory_lock_file(lock_path: Path, *, exclusive: bool, blocking: bool = True):
     """Yield True only while a real cross-process advisory lock is held.
 
     Lock creation or acquisition failure is fail-closed: callers that delete
@@ -201,11 +235,11 @@ def _advisory_lock(cache: Path, name: str, *, exclusive: bool, blocking: bool = 
     """
     handle = None
     acquired = False
-    directory = Path(cache) / '.locks'
+    lock_path = Path(lock_path)
     try:
         try:
-            directory.mkdir(parents=True, exist_ok=True)
-            handle = (directory / (hashlib.sha256(name.encode()).hexdigest() + '.lock')).open('a+b')
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open('a+b')
         except TimeoutError:
             raise
         except OSError:
@@ -227,6 +261,11 @@ def _advisory_lock(cache: Path, name: str, *, exclusive: bool, blocking: bool = 
             handle.close()
 
 
+def _advisory_lock(cache: Path, name: str, *, exclusive: bool, blocking: bool = True):
+    return _advisory_lock_file(cache_lock_file(cache, name), exclusive=exclusive,
+                               blocking=blocking)
+
+
 _PROCESS_LOCKS: dict[str, dict] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 
@@ -234,8 +273,9 @@ _PROCESS_LOCKS_GUARD = threading.Lock()
 @contextlib.contextmanager
 def _cache_entry_lock(cache: Path, kind: str, name: str, *, exclusive: bool = False,
                       blocking: bool = True):
-    """Exclude the same-process caller before taking the cross-process lock."""
-    token = 'entry-' + kind + '-' + name
+    """Exclude same-process callers with the same topology as the file lock."""
+    lock_path = cache_entry_lock_path(cache, kind, name)
+    token = os.path.normcase(os.path.realpath(os.fspath(lock_path)))
     with _PROCESS_LOCKS_GUARD:
         state = _PROCESS_LOCKS.setdefault(token, {'lock': threading.Lock(), 'users': 0})
         state['users'] += 1
@@ -246,8 +286,8 @@ def _cache_entry_lock(cache: Path, kind: str, name: str, *, exclusive: bool = Fa
             yield False
             return
         try:
-            with _advisory_lock(Path(cache), token, exclusive=exclusive,
-                                blocking=blocking) as file_acquired:
+            with _advisory_lock_file(lock_path, exclusive=exclusive,
+                                     blocking=blocking) as file_acquired:
                 yield file_acquired
         finally:
             lock.release()
@@ -332,25 +372,37 @@ def _staging_builder_alive(path: Path) -> bool:
                 pass
 
 
-def _clear_readonly(func, target, _exc_info) -> None:
-    """Retry one rmtree callback after clearing a read-only bit."""
+_RMTREE_RETRY_FUNCTIONS = (os.unlink, os.remove, os.rmdir)
+
+
+def _clear_readonly(func, target, exc_info) -> None:
+    """`shutil.rmtree` callback: clear one read-only bit and retry once.
+
+    TimeoutError and non-permission OSErrors propagate so `rmtree` can never
+    return as if it deleted a tree that still exists. `rmtree` cannot resume
+    `lstat`/`scandir` traversal after this callback in Python 3.11, so those
+    failures propagate instead of silently skipping the subtree.
+    """
+    exc = exc_info[1] if isinstance(exc_info, tuple) else exc_info
+    if isinstance(exc, TimeoutError):
+        raise exc
+    if not isinstance(exc, PermissionError) or func not in _RMTREE_RETRY_FUNCTIONS:
+        raise exc
     try:
         os.chmod(target, stat.S_IWRITE)
     except TimeoutError:
         raise
     except OSError:
         pass
-    try:
-        func(target)
-    except TimeoutError:
-        raise
-    except OSError:
-        pass
+    func(target)
 
 
 def _remove_tree(path: Path) -> None:
-    """Remove a cache tree, clearing read-only bits on Windows/Linux."""
+    """Remove a cache tree, proving it is gone; never report false deletion."""
+    path = Path(path)
     shutil.rmtree(path, onerror=_clear_readonly)
+    if os.path.lexists(path):
+        raise OSError('cache tree still exists after removal: ' + str(path))
 
 
 def _children(path: Path) -> list[Path]:
@@ -566,12 +618,13 @@ def evict_native_cache(cache: Path, *, keep=(), max_entries: int | None = None,
                     deleted = False
                     try:
                         _remove_tree(trash)
-                        deleted = True
                     except TimeoutError:
                         raise
                     except OSError as exc:
                         print(f'native cache trash cleanup failed: {exc}',
                               file=sys.stderr, flush=True)
+                    else:
+                        deleted = not os.path.lexists(trash)
                 entries.remove(entry)
                 if deleted:
                     total -= entry['size']

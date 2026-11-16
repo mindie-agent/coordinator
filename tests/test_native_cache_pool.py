@@ -1,6 +1,7 @@
 """Native content-hash pool behavior: reuse, invalidation, linking, receipts."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import errno
 import hashlib
@@ -8,11 +9,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from unittest import mock
 
 import pytest
 
-from mindie_coordinator import preparation_cache as cache
+from mindie_coordinator import native_cache_pool, preparation_cache as cache
 from test_shared_preparation import bundle as _bundle_fixture
 
 bundle = _bundle_fixture
@@ -206,13 +209,13 @@ def test_hardlink_fallback_is_limited_to_unsupported_filesystems(monkeypatch):
     source = cache.Path('/cache/native.bin')
     target = cache.Path('/view/native.bin')
     fallback = mock.Mock()
-    monkeypatch.setattr(cache.os, 'link', mock.Mock(side_effect=OSError(errno.EXDEV, 'cross-device')))
+    monkeypatch.setattr(native_cache_pool.os, 'link', mock.Mock(side_effect=OSError(errno.EXDEV, 'cross-device')))
     monkeypatch.setattr(cache.shutil, 'copy2', fallback)
     assert cache._link_or_copy(source, target) is False
     fallback.assert_called_once_with(source, target)
 
     fallback.reset_mock()
-    monkeypatch.setattr(cache.os, 'link', mock.Mock(side_effect=OSError(errno.EIO, 'io failure')))
+    monkeypatch.setattr(native_cache_pool.os, 'link', mock.Mock(side_effect=OSError(errno.EIO, 'io failure')))
     with pytest.raises(OSError) as raised:
         cache._link_or_copy(source, target)
     assert raised.value.errno == errno.EIO
@@ -222,7 +225,7 @@ def test_hardlink_fallback_is_limited_to_unsupported_filesystems(monkeypatch):
 def test_restore_falls_back_to_copy_when_hardlink_unsupported(bundle, monkeypatch):
     source, target, shared, request, manifest, relative, versions = bundle
     cache.store_shared_native(source, shared)
-    monkeypatch.setattr(cache.os, 'link', mock.Mock(side_effect=OSError(errno.EXDEV, 'cross-device')))
+    monkeypatch.setattr(native_cache_pool.os, 'link', mock.Mock(side_effect=OSError(errno.EXDEV, 'cross-device')))
     restored = cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)
     assert restored['status'] == 'hit'
     assert restored['linked_files'] == 0
@@ -465,3 +468,236 @@ def test_eviction_is_fail_closed_when_cache_lock_cannot_be_created(tmp_path):
                                       max_total_bytes=1)
     assert result['status'] == 'busy'
     assert (entry / 'blob').read_bytes() == b'x' * 10
+
+
+@contextlib.contextmanager
+def _busy_cache_lock(*_args, **_kwargs):
+    yield False
+
+
+_EVICTION_CHILD = r'''
+import json, sys
+from pathlib import Path
+from mindie_coordinator import native_cache_pool
+pool, content_cache, key = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+result = native_cache_pool.evict_native_cache(
+    pool, keep=set(), max_entries=1, max_total_bytes=1)
+print(json.dumps({
+    'result': result,
+    'lock_path': str(native_cache_pool.cache_entry_lock_path(content_cache, 'kernel', key)),
+    'pool_lock_path': str(native_cache_pool.cache_entry_lock_path(pool, 'kernel', key)),
+    'exists': (content_cache / key).is_dir(),
+}))
+'''
+
+
+def _run_eviction_child(tmp_path, pool, content_cache, key):
+    env = {**os.environ}
+    root = str(Path(__file__).resolve().parents[1])
+    env['PYTHONPATH'] = root + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
+    process = subprocess.Popen([sys.executable, '-c', _EVICTION_CHILD, str(pool),
+                                str(content_cache), key], cwd=str(tmp_path), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = process.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
+def test_kernel_restore_and_eviction_resolve_one_lock_file(tmp_path):
+    recipe, _root, pool, content_cache, _destination, _plan, key, _read = _kernel_cache_entry(tmp_path)
+    restore_lock = native_cache_pool.cache_entry_lock_path(content_cache, 'kernel', key)
+    eviction_lock = native_cache_pool.cache_entry_lock_path(pool, 'kernel', key)
+    assert restore_lock == eviction_lock
+    assert restore_lock.parent == pool / '.locks'
+    assert not restore_lock.is_relative_to(content_cache / '.locks')
+    process_key = os.path.normcase(os.path.realpath(os.fspath(restore_lock)))
+    with recipe._kernel_entry_lock(content_cache, key) as acquired:
+        assert acquired is True
+        assert process_key in native_cache_pool._PROCESS_LOCKS
+    assert process_key not in native_cache_pool._PROCESS_LOCKS
+
+
+def test_cross_process_kernel_restore_lock_blocks_eviction(tmp_path):
+    recipe, _root, pool, content_cache, _destination, _plan, key, _read = _kernel_cache_entry(tmp_path)
+    expected_lock = str(native_cache_pool.cache_entry_lock_path(pool, 'kernel', key))
+    with recipe._kernel_entry_lock(content_cache, key) as acquired:
+        assert acquired is True
+        completed = _run_eviction_child(tmp_path, pool, content_cache, key)
+        assert completed.returncode == 0, completed.stderr
+        observed = json.loads(completed.stdout)
+        assert observed['lock_path'] == observed['pool_lock_path'] == expected_lock
+        assert observed['result']['removed'] == []
+        assert observed['exists'] is True
+        assert (content_cache / key).is_dir()
+    completed = _run_eviction_child(tmp_path, pool, content_cache, key)
+    assert completed.returncode == 0, completed.stderr
+    observed = json.loads(completed.stdout)
+    assert observed['result']['removed'] == ['kernel:' + key]
+    assert observed['exists'] is False
+    assert not (content_cache / key).exists()
+
+
+def test_store_skips_cleanly_when_cache_lock_is_unavailable(bundle, monkeypatch):
+    source, _target, shared, _request, manifest, _relative, _versions = bundle
+    monkeypatch.setattr(cache, '_cache_operation', _busy_cache_lock)
+    monkeypatch.setattr(cache, '_store_shared_native',
+                        lambda *_args, **_kwargs: pytest.fail('store body ran without the cache lock'))
+    result = cache.store_shared_native(source, shared)
+    assert result['status'] == 'busy'
+    assert result['linked_files'] == 0
+    assert result['cache_key'] == ''
+    assert not shared.exists()
+    assert 'distributions' not in manifest
+
+
+def test_captured_store_skips_cleanly_when_cache_lock_is_unavailable(bundle, monkeypatch):
+    source, _target, shared, _request, manifest, _relative, _versions = bundle
+    monkeypatch.setattr(cache, '_cache_operation', _busy_cache_lock)
+    monkeypatch.setattr(cache, '_store_captured_native_unlocked',
+                        lambda *_args, **_kwargs: pytest.fail('store body ran without the cache lock'))
+    timings = {}
+    result = cache._store_captured_native(source, shared, manifest, timings)
+    assert result['status'] == 'busy'
+    assert result['linked_files'] == 0
+    assert not shared.exists()
+    assert timings == {}
+
+
+def test_restore_treats_unavailable_cache_lock_as_a_miss(bundle, monkeypatch):
+    source, target, shared, request, _manifest, relative, versions = bundle
+    cache.store_shared_native(source, shared)
+    monkeypatch.setattr(cache, '_cache_operation', _busy_cache_lock)
+    monkeypatch.setattr(cache, '_restore_shared_native_unlocked',
+                        lambda *_args, **_kwargs: pytest.fail('restore body ran without the cache lock'))
+    result = cache.restore_shared_native(target, shared, request, 'sha256:same-image', versions)
+    assert result['status'] == 'miss'
+    assert 'busy' in result['reason']
+    assert isinstance(result['cache_key'], str)
+    assert result['linked_files'] == 0
+    assert not (target / relative).exists()
+    assert not (target / '.mindie-runtime/shared-native.json').exists()
+
+
+@pytest.mark.parametrize('snapshot, expected', [
+    (None, FileNotFoundError),
+    ('not-json', FileNotFoundError),
+    ([], ValueError),
+    ({'bundle': 'b' * 64, 'manifest_text': '{}'}, ValueError),
+    ({'bundle': 'a' * 64, 'manifest_text': 42}, ValueError),
+])
+def test_revalidate_snapshot_failure_never_raises_unbound_local(tmp_path, snapshot, expected):
+    root = tmp_path / 'root'
+    name = 'a' * 64
+    marker = root / '.mindie-runtime/shared-native.json'
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({'bundle': name, 'bundle_manifest_sha256': 'c' * 64,
+                                  'native_key': 'native-key'}))
+    if snapshot is not None:
+        (root / '.mindie-runtime/shared-native-bundle.json').write_text(
+            snapshot if isinstance(snapshot, str) else json.dumps(snapshot))
+    with pytest.raises(expected) as raised:
+        cache.revalidate_shared_native(root, tmp_path / 'cache')
+    assert not isinstance(raised.value, UnboundLocalError)
+
+
+@pytest.mark.parametrize('exc_info', [
+    (TimeoutError, TimeoutError('injected lstat timeout'), None),
+    TimeoutError('injected lstat timeout'),
+])
+def test_clear_readonly_never_swallows_timeout(exc_info):
+    calls = []
+    with pytest.raises(TimeoutError, match='injected lstat timeout'):
+        native_cache_pool._clear_readonly(calls.append, '/tmp/cache-entry', exc_info)
+    assert calls == []
+
+
+@pytest.mark.parametrize('func, exc', [
+    (os.lstat, PermissionError(errno.EACCES, 'denied')),
+    (os.scandir, PermissionError(errno.EACCES, 'denied')),
+    (os.listdir, PermissionError(errno.EACCES, 'denied')),
+    (os.unlink, OSError(errno.EIO, 'io failure')),
+])
+def test_clear_readonly_only_retries_unlink_and_rmdir_permissions(func, exc):
+    with pytest.raises(type(exc)) as raised:
+        native_cache_pool._clear_readonly(func, '/tmp/cache-entry', (type(exc), exc, None))
+    assert raised.value is exc
+
+
+def test_rmtree_lstat_timeout_propagates_instead_of_false_deletion(tmp_path, monkeypatch):
+    target = tmp_path / 'cache-entry'
+    target.mkdir(parents=True)
+    (target / 'blob').write_bytes(b'x' * 10)
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if Path(path) == target:
+            raise TimeoutError('injected lstat timeout')
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(native_cache_pool.os, 'lstat', lstat)
+    with pytest.raises(TimeoutError):
+        native_cache_pool._remove_tree(target)
+    assert target.is_dir()
+    assert (target / 'blob').read_bytes() == b'x' * 10
+
+
+def test_remove_tree_rejects_a_silent_rmtree_noop(tmp_path, monkeypatch):
+    target = tmp_path / 'cache-entry'
+    target.mkdir(parents=True)
+    (target / 'blob').write_bytes(b'x' * 10)
+    monkeypatch.setattr(native_cache_pool.shutil, 'rmtree', lambda *_args, **_kwargs: None)
+    with pytest.raises(OSError, match='still exists after removal'):
+        native_cache_pool._remove_tree(target)
+    assert (target / 'blob').read_bytes() == b'x' * 10
+
+
+def test_eviction_does_not_subtract_bytes_when_the_target_survives(tmp_path, monkeypatch):
+    cache_root = tmp_path / 'cache'
+    entry = cache_root / ('a' * 64)
+    entry.mkdir(parents=True)
+    (entry / 'blob').write_bytes(b'x' * 10)
+    # Simulate a remover that reports success without deleting the renamed tree.
+    monkeypatch.setattr(native_cache_pool, '_remove_tree', lambda _path: None)
+    result = cache.evict_native_cache(cache_root, keep=set(), max_entries=1,
+                                      max_total_bytes=1)
+    assert result['removed'] == []
+    assert result['entries'] == 1
+    assert result['bytes'] == 10
+    assert not entry.exists()
+    assert len(list(cache_root.glob('.trash-*'))) == 1
+
+
+def test_eviction_does_not_subtract_bytes_when_unlink_fails(tmp_path, monkeypatch):
+    cache_root = tmp_path / 'cache'
+    entry = cache_root / ('a' * 64)
+    entry.mkdir(parents=True)
+    (entry / 'blob').write_bytes(b'x' * 10)
+    real_unlink = os.unlink
+
+    def failing_unlink(path, *args, **kwargs):
+        if Path(path).name == 'blob':
+            raise PermissionError(errno.EACCES, 'injected unlink failure')
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(native_cache_pool.os, 'unlink', failing_unlink)
+    result = cache.evict_native_cache(cache_root, keep=set(), max_entries=1,
+                                      max_total_bytes=1)
+    assert result['removed'] == []
+    assert result['entries'] == 1
+    assert result['bytes'] == 10
+    assert not entry.exists()
+    assert len(list(cache_root.glob('.trash-*'))) == 1
+
+
+def test_kernel_publish_lock_unavailable_skips_the_shared_write(tmp_path, monkeypatch):
+    recipe, root, _pool, content_cache, _destination, plan, key, _read = _kernel_cache_entry(tmp_path)
+    shutil.rmtree(content_cache / key)
+    monkeypatch.setattr(recipe, '_kernel_entry_lock', _busy_cache_lock)
+    result = recipe.publish_kernel_recipe_content(root, plan, content_cache, key, [])
+    assert result == {'status': 'busy', 'cache_key': key}
+    assert not (content_cache / key).exists()
+    assert not list(content_cache.glob('.kernel-content-*'))

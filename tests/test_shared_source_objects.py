@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -6,7 +7,7 @@ import pytest
 
 from mindie_coordinator import parity
 from mindie_coordinator.preparation_process import PreparationCancelled, PreparationUncertain
-from mindie_coordinator.shared_source_objects import export_existing_objects
+from mindie_coordinator.shared_source_objects import copy_fixed_objects, export_existing_objects
 
 
 def container(identifier='a'):
@@ -168,3 +169,21 @@ def test_transport_failure_never_becomes_cache_miss(monkeypatch, reply, error):
     with pytest.raises(error):
         parity._export_existing_source_objects({'host': 'fixture', 'user': 'test', 'port': 22},
                                                request()['records'], '/private-cache')
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows hidden-console subprocess flags')
+def test_fixed_object_git_gets_windows_hidden_console_flags(tmp_path, monkeypatch):
+    source = tmp_path / 'source'
+    source.mkdir()
+    seen = {}
+
+    def run(args, **kwargs):
+        seen['args'] = args
+        seen['kwargs'] = kwargs
+        return SimpleNamespace(returncode=1, stdout='', stderr='missing tree')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert copy_fixed_objects(
+        source, tmp_path / 'shared.git', {'commit': 'a' * 40, 'tree': 'b' * 40}) is False
+    assert seen['args'][:3] == ['git', '-C', str(source)]
+    assert seen['kwargs']['creationflags'] == getattr(subprocess, 'CREATE_NO_WINDOW', 0)

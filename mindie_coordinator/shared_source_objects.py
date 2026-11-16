@@ -39,9 +39,13 @@ def copy_fixed_objects(source, destination, row, *, snapshot_ref_limit=64):
     import subprocess
     import sys
 
+    git_kwargs = ({'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0)}
+                  if os.name == 'nt' else {})
+
     def git(path, *args, check=True):
         result = subprocess.run(['git', '-C', str(path), *args], capture_output=True,
-                                text=True, encoding='utf-8', errors='replace', timeout=60, stdin=subprocess.DEVNULL)
+                                text=True, encoding='utf-8', errors='replace', timeout=60,
+                                stdin=subprocess.DEVNULL, **git_kwargs)
         if result.returncode < 0:
             raise subprocess.SubprocessError('fixed object copy interrupted: ' + result.stderr.strip())
         if check and result.returncode:
