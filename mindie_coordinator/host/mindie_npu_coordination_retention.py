@@ -9,6 +9,8 @@ messages from `coordinator.sqlite3` during ordinary housekeeping.
   never deleted, regardless of age.
 - At most `EVENT_RETENTION_LIMIT` newest events survive; old events and expired
   messages older than seven days are removed.
+- Missing or epoch-zero `messages.created_at` is repaired from the payload ISO
+  `at`, falling back to the current clock; it is never treated as 1970.
 - A terminal task's port reservations are deleted before its task row.
 
 [Timeouts & Locks]
@@ -21,6 +23,7 @@ messages from `coordinator.sqlite3` during ordinary housekeeping.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 
 TERMINAL_TASK_STATES = ("released", "expired", "cancelled", "failed", "completed")
@@ -42,19 +45,23 @@ def _epoch_from_iso(value) -> float | None:
     return parsed.timestamp()
 
 
-def backfill_message_timestamps(connection) -> None:
-    """Assign real insertion times to messages created before the column existed."""
+def backfill_message_timestamps(connection, now: float | None = None) -> None:
+    """Repair missing/epoch-zero timestamps from payload `at`, never from 0."""
+    current = time.time() if now is None else now
     rows = connection.execute(
-        "SELECT cursor, data FROM messages WHERE created_at IS NULL").fetchall()
+        "SELECT cursor, data FROM messages "
+        "WHERE created_at IS NULL OR created_at <= 0").fetchall()
     for row in rows:
         try:
             value = json.loads(row["data"])
         except (TypeError, ValueError):
             value = {}
         created = _epoch_from_iso(value.get("at") if isinstance(value, dict) else None)
+        if created is None or created <= 0:
+            created = current
         connection.execute(
             "UPDATE messages SET created_at=? WHERE cursor=?",
-            (0.0 if created is None else created, row["cursor"]),
+            (created, row["cursor"]),
         )
 
 
@@ -87,6 +94,9 @@ def prune_coordination_rows(connection, now: float) -> dict[str, int]:
         cursor = connection.execute(
             "DELETE FROM events WHERE event_id < ?", (threshold["event_id"],))
         removed["events"] += cursor.rowcount
+    # Legacy writers omit `created_at`; repair them before retention so a new
+    # message is never mistaken for a 1970 insertion and deleted immediately.
+    backfill_message_timestamps(connection, now)
     cursor = connection.execute(
         "DELETE FROM messages WHERE created_at < ?",
         (now - MESSAGE_RETENTION_SECONDS,))

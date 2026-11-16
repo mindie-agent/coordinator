@@ -8,6 +8,8 @@ descriptors, and per-run log directories once they exceed bounded retention.
 - Only rebuildable capture/transport files and terminal run directories are
   removed; fixed source snapshots, active runs, and `inconclusive`/`unknown`
   outcomes are never touched.
+- A run directory is terminal only when the top-level phase is definitive and
+  every role, managed job, lease, and preparation job is confirmed released.
 - Every deletion stays inside the supplied directory and never follows a
   symlink.
 
@@ -32,8 +34,83 @@ CAPTURE_RETENTION_SECONDS = 14 * 24 * 60 * 60
 CAPTURE_RETENTION_LIMIT = 128
 RUN_RETENTION_SECONDS = 14 * 24 * 60 * 60
 RUN_RETENTION_LIMIT = 128
+RUN_PRUNE_COOLDOWN_SECONDS = 300
+RUN_PRUNE_BUDGET_SECONDS = 1.0
 FIXED_INPUT_RETENTION_SECONDS = 24 * 60 * 60
-PRUNABLE_RUN_PHASES = frozenset({"succeeded", "failed", "timeout", "cancelled"})
+PRUNABLE_RUN_PHASES = frozenset({"succeeded", "failed", "cancelled"})
+NONTERMINAL_RUN_STATES = frozenset({
+    "active", "running", "preparing", "starting", "stopping", "orphaned_busy",
+    "inconclusive", "uncertain", "unknown", "waiting", "waiting_for_runtime",
+    "pending", "queued", "granted", "submitting", "releasing", "bound",
+    "launch_pending", "finishing",
+})
+TERMINAL_JOB_STATES = frozenset({
+    "succeeded", "completed", "failed", "timeout", "timed_out", "cancelled", "absent",
+})
+TERMINAL_LEASE_STATES = frozenset({"released", "cancelled", "expired"})
+TERMINAL_COMPILE_STATES = TERMINAL_LEASE_STATES | {"not_started"}
+_STATE_KEYS = frozenset({
+    "state", "states", "phase", "status", "outcome", "lease_state", "job_state",
+    "remote_state", "preparation_state", "submission_state", "resource_state",
+    "task_state", "compile_state", "remote_outcome",
+})
+
+
+class SnapshotCommits(dict):
+    """Parity snapshot mapping carrying a non-fatal post-sync cleanup warning."""
+
+    def __init__(self, value, *, cleanup_warning=None):
+        super().__init__(value)
+        self.cleanup_warning = cleanup_warning
+
+
+def _state_strings(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            state_key = isinstance(key, str) and (
+                key in _STATE_KEYS or key.endswith("_state"))
+            if state_key and isinstance(item, str):
+                yield item
+            yield from _state_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _state_strings(item)
+
+
+def terminal_run_eligible(row: dict) -> bool:
+    """True only when a run is terminal and every child resource is released.
+
+    A top-level `failed` phase is not proof that retained preparation jobs,
+    managed leases, or `inconclusive`/`unknown` role outcomes are gone.
+    """
+    if not isinstance(row, dict) or row.get("phase") not in PRUNABLE_RUN_PHASES:
+        return False
+    if any(state in NONTERMINAL_RUN_STATES for state in _state_strings(row)):
+        return False
+    for role in row.get("roles") or []:
+        if not isinstance(role, dict) or not role.get("managed_job"):
+            continue
+        observation = role.get("observation")
+        if not isinstance(observation, dict) or observation.get("state") not in TERMINAL_JOB_STATES:
+            return False
+        if observation.get("lease_state") not in TERMINAL_LEASE_STATES:
+            return False
+    if not row.get("roles") and row.get("managed_job"):
+        observation = row.get("observation")
+        if not isinstance(observation, dict) or observation.get("state") not in TERMINAL_JOB_STATES:
+            return False
+        if observation.get("lease_state") not in TERMINAL_LEASE_STATES:
+            return False
+    for records in (row.get("preparation_jobs") or {}).values():
+        for job in records.values():
+            if not isinstance(job, dict) or job.get("state") not in TERMINAL_JOB_STATES:
+                return False
+            if job.get("quiet") is not True:
+                return False
+            lease = job.get("compile_lease")
+            if isinstance(lease, dict) and lease.get("state") not in TERMINAL_COMPILE_STATES:
+                return False
+    return True
 
 
 def _age(path: Path, now: float) -> float:

@@ -17,6 +17,8 @@ loop bound onto `CoordinatorService`.
 - The startup lock uses a 6s deadline and the daemon lock is non-blocking.
 - The tick loop reads `TICK_SECONDS` lazily from `service.py`; terminal IPC
   responses keep the daemon-side `CLIENT_TIMEOUT_SECONDS` bound.
+- Terminal run-log pruning runs after lease tick scheduling at most every
+  `RUN_PRUNE_COOLDOWN_SECONDS` (`300`s) within `RUN_PRUNE_BUDGET_SECONDS` (`1`s).
 
 [Side-Effect Policy]
 - Mutates only coordinator IPC/startup markers and daemon process state; the
@@ -48,6 +50,14 @@ from remote_dev.observability import detached_tool
 from mindie_coordinator.client_paths import client_path
 from mindie_coordinator.placement import validate_wait
 from mindie_coordinator.state_paths import coordinator_state_dir
+from mindie_coordinator.storage_retention import (
+    RUN_PRUNE_BUDGET_SECONDS,
+    RUN_PRUNE_COOLDOWN_SECONDS,
+    RUN_RETENTION_LIMIT,
+    RUN_RETENTION_SECONDS,
+    prune_terminal_run_directories,
+    terminal_run_eligible,
+)
 
 LOCK_NAME = "coordinator.lock"
 IPC_NAME = "coordinator.ipc"
@@ -442,6 +452,40 @@ def _dispatch_progress(service_instance) -> None:
         with service_instance._lifecycle_lock:
             service_instance._active_requests -= 1
 
+def _prune_terminal_runs(service_instance, *, cooldown_seconds=RUN_PRUNE_COOLDOWN_SECONDS,
+                         budget_seconds=RUN_PRUNE_BUDGET_SECONDS) -> None:
+    """Delete old terminal run logs from the daemon tick; throttled and bounded."""
+    now = time.time()
+    if now - service_instance._last_run_prune < cooldown_seconds:
+        return
+    service_instance._last_run_prune = now
+    deadline = time.monotonic() + max(0.0, budget_seconds)
+    terminal, live = set(), set()
+    for directory in list(service_instance._session_dirs):
+        if time.monotonic() >= deadline:
+            return
+        try:
+            rows = service_instance.store(directory).all_executions()
+        except Exception as exc:
+            service_instance._record_daemon_error(f"sessions {directory}: {exc}")
+            return
+        for row in rows:
+            if time.monotonic() >= deadline:
+                return
+            run_id = row.get("id") if isinstance(row, dict) else None
+            if not isinstance(run_id, str):
+                continue
+            (terminal if terminal_run_eligible(row) else live).add(run_id)
+    try:
+        prune_terminal_run_directories(
+            service_instance.state_dir / "runs", terminal, live_ids=live,
+            max_age_seconds=RUN_RETENTION_SECONDS, max_runs=RUN_RETENTION_LIMIT)
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        service_instance._record_daemon_error(f"run retention: {exc}")
+
+
 def _dispatch_progress_active(service_instance) -> None:
     sessions = []
     execution_jobs = set()
@@ -478,6 +522,7 @@ def _dispatch_progress_active(service_instance) -> None:
             )
             thread.start()
         service_instance._resume_finishing_sessions(directory, store)
+    service_instance._prune_terminal_runs()
 
 def _tick_one(service_instance, directory, row, lock: threading.Lock) -> None:
     with bind_context(row.get("diagnostics_context") or {}), detached_tool():

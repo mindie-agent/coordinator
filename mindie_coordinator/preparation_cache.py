@@ -22,9 +22,13 @@ bundle store/restore/rollback (`store_shared_native`, `restore_shared_native`,
   bundle. The next lookup verifies SHA-256 and republishes from the bundle.
 
 [Timeouts & Locks]
-- Shared cache index updates use `tempfile.mkstemp` + atomic `os.replace`.
+- Shared cache index updates use `tempfile.mkstemp` + an exclusive
+  `.staging-*` builder lock + atomic `os.replace`.
 - Content entries publish into a private `mkdtemp` directory and become visible
   with one `os.rename`; no partially published key is ever used.
+- Restore holds the cache-root shared lock while it snapshots the verified
+  bundle manifest into the execution root, so `revalidate` survives later
+  eviction during dependency installation.
 
 [Side-Effect Policy]
 - Writes only inside the new execution view root or `/tmp/mindie-native-cache`.
@@ -71,11 +75,34 @@ except (ImportError, KeyError):  # pragma: no cover - concatenated namespace
     pass
 
 
+SHARED_NATIVE_BUNDLE_SNAPSHOT = '.mindie-runtime/shared-native-bundle.json'
+
+
 def safe_destination(root: Path, relative: str) -> Path:
     path = Path(relative)
     if path.is_absolute() or '..' in path.parts:
         raise ValueError('unsafe execution artifact destination')
     return root / path
+
+
+def _staging_guard(path: Path):
+    """Resolve the shared staging-lock helper in package or concatenated use."""
+    helper = globals().get('hold_staging_lock')
+    if helper is None:
+        from .native_cache_pool import hold_staging_lock as helper
+    return helper(path)
+
+
+def _snapshot_shared_bundle(root: Path, name: str, manifest_bytes: bytes) -> None:
+    """Keep the exact verified manifest inside the execution root."""
+    target = safe_destination(root, SHARED_NATIVE_BUNDLE_SNAPSHOT)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.tmp')
+    payload = {'schema_version': 1, 'bundle': name,
+               'bundle_manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest(),
+               'manifest_text': manifest_bytes.decode('utf-8')}
+    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+    os.replace(temporary, target)
 
 
 def copy_dependencies(source_site: Path, destination_site: Path) -> list[str]:
@@ -259,16 +286,18 @@ def _index_native_bundle(cache: Path, manifest: dict, bundle: Path) -> dict:
     cache.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.index-', dir=cache)
     try:
-        with os.fdopen(fd, 'w') as stream:
-            json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
-        os.replace(temporary, cache / (key + '.json'))
+        with _staging_guard(temporary):
+            with os.fdopen(fd, 'w') as stream:
+                json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
+            os.replace(temporary, cache / (key + '.json'))
         # This index only selects a candidate. Its exact native delta and all
         # copied outputs must still be checked before an incremental build.
         base = shared_base_key(preparation, manifest['profile']['image_digest'])
         fd, temporary = tempfile.mkstemp(prefix='.index-', dir=cache)
-        with os.fdopen(fd, 'w') as stream:
-            json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
-        os.replace(temporary, cache / ('base-' + base + '.json'))
+        with _staging_guard(temporary):
+            with os.fdopen(fd, 'w') as stream:
+                json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
+            os.replace(temporary, cache / ('base-' + base + '.json'))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -347,7 +376,27 @@ def revalidate_shared_native(root: Path, cache: Path) -> dict:
     name = receipt.get('bundle', '')
     if not re.fullmatch('[0-9a-f]{64}', name):
         raise ValueError('shared native receipt has no fixed bundle')
-    data = (cache / 'bundles' / name / 'manifest.json').read_bytes()
+    try:
+        data = (cache / 'bundles' / name / 'manifest.json').read_bytes()
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        # Eviction may remove the shared path after restore. The execution
+        # root owns an exact verified snapshot written while restore held the
+        # cache lock, so dependency installation cannot invalidate this proof.
+        snapshot_path = safe_destination(root, SHARED_NATIVE_BUNDLE_SNAPSHOT)
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding='utf-8'))
+        except TimeoutError:
+            raise
+        except (OSError, ValueError) as snapshot_exc:
+            raise FileNotFoundError('selected shared native bundle is unavailable') from exc
+        if not isinstance(snapshot, dict):
+            raise ValueError('shared native bundle snapshot changed') from snapshot_exc
+        text_value = snapshot.get('manifest_text')
+        if snapshot.get('bundle') != name or not isinstance(text_value, str):
+            raise ValueError('shared native bundle snapshot changed') from snapshot_exc
+        data = text_value.encode('utf-8')
     if hashlib.sha256(data).hexdigest() != receipt.get('bundle_manifest_sha256'):
         raise ValueError('selected shared native bundle manifest changed')
     profile = json.loads(data)['profile']
@@ -524,6 +573,7 @@ def _restore_shared_native_unlocked(root: Path, cache: Path, preparation: dict, 
     except Exception:
         discard_shared_native(root)
         raise
+    _snapshot_shared_bundle(root, str(pointer['bundle']), manifest_bytes)
     if cache_key:
         touch_native_cache_entry(cache / cache_key)
     touch_native_cache_entry(cache / 'bundles' / str(pointer['bundle']))

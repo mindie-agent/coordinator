@@ -17,8 +17,13 @@ hard-link mapping with copy fallback, corruption repair and cache receipts.
   locked, or content-referenced immutable entries.
 
 [Timeouts & Locks]
-- Publication uses a private `mkdtemp` and one `os.rename`; no partial key is
-  visible. No network calls or locks.
+- Cross-process cache locks use `fcntl.flock` on POSIX and `msvcrt.locking` on
+  Windows; failure to create/acquire a lock is fail-closed and skips eviction.
+- `cache-root` is a shared lock during restore/store and a non-blocking
+  exclusive lock during eviction; every entry has its own shared/exclusive lock.
+- Publication uses a private `mkdtemp` plus `.staging-*` sibling lock and one
+  `os.rename`; no partial key is visible. Staging is swept only after a
+  non-blocking builder-lock acquisition and the age grace both succeed.
 
 [Side-Effect Policy]
 - Writes only under the supplied cache root and returns paths/receipts.
@@ -135,52 +140,90 @@ def _link_or_copy(source: Path, target: Path) -> bool:
     return False
 
 
+def _is_link(path: Path) -> bool:
+    """True for POSIX symlinks and NTFS junctions/reparse points."""
+    try:
+        if path.is_symlink():
+            return True
+        isjunction = getattr(os.path, 'isjunction', None)
+        return bool(isjunction is not None and isjunction(path))
+    except TimeoutError:
+        raise
+    except OSError:
+        # An unreadable path cannot prove it is a real directory.
+        return True
+
+
+def _lock_byte(handle) -> None:
+    """msvcrt locks a byte range; every advisory lock file carries one byte."""
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b'\0')
+        handle.flush()
+    handle.seek(0)
+
+
+def _lock_handle(handle, *, exclusive: bool, blocking: bool) -> None:
+    _lock_byte(handle)
+    if os.name == 'nt':  # pragma: no cover - exercised on Windows CI
+        import msvcrt
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        msvcrt.locking(handle.fileno(), mode, 1)
+        return
+    import fcntl
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    if not blocking:
+        operation |= fcntl.LOCK_NB
+    fcntl.flock(handle.fileno(), operation)
+
+
+def _unlock_handle(handle) -> None:
+    try:
+        if os.name == 'nt':  # pragma: no cover - exercised on Windows CI
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except TimeoutError:
+        raise
+    except OSError:
+        pass
+
+
 @contextlib.contextmanager
 def _advisory_lock(cache: Path, name: str, *, exclusive: bool, blocking: bool = True):
-    """Yield True when the advisory lock is held; no-op without `fcntl`."""
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - Windows local package use
-        yield True
-        return
+    """Yield True only while a real cross-process advisory lock is held.
+
+    Lock creation or acquisition failure is fail-closed: callers that delete
+    cache bytes skip the operation instead of running unlocked.
+    """
     handle = None
     acquired = False
     directory = Path(cache) / '.locks'
     try:
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            handle = (directory / (hashlib.sha256(name.encode()).hexdigest() + '.lock')).open('a+')
+            handle = (directory / (hashlib.sha256(name.encode()).hexdigest() + '.lock')).open('a+b')
         except TimeoutError:
             raise
         except OSError:
-            # Missing lock-file support is never a reason to reject cache work.
-            yield True
+            yield False
             return
         try:
-            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-            if not blocking:
-                operation |= fcntl.LOCK_NB
-            fcntl.flock(handle, operation)
+            _lock_handle(handle, exclusive=exclusive, blocking=blocking)
             acquired = True
         except TimeoutError:
             raise
-        except OSError as exc:
-            if not blocking and exc.errno in {errno.EACCES, errno.EAGAIN}:
-                yield False
-                return
-            # Advisory locking failed for another reason; continue unlocked.
-            yield True
+        except OSError:
+            yield False
             return
-        yield acquired
+        yield True
     finally:
         if handle is not None:
             if acquired:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
-                except TimeoutError:
-                    raise
-                except OSError:
-                    pass
+                _unlock_handle(handle)
             handle.close()
 
 
@@ -191,7 +234,7 @@ _PROCESS_LOCKS_GUARD = threading.Lock()
 @contextlib.contextmanager
 def _cache_entry_lock(cache: Path, kind: str, name: str, *, exclusive: bool = False,
                       blocking: bool = True):
-    """Exclude the same-process caller before taking the cross-process flock."""
+    """Exclude the same-process caller before taking the cross-process lock."""
     token = 'entry-' + kind + '-' + name
     with _PROCESS_LOCKS_GUARD:
         state = _PROCESS_LOCKS.setdefault(token, {'lock': threading.Lock(), 'users': 0})
@@ -219,6 +262,97 @@ def _cache_operation(cache: Path):
     return _advisory_lock(Path(cache), 'cache-root', exclusive=False)
 
 
+def staging_lock_path(path: Path) -> Path:
+    """Sibling lock for one private staging directory/file."""
+    path = Path(path)
+    return path.parent / ('.staging-' + path.name + '.lock')
+
+
+@contextlib.contextmanager
+def hold_staging_lock(path: Path):
+    """Hold one exclusive advisory lock for a complete staging build.
+
+    The sibling lock remains on disk until the staging path is gone, so a
+    sweeper can prove that no live builder still owns the directory.
+    """
+    path = Path(path)
+    lock_path = staging_lock_path(path)
+    handle = None
+    acquired = False
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open('a+b')
+        _lock_handle(handle, exclusive=True, blocking=True)
+        acquired = True
+        yield
+    finally:
+        if handle is not None:
+            if acquired:
+                _unlock_handle(handle)
+            handle.close()
+        if acquired and not path.exists():
+            try:
+                lock_path.unlink(missing_ok=True)
+            except TimeoutError:
+                raise
+            except OSError:
+                pass
+
+
+def _staging_builder_alive(path: Path) -> bool:
+    """Prove ownership only by acquiring the builder's exclusive lock."""
+    lock_path = staging_lock_path(path)
+    try:
+        handle = lock_path.open('a+b')
+    except TimeoutError:
+        raise
+    except OSError:
+        # Cannot even create the probe lock: never delete the staging path.
+        return True
+    acquired = False
+    try:
+        try:
+            _lock_handle(handle, exclusive=True, blocking=False)
+            acquired = True
+        except TimeoutError:
+            raise
+        except OSError:
+            return True
+        return False
+    finally:
+        if acquired:
+            _unlock_handle(handle)
+        handle.close()
+        if acquired:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except TimeoutError:
+                raise
+            except OSError:
+                pass
+
+
+def _clear_readonly(func, target, _exc_info) -> None:
+    """Retry one rmtree callback after clearing a read-only bit."""
+    try:
+        os.chmod(target, stat.S_IWRITE)
+    except TimeoutError:
+        raise
+    except OSError:
+        pass
+    try:
+        func(target)
+    except TimeoutError:
+        raise
+    except OSError:
+        pass
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove a cache tree, clearing read-only bits on Windows/Linux."""
+    shutil.rmtree(path, onerror=_clear_readonly)
+
+
 def _children(path: Path) -> list[Path]:
     try:
         return list(path.iterdir())
@@ -228,14 +362,16 @@ def _children(path: Path) -> list[Path]:
         return []
 
 
-def sweep_native_cache_staging(cache: Path, *,
-                               max_age_seconds: float = CACHE_STAGING_MAX_AGE) -> list[str]:
-    """Remove orphaned publication/trash directories left by a killed process."""
-    cache = Path(cache)
+def sweep_staging_directories(directory: Path, prefixes, *,
+                              max_age_seconds: float = CACHE_STAGING_MAX_AGE) -> list[str]:
+    """Remove staging only when it is old *and* its builder lock is free."""
+    directory = Path(directory)
+    if _is_link(directory):
+        return []
     now = time.time()
     removed = []
-    for path in _children(cache):
-        if not path.name.startswith(_CACHE_STAGING_PREFIXES):
+    for path in _children(directory):
+        if not path.name.startswith(tuple(prefixes)) or path.name.startswith('.staging-'):
             continue
         try:
             age = now - path.lstat().st_mtime
@@ -245,9 +381,13 @@ def sweep_native_cache_staging(cache: Path, *,
             continue
         if age < max_age_seconds:
             continue
+        if _staging_builder_alive(path):
+            continue
         try:
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
+            if _is_link(path):
+                path.unlink(missing_ok=True)
+            elif path.is_dir():
+                _remove_tree(path)
             else:
                 path.unlink(missing_ok=True)
         except TimeoutError:
@@ -256,6 +396,13 @@ def sweep_native_cache_staging(cache: Path, *,
             continue
         removed.append(path.name)
     return removed
+
+
+def sweep_native_cache_staging(cache: Path, *,
+                               max_age_seconds: float = CACHE_STAGING_MAX_AGE) -> list[str]:
+    """Remove orphaned publication/trash staging left by a killed process."""
+    return sweep_staging_directories(Path(cache), _CACHE_STAGING_PREFIXES,
+                                     max_age_seconds=max_age_seconds)
 
 
 def _tree_bytes(path: Path) -> int:
@@ -296,7 +443,7 @@ def _cache_entries(cache: Path) -> list[dict]:
     uid = getuid() if getuid is not None else None
 
     def add(kind: str, name: str, path: Path) -> None:
-        if not _ENTRY_NAME.fullmatch(name):
+        if not _ENTRY_NAME.fullmatch(name) or _is_link(path):
             return
         try:
             info = path.lstat()
@@ -312,13 +459,14 @@ def _cache_entries(cache: Path) -> list[dict]:
                         'mtime': info.st_mtime, 'size': _tree_bytes(path)})
 
     bundles = cache / 'bundles'
-    if bundles.is_dir():
+    if not _is_link(bundles) and bundles.is_dir():
         for path in _children(bundles):
             add('bundle', path.name, path)
-    for path in _children(cache):
-        add('content', path.name, path)
+    if not _is_link(cache):
+        for path in _children(cache):
+            add('content', path.name, path)
     kernel = cache / 'kernel'
-    if kernel.is_dir():
+    if not _is_link(kernel) and kernel.is_dir():
         for path in _children(kernel):
             add('kernel', path.name, path)
     return entries
@@ -338,7 +486,7 @@ def _content_bundle(cache: Path, name: str) -> str | None:
 def _index_files(cache: Path) -> dict[str, list[Path]]:
     mapping: dict[str, list[Path]] = {}
     for path in _children(cache):
-        if path.suffix != '.json' or not path.is_file():
+        if path.suffix != '.json' or _is_link(path) or not path.is_file():
             continue
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
@@ -378,7 +526,9 @@ def evict_native_cache(cache: Path, *, keep=(), max_entries: int | None = None,
     result = {'status': 'missing', 'removed': [], 'staging_removed': [],
               'entries': 0, 'bytes': 0,
               'limits': {'entries': limits[0], 'bytes': limits[1]}}
-    if not cache.is_dir():
+    if _is_link(cache) or not cache.is_dir():
+        if cache.exists():
+            result['status'] = 'unsafe'
         return result
     with _advisory_lock(cache, 'cache-root', exclusive=True, blocking=False) as acquired:
         if not acquired:
@@ -391,7 +541,8 @@ def evict_native_cache(cache: Path, *, keep=(), max_entries: int | None = None,
         pinned = {value for value in keep if isinstance(value, str) and value}
         total = sum(entry['size'] for entry in entries)
         removed = []
-        while entries and (len(entries) > limits[0] or total > limits[1]):
+        trash_entries = 0
+        while entries and (len(entries) + trash_entries > limits[0] or total > limits[1]):
             referenced = {_content_bundle(cache, entry['name'])
                           for entry in entries if entry['kind'] == 'content'}
             entries.sort(key=lambda entry: (entry['mtime'], entry['kind'], entry['name']))
@@ -412,24 +563,31 @@ def evict_native_cache(cache: Path, *, keep=(), max_entries: int | None = None,
                         raise
                     except OSError:
                         continue
+                    deleted = False
                     try:
-                        shutil.rmtree(trash)
+                        _remove_tree(trash)
+                        deleted = True
                     except TimeoutError:
                         raise
                     except OSError as exc:
                         print(f'native cache trash cleanup failed: {exc}',
                               file=sys.stderr, flush=True)
                 entries.remove(entry)
-                total -= entry['size']
-                removed.append(entry['kind'] + ':' + entry['name'])
-                if entry['kind'] == 'bundle':
-                    for path in indexes.pop(entry['name'], []):
-                        try:
-                            path.unlink(missing_ok=True)
-                        except TimeoutError:
-                            raise
-                        except OSError:
-                            continue
+                if deleted:
+                    total -= entry['size']
+                    removed.append(entry['kind'] + ':' + entry['name'])
+                    if entry['kind'] == 'bundle':
+                        for path in indexes.pop(entry['name'], []):
+                            try:
+                                path.unlink(missing_ok=True)
+                            except TimeoutError:
+                                raise
+                            except OSError:
+                                continue
+                else:
+                    # The renamed bytes still occupy disk; keep them counted.
+                    total += _tree_bytes(trash) - entry['size']
+                    trash_entries += 1
                 dropped = True
                 break
             if not dropped:
@@ -446,7 +604,7 @@ def evict_native_cache(cache: Path, *, keep=(), max_entries: int | None = None,
                 except OSError:
                     continue
         result.update(status='evicted' if removed else 'within-limits',
-                      removed=removed, entries=len(entries), bytes=total)
+                      removed=removed, entries=len(entries) + trash_entries, bytes=total)
         return result
 
 
@@ -505,46 +663,47 @@ def publish_native_content(bundle: Path, cache: Path, manifest: dict) -> dict:
     cache.mkdir(parents=True, exist_ok=True)
     sweep_native_cache_staging(cache)
     temp = Path(tempfile.mkdtemp(prefix='.native-content-', dir=cache))
-    try:
-        for name in _content_names(manifest):
-            target = safe_destination(temp, name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(checked_file(bundle, name), target)
-        manifest_bytes = (bundle / 'manifest.json').read_bytes()
-        if json.loads(manifest_bytes) != manifest:
-            raise ValueError('bundle manifest does not describe the published bytes')
-        (temp / 'manifest.json').write_bytes(manifest_bytes)
-        (temp / NATIVE_CONTENT_MANIFEST).write_text(json.dumps({
-            'schema_version': NATIVE_CONTENT_SCHEMA,
-            'cache_key': key,
-            'bundle': bundle.name,
-            'bundle_manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest(),
-            'native_key': (manifest.get('preparation') or {}).get('native_key'),
-            'files': {name: row['sha256'] for name, row in (manifest.get('files') or {}).items()},
-        }, sort_keys=True, indent=2) + '\n')
-        # The bundle publisher already verified these bytes; a hit re-hashes
-        # the entry, so publication does not repeat the whole traversal.
+    with hold_staging_lock(temp):
         try:
-            os.rename(temp, destination)
-        except TimeoutError:
-            raise
-        except OSError as exc:
-            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
-                raise
-            existing = _read_native_content(destination, key)
-            verify(destination, existing['manifest'], check_environment=False)
-            if existing['manifest'].get('files') != manifest.get('files'):
-                raise ValueError('same native content key produced different artifacts') from exc
-            return {'status': 'present', 'cache_key': key, 'bundle': bundle.name}
-        return {'status': 'published', 'cache_key': key, 'bundle': bundle.name}
-    finally:
-        if temp.exists():
+            for name in _content_names(manifest):
+                target = safe_destination(temp, name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(checked_file(bundle, name), target)
+            manifest_bytes = (bundle / 'manifest.json').read_bytes()
+            if json.loads(manifest_bytes) != manifest:
+                raise ValueError('bundle manifest does not describe the published bytes')
+            (temp / 'manifest.json').write_bytes(manifest_bytes)
+            (temp / NATIVE_CONTENT_MANIFEST).write_text(json.dumps({
+                'schema_version': NATIVE_CONTENT_SCHEMA,
+                'cache_key': key,
+                'bundle': bundle.name,
+                'bundle_manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest(),
+                'native_key': (manifest.get('preparation') or {}).get('native_key'),
+                'files': {name: row['sha256'] for name, row in (manifest.get('files') or {}).items()},
+            }, sort_keys=True, indent=2) + '\n')
+            # The bundle publisher already verified these bytes; a hit re-hashes
+            # the entry, so publication does not repeat the whole traversal.
             try:
-                shutil.rmtree(temp)
+                os.rename(temp, destination)
             except TimeoutError:
                 raise
-            except OSError:
-                pass
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
+                    raise
+                existing = _read_native_content(destination, key)
+                verify(destination, existing['manifest'], check_environment=False)
+                if existing['manifest'].get('files') != manifest.get('files'):
+                    raise ValueError('same native content key produced different artifacts') from exc
+                return {'status': 'present', 'cache_key': key, 'bundle': bundle.name}
+            return {'status': 'published', 'cache_key': key, 'bundle': bundle.name}
+        finally:
+            if temp.exists():
+                try:
+                    _remove_tree(temp)
+                except TimeoutError:
+                    raise
+                except OSError:
+                    pass
 
 
 def _drop_native_content(cache: Path, key: str) -> None:
@@ -552,7 +711,7 @@ def _drop_native_content(cache: Path, key: str) -> None:
     entry = cache / key
     if entry.parent.resolve() != cache.resolve():
         return
-    if entry.is_dir() and not entry.is_symlink():
-        shutil.rmtree(entry)
+    if entry.is_dir() and not _is_link(entry):
+        _remove_tree(entry)
     elif entry.exists() or entry.is_symlink():
         entry.unlink()

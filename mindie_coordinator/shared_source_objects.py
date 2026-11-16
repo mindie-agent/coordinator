@@ -12,8 +12,9 @@ and on-demand cold-miss object export from existing managed `mindie-*` container
   `status='uncertain'` so callers preserve state honesty.
 
 [Timeouts & Locks]
-- Per-destination `fcntl.flock(LOCK_EX)` on `<destination>.init.lock` serializes
-  bare mirror initialization and `git fetch` (`timeout=60`s).
+- Per-destination exclusive advisory lock on `<destination>.init.lock`
+  (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows) serializes bare mirror
+  initialization and `git fetch` (`timeout=60`s).
 - `docker ps`/`inspect` timeout is `15s`; `docker exec` export timeout is `300s`.
 
 [Side-Effect Policy]
@@ -33,7 +34,7 @@ def copy_fixed_objects(source, destination, row, *, snapshot_ref_limit=64):
     Snapshot refs are bounded so transient commits cannot pin the object store
     forever. This function is also embedded in package-owned remote programs.
     """
-    import fcntl
+    import os
     from pathlib import Path
     import subprocess
     import sys
@@ -56,8 +57,23 @@ def copy_fixed_objects(source, destination, row, *, snapshot_ref_limit=64):
     if tree.stdout.strip() != row['tree']:
         raise ValueError('fixed object source has the wrong tree')
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with open(destination.with_suffix('.init.lock'), 'a', encoding='utf-8') as handle:
+
+    def lock_exclusive(handle):
+        """POSIX flock / Windows msvcrt byte-range lock for the same mirror."""
+        if os.name == 'nt':  # pragma: no cover - exercised on Windows CI
+            import msvcrt
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write('\0')
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        import fcntl
         fcntl.flock(handle, fcntl.LOCK_EX)
+
+    with open(destination.with_suffix('.init.lock'), 'a+', encoding='utf-8') as handle:
+        lock_exclusive(handle)
         if not destination.exists():
             git(destination.parent, 'init', '--bare', str(destination))
         if git(destination, 'rev-parse', '--is-bare-repository').stdout.strip() != 'true':

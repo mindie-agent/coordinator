@@ -320,3 +320,148 @@ def test_remote_concatenation_publishes_and_reuses_actual_bundle(bundle):
     reused = namespace['publish_native_content'](immutable, other_pool, manifest)
     assert published['status'] == 'published' and reused['status'] == 'present'
     assert (other_pool / published['cache_key'] / relative).read_bytes() == (source / relative).read_bytes()
+
+
+def _kernel_cache_entry(tmp_path):
+    from mindie_coordinator import native_kernel_recipe as recipe
+
+    root, pool = tmp_path / 'owned', tmp_path / 'pool'
+    content_cache = pool / 'kernel'
+    destination = root / 'vllm-ascend/csrc/build/binary/ascend910b'
+    (destination / 'bin/fixture').mkdir(parents=True)
+    (destination / 'bin/fixture/fixture.o').write_bytes(b'compiled object')
+    (destination / 'gen').mkdir()
+    (destination / 'gen/fixture.sh').write_text('opc --fixture\n')
+    plan = {'operator': 'fixture', 'unit': 'ascend910b', 'source': 'csrc/fixture.cpp',
+            'source_sha256': 'b' * 64, 'native_from': 'a' * 64, 'native_to': 'a' * 64}
+
+    def read_recipe(path):
+        return {'name': path.name}
+
+    key = recipe.kernel_content_key(plan, {}, cann_version='8.2.RC1',
+                                    soc_version='Ascend910B', python_abi='cp312')
+    recipe.publish_kernel_recipe_content(
+        root, plan, content_cache, key, [read_recipe(destination / 'gen/fixture.sh')])
+    return recipe, root, pool, content_cache, destination, plan, key, read_recipe
+
+
+def test_kernel_restore_shared_lock_blocks_concurrent_eviction(tmp_path):
+    recipe, _root, pool, content_cache, _destination, _plan, key, _read = _kernel_cache_entry(tmp_path)
+    with recipe._kernel_entry_lock(content_cache, key) as acquired:
+        assert acquired
+        result = cache.evict_native_cache(pool, keep=set(), max_entries=1,
+                                          max_total_bytes=1)
+        assert result['removed'] == []
+        assert (content_cache / key).is_dir()
+    assert (content_cache / key).is_dir()
+
+
+def test_kernel_restore_failure_cleans_partial_output_and_falls_back(tmp_path, monkeypatch):
+    import errno
+
+    recipe, root, pool, content_cache, destination, plan, key, read_recipe = _kernel_cache_entry(tmp_path)
+    shutil.rmtree(destination)
+    original_copy = recipe.shutil.copy2
+    calls = {'count': 0}
+
+    def faulty_copy(source, target):
+        calls['count'] += 1
+        if calls['count'] == 2:
+            raise OSError(errno.EIO, 'injected restore failure')
+        return original_copy(source, target)
+
+    monkeypatch.setattr(recipe.os, 'link',
+                        lambda *args: (_ for _ in ()).throw(OSError(errno.EXDEV, 'cross-device')))
+    monkeypatch.setattr(recipe.shutil, 'copy2', faulty_copy)
+    with pytest.raises(OSError, match='injected restore failure'):
+        recipe.restore_kernel_recipe_content(root, plan, content_cache, key, read_recipe=read_recipe)
+    assert not destination.exists()
+    if destination.parent.exists():
+        assert not list(destination.parent.iterdir())
+
+    # A stale partial destination must not make the compile fallback raise
+    # FileExistsError at its own mkdir boundary.
+    (destination / 'bin/fixture').mkdir(parents=True)
+    (destination / 'bin/fixture/partial.o').write_bytes(b'partial')
+    monkeypatch.setattr(recipe, '_recipe_inputs', lambda *args: ([], 'dynamic.py', 'ini'))
+    monkeypatch.setattr(recipe, 'kernel_content_key', lambda *args, **kwargs: key)
+    monkeypatch.setattr(recipe.tempfile, 'mkdtemp',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            RuntimeError('compiler path reached')))
+    with pytest.raises(RuntimeError, match='compiler path reached'):
+        recipe.compile_kernel_recipe(
+            root, plan, {}, read_recipe=read_recipe, content_cache=content_cache,
+            content_metadata={'cann_version': '8.2.RC1', 'soc_version': 'Ascend910B',
+                              'python_abi': 'cp312'})
+    assert not destination.exists()
+
+
+def test_cache_scan_never_follows_symlinked_subroots(tmp_path):
+    cache_root = tmp_path / 'cache'
+    cache_root.mkdir()
+    outside = tmp_path / 'outside'
+    outside_entry = outside / ('a' * 64)
+    outside_entry.mkdir(parents=True)
+    (outside_entry / 'blob').write_bytes(b'x' * 10)
+    try:
+        (cache_root / 'bundles').symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip('directory symlinks are unavailable')
+    result = cache.evict_native_cache(cache_root, keep=set(), max_entries=1,
+                                      max_total_bytes=1)
+    assert result['removed'] == []
+    assert (outside_entry / 'blob').read_bytes() == b'x' * 10
+    link = tmp_path / 'cache-link'
+    link.symlink_to(cache_root, target_is_directory=True)
+    assert cache.evict_native_cache(link, keep=set(), max_entries=1,
+                                    max_total_bytes=1)['status'] == 'unsafe'
+
+
+def test_trash_removal_clears_read_only_files(tmp_path):
+    import stat
+
+    cache_root = tmp_path / 'cache'
+    entry = cache_root / ('a' * 64)
+    entry.mkdir(parents=True)
+    blob = entry / 'blob'
+    blob.write_bytes(b'x' * 10)
+    blob.chmod(stat.S_IREAD)
+    result = cache.evict_native_cache(cache_root, keep=set(), max_entries=1,
+                                      max_total_bytes=1)
+    assert result['status'] == 'evicted'
+    assert not entry.exists()
+    assert not list(cache_root.glob('.trash-*'))
+    assert result['entries'] == 0 and result['bytes'] == 0
+
+
+def test_undeleted_trash_keeps_honest_entry_and_byte_accounting(tmp_path, monkeypatch):
+    import errno
+    from mindie_coordinator import native_cache_pool
+
+    cache_root = tmp_path / 'cache'
+    for name in ('a' * 64, 'b' * 64):
+        entry = cache_root / name
+        entry.mkdir(parents=True)
+        (entry / 'blob').write_bytes(b'x' * 10)
+    monkeypatch.setattr(native_cache_pool, '_remove_tree',
+                        lambda path: (_ for _ in ()).throw(OSError(errno.EIO, 'trash locked')))
+    result = cache.evict_native_cache(cache_root, keep=set(), max_entries=1,
+                                      max_total_bytes=1)
+    assert result['removed'] == []
+    assert result['entries'] == 2
+    assert result['bytes'] == 20
+    assert len(list(cache_root.glob('.trash-*'))) == 2
+
+
+def test_eviction_is_fail_closed_when_cache_lock_cannot_be_created(tmp_path):
+    cache_root = tmp_path / 'cache'
+    entry = cache_root / ('a' * 64)
+    entry.mkdir(parents=True)
+    (entry / 'blob').write_bytes(b'x' * 10)
+    # A regular file where the `.locks` directory belongs makes lock-file
+    # creation fail; destructive eviction must not run unlocked.
+    (cache_root / '.locks').write_text('not a directory', encoding='utf-8')
+    result = cache.evict_native_cache(cache_root, keep=set(), max_entries=1,
+                                      max_total_bytes=1)
+    assert result['status'] == 'busy'
+    assert (entry / 'blob').read_bytes() == b'x' * 10

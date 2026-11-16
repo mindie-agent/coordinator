@@ -9,6 +9,8 @@ serialization, housekeeping, peer messages, and device/port selection.
   `timeout=5` match the original single-file authority.
 - Mutations run under `BEGIN IMMEDIATE`; selection never reserves another
   task's device or port, and timeout/unknown observations retain leases.
+- Schema-8 `messages.created_at` defaults to the current epoch, and concurrent
+  7->8 migrations tolerate `duplicate column` then re-verify the column.
 
 [Timeouts & Locks]
 - SQLite timeout is 5s with a 5000ms busy timeout; transactions are exclusive.
@@ -143,7 +145,7 @@ class CoordinationStateMixin:
                     recipient TEXT NOT NULL,
                     recipient_session TEXT NOT NULL,
                     data TEXT NOT NULL,
-                    created_at REAL NOT NULL DEFAULT 0
+                    created_at REAL NOT NULL DEFAULT (CAST(strftime('%s','now') AS REAL))
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_recipient
                     ON messages(recipient, recipient_session, cursor);
@@ -183,7 +185,16 @@ class CoordinationStateMixin:
                 row["name"] for row in connection.execute("PRAGMA table_info(messages)")
             }
             if "created_at" not in message_columns:
-                connection.execute("ALTER TABLE messages ADD COLUMN created_at REAL")
+                try:
+                    connection.execute("ALTER TABLE messages ADD COLUMN created_at REAL")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+                message_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(messages)")
+                }
+                if "created_at" not in message_columns:
+                    raise CoordinationError("messages.created_at migration did not persist")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)")
             backfill_message_timestamps(connection)

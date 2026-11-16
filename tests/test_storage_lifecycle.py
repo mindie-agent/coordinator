@@ -7,12 +7,15 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import time
+from unittest import mock
 
 import pytest
 
 from mindie_coordinator import native_cache_pool, runtime_profile
 from mindie_coordinator.execution_capture import capture_records, save_cache
 from mindie_coordinator.host.mindie_npu_coordination import NpuCoordinator
+from mindie_coordinator.local_exec import no_window_kwargs
+from mindie_coordinator.service import CoordinatorService
 from mindie_coordinator.shared_source_objects import copy_fixed_objects
 from mindie_coordinator.storage_retention import (
     prune_capture_caches,
@@ -274,7 +277,7 @@ def test_shared_snapshot_refs_keep_only_the_newest_window(tmp_path):
     def run(*args, env=None):
         return subprocess.check_output(
             ["git", "-C", str(source), *args], text=True, encoding="utf-8",
-            env={**os.environ, **(env or {})}).strip()
+            env={**os.environ, **(env or {})}, **no_window_kwargs()).strip()
 
     run("init")
     run("config", "user.name", "Retention Test")
@@ -293,7 +296,8 @@ def test_shared_snapshot_refs_keep_only_the_newest_window(tmp_path):
 
     refs = subprocess.check_output(
         ["git", "-C", str(shared), "for-each-ref", "--format=%(refname)",
-         "refs/mindie/snapshots/"], text=True, encoding="utf-8").splitlines()
+         "refs/mindie/snapshots/"], text=True, encoding="utf-8",
+        **no_window_kwargs()).splitlines()
     assert len(refs) == 64
     assert "refs/mindie/snapshots/" + commits[-1] in refs
     assert "refs/mindie/snapshots/" + commits[0] not in refs
@@ -312,3 +316,164 @@ def test_terminal_run_retention_skips_active_and_unknown_runs(tmp_path):
     assert removed == ["terminal"]
     assert (runs / "active").is_dir()
     assert (runs / "unknown").is_dir()
+
+
+def test_message_inserted_without_created_at_survives_housekeep(tmp_path):
+    coordinator = NpuCoordinator(tmp_path / "state")
+    fresh = {"text": "fresh legacy insert"}
+    with coordinator._transaction() as db:
+        db.execute(
+            "INSERT INTO messages(message_id,sender,sender_session,recipient,"
+            "recipient_session,data) VALUES('fresh','a','s','b','s',?)",
+            (json.dumps(fresh),))
+        db.execute(
+            "INSERT INTO messages(message_id,sender,sender_session,recipient,"
+            "recipient_session,data,created_at) VALUES('zero','a','s','b','s',?,0)",
+            (json.dumps({"at": "2027-01-01T00:00:00Z", "text": "legacy zero"}),))
+
+    with sqlite3.connect(tmp_path / "state" / "coordinator.sqlite3") as db:
+        inserted = db.execute(
+            "SELECT created_at FROM messages WHERE message_id='fresh'").fetchone()[0]
+        assert inserted > 1_000_000_000
+
+    coordinator.snapshot({"status": "ok", "devices": [0, 1, 2, 3],
+                          "busy": {}, "free": [0, 1, 2, 3]})
+
+    with sqlite3.connect(tmp_path / "state" / "coordinator.sqlite3") as db:
+        rows = db.execute(
+            "SELECT message_id, created_at FROM messages ORDER BY message_id").fetchall()
+    assert [row[0] for row in rows] == ["fresh", "zero"]
+    assert all(row[1] > 1_000_000_000 for row in rows)
+
+
+def test_failed_run_with_unreleased_preparation_is_never_pruned(tmp_path):
+    from mindie_coordinator.agent_session import AgentSessions
+
+    sessions = AgentSessions(tmp_path / "sessions")
+    service = CoordinatorService(tmp_path / "coordinator", pool=mock.MagicMock(),
+                                 sessions=sessions)
+    runs = service.state_dir / "runs"
+    for run_id in ("failed-inconclusive", "failed-active-lease", "failed-clean"):
+        (runs / run_id).mkdir(parents=True)
+    old = time.time() - 20 * 86400
+    for path in runs.iterdir():
+        os.utime(path, (old, old))
+    retained = {
+        "id": "failed-inconclusive", "session_id": "s", "phase": "failed",
+        "preparation_jobs": {"role": {"prepare-1": {
+            "state": "inconclusive", "quiet": False,
+        }}},
+    }
+    active_lease = {
+        "id": "failed-active-lease", "session_id": "s", "phase": "failed",
+        "roles": [{"name": "role", "managed_job": "job-1",
+                   "observation": {"state": "failed", "lease_state": "active"}}],
+    }
+    clean = {"id": "failed-clean", "session_id": "s", "phase": "failed"}
+    sessions.save_execution(retained)
+    sessions.save_execution(active_lease)
+    sessions.save_execution(clean)
+
+    service._prune_terminal_runs()
+
+    assert (runs / "failed-inconclusive").is_dir()
+    assert (runs / "failed-active-lease").is_dir()
+    assert not (runs / "failed-clean").exists()
+
+
+def test_daemon_progress_path_prunes_terminal_runs_with_cooldown(tmp_path):
+    from mindie_coordinator.agent_session import AgentSessions
+    from mindie_coordinator.storage_retention import RUN_PRUNE_COOLDOWN_SECONDS
+
+    sessions = AgentSessions(tmp_path / "sessions")
+    pool = mock.MagicMock()
+    service = CoordinatorService(tmp_path / "coordinator", pool=pool, sessions=sessions)
+    sessions.save_execution({"id": "terminal", "session_id": "s", "phase": "succeeded"})
+    runs = service.state_dir / "runs"
+    (runs / "terminal").mkdir(parents=True)
+    old = time.time() - 20 * 86400
+    os.utime(runs / "terminal", (old, old))
+
+    service._dispatch_progress()
+
+    assert not (runs / "terminal").exists()
+    pool.tick.assert_called_once()
+
+    # A second clean run cannot be pruned again until the cooldown elapses.
+    sessions.save_execution({"id": "terminal-2", "session_id": "s", "phase": "succeeded"})
+    (runs / "terminal-2").mkdir(parents=True)
+    os.utime(runs / "terminal-2", (old, old))
+    service._dispatch_progress()
+    assert (runs / "terminal-2").is_dir()
+
+    service._last_run_prune = time.time() - RUN_PRUNE_COOLDOWN_SECONDS - 1
+    service._dispatch_progress()
+    assert not (runs / "terminal-2").exists()
+
+
+def test_parity_cleanup_timeout_never_discards_snapshot_receipt(tmp_path, monkeypatch):
+    service = CoordinatorService(tmp_path / "coordinator", pool=mock.MagicMock())
+    commits = {"vllm": "a" * 40, "vllm-ascend": "b" * 40}
+    binding = {"runtime_id": "runtime-1", "endpoint": {},
+               "intent": {"session": "workspace"}, "environment": {}, "build_env": {}}
+
+    monkeypatch.setattr("mindie_coordinator.service.materialize_command",
+                        lambda **kwargs: ["parity", "sync"])
+    monkeypatch.setattr("mindie_coordinator.service.source_paths", lambda snapshot: {})
+
+    def fake_run(args, **kwargs):
+        kwargs["stdout"].write(json.dumps({"status": "ready", "snapshot_commits": commits}))
+        kwargs["stdout"].flush()
+        return subprocess.CompletedProcess(args, 0)
+
+    def cleanup_timeout(*args, **kwargs):
+        raise TimeoutError("fixed-input cleanup timed out")
+
+    monkeypatch.setattr("mindie_coordinator.service.subprocess.run", fake_run)
+    monkeypatch.setattr("mindie_coordinator.service.prune_fixed_inputs", cleanup_timeout)
+    result = service.sync_binding(binding, {"id": "snapshot", "records": []}, "run-1")
+    assert result == commits
+    assert result.cleanup_warning["timeout"] is True
+    assert (service.state_dir / "runs" / "run-1" / "runtime-1" / "parity.json").is_file()
+
+
+def test_staging_sweep_requires_an_unheld_builder_lock(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    active = cache / ".publish-live"
+    active.mkdir()
+    (active / "partial").write_bytes(b"x")
+    old = time.time() - 7200
+    os.utime(active, (old, old))
+
+    with native_cache_pool.hold_staging_lock(active):
+        assert native_cache_pool.sweep_native_cache_staging(cache) == []
+        assert active.is_dir()
+
+    assert native_cache_pool.sweep_native_cache_staging(cache) == [active.name]
+    assert not active.exists()
+
+
+def test_schema_seven_messages_table_migrates_created_at(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    database = state / "coordinator.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "CREATE TABLE messages (cursor INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "message_id TEXT NOT NULL UNIQUE,sender TEXT NOT NULL,"
+            "sender_session TEXT NOT NULL,recipient TEXT NOT NULL,"
+            "recipient_session TEXT NOT NULL,data TEXT NOT NULL)")
+        db.execute(
+            "INSERT INTO messages(message_id,sender,sender_session,recipient,"
+            "recipient_session,data) VALUES('legacy','a','s','b','s',?)",
+            (json.dumps({"at": "2027-01-01T00:00:00Z", "text": "legacy"}),))
+
+    NpuCoordinator(state)
+
+    with sqlite3.connect(database) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+        created = db.execute(
+            "SELECT created_at FROM messages WHERE message_id='legacy'").fetchone()[0]
+    assert "created_at" in columns
+    assert created > 1_000_000_000

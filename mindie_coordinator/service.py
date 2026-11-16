@@ -18,6 +18,8 @@ so `mindie_coordinator.service` remains the stable public module.
 [Timeouts & Locks]
 - Tick interval `TICK_SECONDS = 2.0`s; status cache TTL `2.0`s; stop wait
   `STOP_WAIT_SECONDS = 30.0`s; IPC timeout `CLIENT_TIMEOUT_SECONDS = 60.0`s.
+- Terminal run-log retention is daemon-tick throttled (`300`s cooldown) and
+  bounded to a `1`s scan budget; parity cleanup failures only add a warning.
 - Startup lock has a 6s deadline; daemon lock is non-blocking.
 - Gang observation retries are gated by `GANG_PLAN_RETRY_SECONDS`; fleet probes
   are bounded by `MAX_GANG_PROBE_HOSTS` and serialized.
@@ -37,6 +39,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -57,13 +60,7 @@ from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERM
 from mindie_coordinator.parity import materialize_command
 from mindie_coordinator.placement import extract_topology_spec, requested_hardware, role_plan, runtime_matches
 from mindie_coordinator.ready_runtime import RuntimePool
-from mindie_coordinator.storage_retention import (
-    PRUNABLE_RUN_PHASES,
-    RUN_RETENTION_LIMIT,
-    RUN_RETENTION_SECONDS,
-    prune_fixed_inputs,
-    prune_terminal_run_directories,
-)
+from mindie_coordinator.storage_retention import SnapshotCommits, prune_fixed_inputs
 from mindie_coordinator.task_messages import TaskMessages
 
 from mindie_coordinator.service_client import (
@@ -74,6 +71,7 @@ from mindie_coordinator.service_client import (
     _daemon_runtime_matches,
     _dispatch_progress as _daemon_dispatch_progress,
     _dispatch_progress_active as _daemon_dispatch_progress_active,
+    _prune_terminal_runs as _daemon_prune_terminal_runs,
     _ensure_daemon_locked,
     _lock_daemon,
     _runtime_identity,
@@ -160,6 +158,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
     _tick_loop = _daemon_tick_loop
     _dispatch_progress = _daemon_dispatch_progress
     _dispatch_progress_active = _daemon_dispatch_progress_active
+    _prune_terminal_runs = _daemon_prune_terminal_runs
     _tick_one = _daemon_tick_one
     _tick_one_correlated = _daemon_tick_one_correlated
     _serve_conn = _daemon_serve_conn
@@ -240,36 +239,6 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
         if self._sessions is not None:
             return self._sessions
         raise ValueError("sessions directory is required")
-
-    def _prune_terminal_runs(self) -> None:
-        """Delete old terminal run logs; an unreadable store keeps everything."""
-        now = time.time()
-        if now - self._last_run_prune < 3600:
-            return
-        self._last_run_prune = now
-        terminal, live = set(), set()
-        for directory in list(self._session_dirs):
-            try:
-                rows = self.store(directory).all_executions()
-            except Exception as exc:
-                self._record_daemon_error(f"sessions {directory}: {exc}")
-                return
-            for row in rows:
-                run_id = row.get("id")
-                if not isinstance(run_id, str):
-                    continue
-                if row.get("phase") in PRUNABLE_RUN_PHASES:
-                    terminal.add(run_id)
-                else:
-                    live.add(run_id)
-        try:
-            prune_terminal_run_directories(
-                self.state_dir / "runs", terminal, live_ids=live,
-                max_age_seconds=RUN_RETENTION_SECONDS, max_runs=RUN_RETENTION_LIMIT)
-        except TimeoutError:
-            raise
-        except OSError as exc:
-            self._record_daemon_error(f"run retention: {exc}")
 
     def reconcile(self) -> None:
         self.pool.tick()
@@ -768,9 +737,6 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                 env=environment, timeout=600, check=False,
                 **no_window_kwargs(),
             )
-        # The descriptor only transports this completed parity invocation.
-        prune_fixed_inputs(directory / ".mindie-local" / "fixed-inputs",
-                           max_age_seconds=0)
         try:
             payload = json.loads((directory / "parity.json").read_text(encoding="utf-8"))
         except TimeoutError:
@@ -785,4 +751,15 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             raise error(f"source synchronization failed: {reason}")
         if payload.get("status") not in {"ready", "materialized"}:
             raise RuntimeError("source staging alone does not authorize execution")
-        return payload["snapshot_commits"]
+        commits = payload["snapshot_commits"]
+        # The descriptor only transports this completed parity invocation.
+        # Cleanup failure must never discard a succeeded snapshot receipt.
+        cleanup_warning = None
+        try:
+            prune_fixed_inputs(directory / ".mindie-local" / "fixed-inputs",
+                               max_age_seconds=0)
+        except (OSError, TimeoutError) as exc:
+            cleanup_warning = {"artifact": "fixed-inputs", "error": str(exc)[:500],
+                               "timeout": isinstance(exc, TimeoutError)}
+            print(f"source synchronization cleanup warning: {exc}", file=sys.stderr, flush=True)
+        return SnapshotCommits(commits, cleanup_warning=cleanup_warning)
