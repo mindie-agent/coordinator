@@ -218,10 +218,13 @@ class ResultAndToolContractTests(unittest.TestCase):
 
 
     def test_an_unavailable_task_registry_is_blocked_and_never_a_remote_success(self):
-        with mock.patch.dict("os.environ", {}, clear=True):
-            payload = mindie_call("mindie.session", {})
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked_state = Path(tmp) / "not-a-directory"
+            blocked_state.write_text("occupied\n", encoding="utf-8")
+            with mock.patch.dict("os.environ", {"MINDIE_AGENT_SESSIONS_DIR": str(blocked_state), "HOME": str(tmp)}, clear=True):
+                payload = mindie_call("mindie.session", {})
         self.assertEqual(payload["result"]["outcome"], "blocked")
-        self.assertEqual(payload["result"]["status"], "managed_task_context_required")
+        self.assertEqual(payload["result"]["status"], "unavailable")
         self.assertEqual(payload["result"]["error_details"]["submission_state"], "not_sent")
 
 

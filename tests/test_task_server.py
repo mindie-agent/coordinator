@@ -300,12 +300,12 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual((result["structuredContent"]["outcome"], result["structuredContent"]["status"]), ("success", "finished"))
         self.assertTrue(result["structuredContent"]["data"]["worktrees_preserved"])
 
-    def test_a_missing_context_is_blocked_not_guessed(self):
+    def test_zero_metadata_session_attaches_cleanly_without_context_file(self):
         response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "mindie_session"}})
         result = response["result"]
-        self.assertTrue(result["isError"])
-        self.assertEqual(result["structuredContent"]["status"], "managed_task_context_required")
-        self.assertEqual(result["structuredContent"]["error_details"]["reason"], "missing")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["structuredContent"]["outcome"], "success")
+        self.assertEqual(result["structuredContent"]["status"], "open")
 
     def test_call_tool_uses_the_remote_dev_result_envelope(self):
         result = call_tool("mindie_session", {"context_file": self.registry.context_file})

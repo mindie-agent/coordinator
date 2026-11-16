@@ -45,7 +45,7 @@ def error_payload(tool: str, *, outcome: str, status: str, error: str) -> dict:
     return result
 
 
-def main():
+def main(argv=None, *, metadata=None):
     from mindie_coordinator._stdio import configure_stdio
     configure_stdio()
     parser = argparse.ArgumentParser(
@@ -98,9 +98,11 @@ def main():
             child.add_argument("--host")
             child.add_argument("--port", type=int)
             child.add_argument("--user")
-    args = vars(parser.parse_args())
+    args = vars(parser.parse_args(argv))
     operation = args.pop("operation")
     if operation == "attach":
+        if metadata is not None:
+            parser.error("native MCP callers attach automatically through task session/run")
         inherited = args["parent_context"] or args["association"]
         try:
             store = AgentSessions(Path(load_context(inherited)["state_dir"])) if inherited else AgentSessions()
@@ -143,9 +145,13 @@ def main():
             merged["sources"] = captured
         elif no_sources:
             merged["sources"] = {}
-    result = mindie_call("mindie." + operation, merged)
-    print(json.dumps(result["result"], ensure_ascii=False))
-    return 0 if result["result"]["outcome"] == "success" else 1
+    if metadata is None:
+        result = mindie_call("mindie." + operation, merged)["result"]
+    else:
+        from mindie_coordinator.task_server import call_tool
+        result = call_tool("mindie_" + operation, merged, metadata)["structuredContent"]
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result["outcome"] == "success" else 1
 
 
 if __name__ == "__main__":

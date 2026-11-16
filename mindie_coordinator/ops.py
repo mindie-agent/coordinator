@@ -59,7 +59,7 @@ def context_required_result(name, arguments, error):
 
 def task_schema(properties: dict, required: tuple[str, ...] = ()) -> dict:
     return {"type": "object",
-            "properties": {"context_file": {"type": "string", "description": "Local task context supplied by the native session hook; never guess from cwd or newest history."},
+            "properties": {"context_file": {"type": "string", "description": "Optional registered task context file path. Omit in normal use: tasks attach automatically on demand and mindie.execution resolves execution_id directly."},
                            "full": {"type": "boolean", "default": False, "description": "Return the full operation record instead of its compact observation."},
                            **properties},
             "required": list(required), "additionalProperties": False}
@@ -235,6 +235,7 @@ def mindie_call(name, args, *, allow_native_context=True):
     target = {"kind": "mindie-env" if name in ENV_TOOLS else "mindie-task"}
     client = None
     state_dir = None
+    task_init_pending = False
     try:
         if name not in TOOL_SCHEMAS:
             raise caller_error("unknown MindIE operation")
@@ -244,7 +245,9 @@ def mindie_call(name, args, *, allow_native_context=True):
         from mindie_coordinator.task_client import TaskClient
         if name in ENV_TOOLS:
             if args.get("context_file"):
+                task_init_pending = True
                 client = TaskClient(args["context_file"], allow_native_context=allow_native_context)
+                task_init_pending = False
                 target["session_id"] = client.context["session"]["id"]
                 state_dir = coordinator_state_dir(client.store.state_dir)
             else:
@@ -265,7 +268,18 @@ def mindie_call(name, args, *, allow_native_context=True):
                 value = handle_lease(args, state_dir=state_dir)
             status = str(value.get("state") or "ready")
         else:
-            client = TaskClient(args.get("context_file", ""), allow_native_context=allow_native_context)
+            effective_context_file = args.get("context_file", "")
+            if name == "mindie.execution" and not effective_context_file:
+                exec_ref = args.get("execution_id") or args.get("run_id")
+                if isinstance(exec_ref, str) and exec_ref:
+                    from mindie_coordinator.agent_session import AgentSessions
+
+                    resolved_ctx = AgentSessions().context_for_execution(exec_ref)
+                    if resolved_ctx is not None:
+                        effective_context_file = resolved_ctx["context_file"]
+            task_init_pending = True
+            client = TaskClient(effective_context_file, allow_native_context=allow_native_context)
+            task_init_pending = False
             target["session_id"] = client.context["session"]["id"]
             state_dir = coordinator_state_dir(client.store.state_dir)
             if name == "mindie.session":
@@ -331,6 +345,8 @@ def mindie_call(name, args, *, allow_native_context=True):
                     exception=exc,
                 )
             details = error_details(exc)
+            if task_init_pending:
+                details = {**details, "submission_state": details.get("submission_state") or "not_sent"}
             result = make_result(tool=name, target=target, outcome="blocked", status="unavailable",
                                  summary=str(exc), duration_ms=int((time.monotonic() - started) * 1000),
                                  warnings=["Local file and shell tools remain available. No remote success is implied."],

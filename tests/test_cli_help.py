@@ -8,8 +8,8 @@ import unittest
 
 class CliHelpTests(unittest.TestCase):
     def test_coordinator_entry_and_task_server_help(self):
-        for args in (["--help"], ["task-server", "--help"], ["runtime-register", "--help"],
-                     ["daemon", "--help"], ["provision", "--help"]):
+        for args in (["--help"], ["task-server", "--help"], ["task", "--help"],
+                     ["runtime-register", "--help"], ["daemon", "--help"], ["provision", "--help"]):
             with self.subTest(args=args):
                 proc = subprocess.run(
                     [sys.executable, "-m", "mindie_coordinator", *args],
