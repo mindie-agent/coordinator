@@ -61,11 +61,11 @@ try:  # Local package use. Remote concatenation must exec native_cache_pool firs
     from .native_cache_pool import (
         NATIVE_CONTENT_MANIFEST as NATIVE_CONTENT_MANIFEST,
         NATIVE_CONTENT_SCHEMA as NATIVE_CONTENT_SCHEMA,
-        _drop_native_content, _link_or_copy, _read_native_content,
-        native_cache_receipt as native_cache_receipt,
+        _cache_operation, _drop_native_content, _link_or_copy, _read_native_content,
+        evict_native_cache, native_cache_receipt as native_cache_receipt,
         native_content_key,
         native_content_key_material as native_content_key_material,
-        publish_native_content,
+        publish_native_content, touch_native_cache_entry,
     )
 except (ImportError, KeyError):  # pragma: no cover - concatenated namespace
     pass
@@ -197,8 +197,24 @@ def shared_base_key(preparation: dict, image_digest: str) -> str:
     return shared_input_key(baseline, image_digest)
 
 
+def _maintain_shared_native(cache: Path, keep) -> None:
+    try:
+        evict_native_cache(cache, keep={value for value in keep if value})
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        print('shared native cache maintenance failed: ' + str(exc), file=sys.stderr, flush=True)
+
+
 def store_shared_native(root: Path, cache: Path) -> dict:
     """Automatically cache only the existing verified output bundle and metadata."""
+    with _cache_operation(cache):
+        result = _store_shared_native(root, cache)
+    _maintain_shared_native(cache, {result.get('bundle'), result.get('cache_key')})
+    return result
+
+
+def _store_shared_native(root: Path, cache: Path) -> dict:
     manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))
     manifest = _with_distribution_metadata(manifest)
     bundle = publish(root, cache / 'bundles', manifest)
@@ -210,6 +226,13 @@ def store_shared_native(root: Path, cache: Path) -> dict:
 
 def _store_captured_native(root: Path, cache: Path, manifest: dict, timings: dict) -> dict:
     """Only the managed capture's current stack supplies this fresh manifest."""
+    with _cache_operation(cache):
+        result = _store_captured_native_unlocked(root, cache, manifest, timings)
+    _maintain_shared_native(cache, {result.get('bundle'), result.get('cache_key')})
+    return result
+
+
+def _store_captured_native_unlocked(root: Path, cache: Path, manifest: dict, timings: dict) -> dict:
     manifest = _with_distribution_metadata(manifest)
     bundle = _publish_captured_bundle(root, cache / 'bundles', manifest, timings=timings)
     result = _index_native_bundle(cache, manifest, bundle)
@@ -340,6 +363,17 @@ def revalidate_shared_native(root: Path, cache: Path) -> dict:
 def restore_shared_native(root: Path, cache: Path, preparation: dict, image_digest: str, versions: dict,
                           machine_type: str | None = None, candidate: dict | None = None) -> dict:
     """Map an ABI-compatible cached bundle into this execution's own sources."""
+    with _cache_operation(cache):
+        result = _restore_shared_native_unlocked(
+            root, cache, preparation, image_digest, versions,
+            machine_type=machine_type, candidate=candidate)
+    _maintain_shared_native(cache, {result.get('bundle'), result.get('cache_key')})
+    return result
+
+
+def _restore_shared_native_unlocked(root: Path, cache: Path, preparation: dict, image_digest: str,
+                                    versions: dict, machine_type: str | None = None,
+                                    candidate: dict | None = None) -> dict:
     key = shared_input_key(preparation, image_digest)
     try:
         requested_content_key = native_content_key(preparation)
@@ -490,6 +524,9 @@ def restore_shared_native(root: Path, cache: Path, preparation: dict, image_dige
     except Exception:
         discard_shared_native(root)
         raise
+    if cache_key:
+        touch_native_cache_entry(cache / cache_key)
+    touch_native_cache_entry(cache / 'bundles' / str(pointer['bundle']))
     return receipt
 
 

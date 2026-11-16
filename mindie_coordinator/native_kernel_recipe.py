@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 RECIPE_FILE = '.mindie-runtime/kernel-compile-recipe.json'
@@ -48,6 +49,9 @@ RECIPE_TOOLS = ('ascendc_bin_param_build.py', 'ascendc_ops_config.py',
 KERNEL_CONTENT_SCHEMA = 'mindie-native-kernel-content/1'
 NATIVE_CONTENT_KEY_SCHEMA = 'mindie-native-content/1'
 KERNEL_CONTENT_MANIFEST = 'manifest.json'
+KERNEL_STAGING_MAX_AGE = 3600
+KERNEL_CONTENT_STAGING = ('.kernel-content-', '.trash-', '.native-content-')
+KERNEL_COMPILE_STAGING = ('kernel-recipe-',)
 KERNEL_COMPILE_FLAG_KEYS = (
     'CMAKE_BUILD_TYPE', 'SOC_VERSION', 'MINDIE_SOC_VERSION',
     'COMPILE_CUSTOM_KERNELS', 'MINDIE_COMPILE_CUSTOM_KERNELS', 'MINDIE_USE_CLANG15',
@@ -69,6 +73,55 @@ def _recipe_child(root: Path, name: str) -> Path:
 
 def _recipe_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sweep_stale_directories(directory: Path, prefixes, *,
+                             max_age_seconds: float = KERNEL_STAGING_MAX_AGE) -> None:
+    """Remove killed publication/compile staging without touching fresh work."""
+    try:
+        entries = list(directory.iterdir())
+    except TimeoutError:
+        raise
+    except OSError:
+        return
+    now = time.time()
+    for path in entries:
+        if not path.name.startswith(prefixes):
+            continue
+        try:
+            age = now - path.lstat().st_mtime
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+        if age < max_age_seconds:
+            continue
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+
+
+def _maintain_kernel_cache(cache: Path, key: str) -> None:
+    """Bound the shared cache after publication; never fail a completed compile."""
+    evict = globals().get('evict_native_cache')
+    if not callable(evict):
+        try:
+            from .native_cache_pool import evict_native_cache as evict
+        except ImportError:  # pragma: no cover - concatenated namespace without pool
+            return
+    root = cache.parent if cache.name == 'kernel' else cache
+    try:
+        evict(root, keep={key})
+    except TimeoutError:
+        raise
+    except OSError:
+        pass
 
 
 def _cgroup_cpu_cores() -> int:
@@ -219,6 +272,8 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
     binary = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
     files = _kernel_cache_files(binary)
     candidate = _kernel_cache_manifest(plan, key, recipes, files)
+    cache.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_directories(cache, KERNEL_CONTENT_STAGING)
 
     def check_existing(existing, observed_files):
         if any(existing.get(field) != value for field, value in candidate.items() if field != 'files'):
@@ -237,8 +292,8 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
             _drop_kernel_content(cache, key)
         else:
             check_existing(existing, observed_files)
+            _maintain_kernel_cache(cache, key)
             return {'status': 'present', 'cache_key': key}
-    cache.mkdir(parents=True, exist_ok=True)
     temp = Path(tempfile.mkdtemp(prefix='.kernel-content-', dir=cache))
     try:
         for relative in files:
@@ -257,10 +312,17 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
                 raise
             check_existing(json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8')),
                            _kernel_cache_files(destination))
+            _maintain_kernel_cache(cache, key)
             return {'status': 'present', 'cache_key': key}
     finally:
         if temp.exists():
-            shutil.rmtree(temp)
+            try:
+                shutil.rmtree(temp)
+            except TimeoutError:
+                raise
+            except OSError:
+                pass
+    _maintain_kernel_cache(cache, key)
     return {'status': 'published', 'cache_key': key}
 
 
@@ -423,6 +485,7 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
             missing = [name for name in measured if not metadata.get(name)]
             print('native-incremental: kernel content cache skipped; measured metadata missing: '
                   + ', '.join(missing), flush=True)
+    _sweep_stale_directories(root / '.mindie-runtime', KERNEL_COMPILE_STAGING)
     stage = Path(tempfile.mkdtemp(prefix='kernel-recipe-', dir=root / '.mindie-runtime'))
     started = False
     completed = False
@@ -548,4 +611,9 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
         if started and not completed:
             print('native-incremental: retained failed compiler stage: ' + str(stage), flush=True)
         else:
-            shutil.rmtree(stage)
+            try:
+                shutil.rmtree(stage)
+            except TimeoutError:
+                raise
+            except OSError:
+                pass

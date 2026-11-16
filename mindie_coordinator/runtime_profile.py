@@ -724,6 +724,16 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
     import time
     timings = timings if timings is not None else {}
     cache.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for stale in cache.glob(".publish-*"):
+        try:
+            if now - stale.lstat().st_mtime <= 3600:
+                continue
+            shutil.rmtree(stale) if stale.is_dir() and not stale.is_symlink() else stale.unlink()
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
     destination = cache / manifest["build_key"]
     if destination.exists():
         existing = json.loads((destination / "manifest.json").read_text(encoding='utf-8'))
@@ -768,7 +778,12 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
         return destination
     finally:
         if temp.exists():
-            shutil.rmtree(temp)
+            try:
+                shutil.rmtree(temp)
+            except TimeoutError:
+                raise
+            except OSError:
+                pass
 
 def restore(root: Path, bundle: Path, expected_build_key: str) -> None:
     """Preparation-only restoration, after owner proves all its workers stopped."""

@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _DIAGNOSTIC_PHASES = ContextVar("host_diagnostic_phases", default=None)
 _DIAGNOSTIC_PROCESS = uuid.uuid4().hex
 

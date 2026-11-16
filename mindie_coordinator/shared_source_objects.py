@@ -24,17 +24,19 @@ and on-demand cold-miss object export from existing managed `mindie-*` container
 SHARED_SOURCE_CACHE = '/tmp/mindie-source-objects/v1'
 
 
-def copy_fixed_objects(source, destination, row):
+def copy_fixed_objects(source, destination, row, *, snapshot_ref_limit=64):
     """Copy one exact object closure, without alternates or donor ref changes.
 
     Git fetch checks received objects and connectivity before publishing the
     immutable ref. A missing source is a cache miss; a failed transfer is not.
     Locks protect only the receiving mirror and remain stable across retries.
-    This function is also embedded in package-owned remote programs.
+    Snapshot refs are bounded so transient commits cannot pin the object store
+    forever. This function is also embedded in package-owned remote programs.
     """
     import fcntl
     from pathlib import Path
     import subprocess
+    import sys
 
     def git(path, *args, check=True):
         result = subprocess.run(['git', '-C', str(path), *args], capture_output=True,
@@ -61,14 +63,52 @@ def copy_fixed_objects(source, destination, row):
         if git(destination, 'rev-parse', '--is-bare-repository').stdout.strip() != 'true':
             raise ValueError('fixed object destination is not a bare mirror')
         fixed_ref = 'refs/mindie/snapshots/' + row['commit']
+
+        def prune_snapshot_refs():
+            """Keep the newest bounded snapshot refs plus this exact publication."""
+            try:
+                listed = git(destination, 'for-each-ref',
+                             '--format=%(refname) %(committerdate:unix)',
+                             'refs/mindie/snapshots/', check=False)
+                if listed.returncode:
+                    return
+                refs = []
+                for line in listed.stdout.splitlines():
+                    ref, _, timestamp = line.partition(' ')
+                    try:
+                        order = int(timestamp)
+                    except ValueError:
+                        order = 0
+                    refs.append((order, ref))
+                refs.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                limit = max(1, int(snapshot_ref_limit or 64))
+                ordered = [ref for _, ref in refs]
+                keep = set(ordered[:limit])
+                if fixed_ref not in keep:
+                    # The requested commit always survives, replacing the oldest
+                    # window slot when it is older than every retained ref.
+                    keep = set(ordered[:limit - 1])
+                    keep.add(fixed_ref)
+                for _, ref in refs:
+                    if ref in keep:
+                        continue
+                    git(destination, 'update-ref', '-d', ref, check=False)
+            except TimeoutError:
+                raise
+            except (OSError, subprocess.SubprocessError) as exc:
+                # Ref bounding is maintenance; the fixed commit is already pinned.
+                print('snapshot ref maintenance unavailable: ' + str(exc), file=sys.stderr, flush=True)
+
         pinned = git(destination, 'rev-parse', '--verify', fixed_ref, check=False)
         if not pinned.returncode and pinned.stdout.strip() == row['commit']:
+            prune_snapshot_refs()
             return True
         git(destination, '-c', 'fetch.fsckObjects=true', '-c', 'transfer.fsckObjects=true',
             '-c', 'gc.auto=0', 'fetch', '--no-tags', '--no-recurse-submodules',
             '--no-write-fetch-head', str(source), row['commit'] + ':' + fixed_ref)
         if git(destination, 'rev-parse', row['commit'] + '^{tree}').stdout.strip() != row['tree']:
             raise ValueError('fixed object destination has the wrong tree')
+        prune_snapshot_refs()
     return True
 
 

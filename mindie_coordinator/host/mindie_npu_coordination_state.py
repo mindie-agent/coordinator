@@ -40,6 +40,10 @@ from .mindie_npu_coordination_probe import (
     unguarded_shared_process,
     utc_now_iso,
 )
+from .mindie_npu_coordination_retention import (
+    backfill_message_timestamps,
+    prune_coordination_rows,
+)
 
 
 class CoordinationStateMixin:
@@ -92,6 +96,8 @@ class CoordinationStateMixin:
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_queue
                     ON tasks(state, priority DESC, submitted_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_tasks_retention
+                    ON tasks(state, updated_at);
                 CREATE TABLE IF NOT EXISTS holds (
                     hold_id TEXT PRIMARY KEY,
                     owner TEXT NOT NULL,
@@ -105,6 +111,8 @@ class CoordinationStateMixin:
                 );
                 CREATE INDEX IF NOT EXISTS idx_holds_window
                     ON holds(state, not_before, end_at);
+                CREATE INDEX IF NOT EXISTS idx_holds_retention
+                    ON holds(state, updated_at);
                 CREATE TABLE IF NOT EXISTS ports (
                     port INTEGER PRIMARY KEY,
                     kind TEXT NOT NULL,
@@ -134,7 +142,8 @@ class CoordinationStateMixin:
                     sender_session TEXT NOT NULL,
                     recipient TEXT NOT NULL,
                     recipient_session TEXT NOT NULL,
-                    data TEXT NOT NULL
+                    data TEXT NOT NULL,
+                    created_at REAL NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_recipient
                     ON messages(recipient, recipient_session, cursor);
@@ -170,6 +179,15 @@ class CoordinationStateMixin:
                     except sqlite3.OperationalError as exc:
                         if "duplicate column" not in str(exc).lower():
                             raise
+            message_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(messages)")
+            }
+            if "created_at" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN created_at REAL")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)")
+            backfill_message_timestamps(connection)
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_events_at ON events(at)")
             # Older clients send the host protocol source with each request.
             # They do not know about process guards. Do not let their generic
             # "hardware free" UPDATE release a guarded CPU-initializing job.
@@ -333,16 +351,18 @@ class CoordinationStateMixin:
                               (recipient, recipient_session)).fetchone() is None:
                     raise CoordinationError("recipient has not used this host; use a current coordination reference")
                 thread_id = message_id
+            created_at = self.clock()
             value = {"message_id": message_id, "thread_id": thread_id,
                      "kind": "coordination-reply" if reply_to else "coordination-message",
                      "sender": user, "sender_session": session_id,
                      "recipient": recipient, "recipient_session": recipient_session,
                      "requested_recipient": request.get("recipient"),
                      "requested_session": request.get("recipient_session"),
-                     "reply_to": reply_to, "text": text, "at": utc_now_iso(self.clock())}
-            cursor = db.execute("INSERT INTO messages(message_id,sender,sender_session,recipient,recipient_session,data) "
-                                "VALUES(?,?,?,?,?,?)", (message_id, user, session_id, recipient,
-                                                       recipient_session, json.dumps(value))).lastrowid
+                     "reply_to": reply_to, "text": text, "at": utc_now_iso(created_at)}
+            cursor = db.execute("INSERT INTO messages(message_id,sender,sender_session,recipient,"
+                                "recipient_session,data,created_at) VALUES(?,?,?,?,?,?,?)",
+                                (message_id, user, session_id, recipient, recipient_session,
+                                 json.dumps(value), created_at)).lastrowid
             return {"status": "sent", "message": {"cursor": cursor, **value}}
 
     def message_events(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -501,6 +521,7 @@ class CoordinationStateMixin:
                 )
                 changes.append({"task_id": row["task_id"], "state": "active", "overdue": True})
                 self._event(connection, "task-overdue", task_id=row["task_id"], now=now)
+        prune_coordination_rows(connection, now)
         return changes
 
     @staticmethod

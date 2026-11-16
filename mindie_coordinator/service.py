@@ -57,6 +57,13 @@ from mindie_coordinator.managed_execution import ExecutionRequestError, JOB_TERM
 from mindie_coordinator.parity import materialize_command
 from mindie_coordinator.placement import extract_topology_spec, requested_hardware, role_plan, runtime_matches
 from mindie_coordinator.ready_runtime import RuntimePool
+from mindie_coordinator.storage_retention import (
+    PRUNABLE_RUN_PHASES,
+    RUN_RETENTION_LIMIT,
+    RUN_RETENTION_SECONDS,
+    prune_fixed_inputs,
+    prune_terminal_run_directories,
+)
 from mindie_coordinator.task_messages import TaskMessages
 
 from mindie_coordinator.service_client import (
@@ -177,6 +184,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
         self._active_requests = 0
         self._async_progress = False
         self._ipc_token: str | None = None
+        self._last_run_prune = 0.0
         self._load_session_dirs()
         if sessions is not None:
             self._remember_session_dir(str(sessions.state_dir))
@@ -233,6 +241,36 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             return self._sessions
         raise ValueError("sessions directory is required")
 
+    def _prune_terminal_runs(self) -> None:
+        """Delete old terminal run logs; an unreadable store keeps everything."""
+        now = time.time()
+        if now - self._last_run_prune < 3600:
+            return
+        self._last_run_prune = now
+        terminal, live = set(), set()
+        for directory in list(self._session_dirs):
+            try:
+                rows = self.store(directory).all_executions()
+            except Exception as exc:
+                self._record_daemon_error(f"sessions {directory}: {exc}")
+                return
+            for row in rows:
+                run_id = row.get("id")
+                if not isinstance(run_id, str):
+                    continue
+                if row.get("phase") in PRUNABLE_RUN_PHASES:
+                    terminal.add(run_id)
+                else:
+                    live.add(run_id)
+        try:
+            prune_terminal_run_directories(
+                self.state_dir / "runs", terminal, live_ids=live,
+                max_age_seconds=RUN_RETENTION_SECONDS, max_runs=RUN_RETENTION_LIMIT)
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            self._record_daemon_error(f"run retention: {exc}")
+
     def reconcile(self) -> None:
         self.pool.tick()
         for directory in list(self._session_dirs):
@@ -252,6 +290,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                 except Exception as exc:
                     self._record_execution_error(store, row, exc)
             self._resume_finishing_sessions(directory, store)
+        self._prune_terminal_runs()
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         with bind_context(request.get("diagnostics_context") or {}):
@@ -729,6 +768,9 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
                 env=environment, timeout=600, check=False,
                 **no_window_kwargs(),
             )
+        # The descriptor only transports this completed parity invocation.
+        prune_fixed_inputs(directory / ".mindie-local" / "fixed-inputs",
+                           max_age_seconds=0)
         try:
             payload = json.loads((directory / "parity.json").read_text(encoding="utf-8"))
         except TimeoutError:

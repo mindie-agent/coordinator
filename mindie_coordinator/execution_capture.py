@@ -17,7 +17,10 @@ atomic topology/worktree stability verification.
 
 [Side-Effect Policy]
 - Never modifies the user's working tree or main `.git/index`; writes only
-  synthetic Git objects, `refs/parity/execution-inputs/*`, and `<state_dir>/source-inputs/capture-*.json`.
+  synthetic Git objects, `refs/parity/execution-inputs/*`, and
+  `<state_dir>/source-inputs/capture-*.json`.
+- Replacing a capture cache deletes its superseded synthetic parity refs so a
+  dirty worktree can never pin historical blobs after Git GC.
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -33,6 +36,7 @@ import uuid
 from mindie_coordinator import parity
 from mindie_coordinator.build_inputs import BUILD_INPUT_ENV_KEYS, DEPENDENCY_INSTALL_PATTERNS
 from mindie_coordinator.parity_support import git, glob_match_any
+from mindie_coordinator.storage_retention import prune_capture_caches
 
 # Bump when capture semantics change beyond the rules fingerprint below.
 CACHE_FORMAT = 1
@@ -178,7 +182,47 @@ def incremental_snapshot(node, previous, before, old_state):
 
 def cleanup(records):
     for record in records:
-        git(Path(record.source_path), ["update-ref", "-d", record.ref], check=False)
+        for ref in (record.ref, record.ref + "-scm"):
+            git(Path(record.source_path), ["update-ref", "-d", ref], check=False)
+
+
+def _previous_records(location):
+    """Salvage prior records even when a stale checksum is a cache miss."""
+    try:
+        previous = json.loads(location.read_text(encoding="utf-8"))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        return {}
+    records = previous.get("records") if isinstance(previous, dict) else None
+    return records if isinstance(records, dict) else {}
+
+
+def _delete_superseded_refs(previous, cache):
+    """Delete only synthetic parity refs that the replaced cache no longer names."""
+    current = cache.get("records") if isinstance(cache.get("records"), dict) else {}
+    for relpath, item in previous.items():
+        old = item.get("record") if isinstance(item, dict) else None
+        if not isinstance(old, dict):
+            continue
+        old_ref = old.get("ref")
+        if not isinstance(old_ref, str) or not old_ref.startswith("refs/parity/execution-inputs/"):
+            continue
+        replacement = current.get(relpath)
+        replacement = replacement.get("record") if isinstance(replacement, dict) else None
+        if isinstance(replacement, dict) and replacement.get("ref") == old_ref:
+            continue
+        source = old.get("source_path")
+        if not isinstance(source, str) or not source:
+            continue
+        try:
+            # A ref already deleted by a concurrent capture is not an error.
+            for ref in (old_ref, old_ref + "-scm"):
+                git(Path(source), ["update-ref", "-d", ref], check=False)
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
 
 
 def capture_records(roots, state_dir, *, attempts, build_env):
@@ -280,6 +324,7 @@ def capture_records(roots, state_dir, *, attempts, build_env):
 
 
 def save_cache(location, cache, records):
+    previous = _previous_records(location)
     for record in records:
         cache["records"][record.relpath]["record"] = asdict(record)
     cache["checksum"] = digest(cache)
@@ -289,4 +334,12 @@ def save_cache(location, cache, records):
         temporary.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
         os.replace(temporary, location)
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except TimeoutError:
+            raise
+        except OSError:
+            pass
+    # The new cache is durable now; released parity refs must not pin old blobs.
+    _delete_superseded_refs(previous, cache)
+    prune_capture_caches(location.parent, keep=location)
