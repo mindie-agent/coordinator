@@ -1,18 +1,22 @@
 """Stdio MCP server for task lifecycle and optional coordination messages.
 
 [Role] Exposes task lifecycle and independent host/environment tools over JSON-RPC 2.0 stdio.
-[Invariants] Auto-detects `Content-Length` vs line-delimited JSON framing from the first bytes; never mixes stdout protocol frames with diagnostics.
+[Invariants]
+- Auto-detects `Content-Length` vs line-delimited JSON framing from the first bytes; never mixes stdout protocol frames with diagnostics.
+- Standard MCP sufficiency: every tool works with zero `_meta` and zero prior session hooks; host metadata is an optional grouping hint, never an admission gate.
 [Timeouts & Locks] Request dispatch runs on a bounded `ThreadPoolExecutor` with serialized stdout writes (`_write_lock`).
-[Side-Effect Policy] Delegates tool side effects to `ops.py` and `CoordinatorService`.
+[Side-Effect Policy] Auto-attaches local task records on demand without adopting the MCP server process's own `cwd` or launch-time environment; delegates execution/device effects to `ops.py` and `CoordinatorService`.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextvars
 import json
 import os
 import sys
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, BinaryIO
 from mindie_diagnostics import get_recorder, wrap_context, bind_context
@@ -29,14 +33,13 @@ SERVICE_NAME = "mindie-coordinator-task"
 PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 ALIASES = {name.replace(".", "_"): name for name in TOOL_SCHEMAS}
 INSTRUCTIONS = (
-    "Host inventory, probes, containers and bare-metal leases work without a task binding; "
-    "omit context_file for these independent environment operations. "
-    "Managed task tools require a proven native task attachment or its registered context_file. "
-    "Knowledge activation does not establish that attachment; repeating an activation "
-    "command cannot repair it. A missing task attachment only blocks dependent managed calls. "
-    "Never guess a task from cwd or history. Sessions with no managed "
-    "hosts stay local. Normal run/status calls receive coordination messages "
-    "opportunistically; use mindie_message only for a substantive request or reply."
+    "All coordinator tools work over standard MCP without prior session hooks or context_file. "
+    "Host inventory, probes, containers and bare-metal leases are independent environment operations; "
+    "omit context_file for them. Managed task tools (session, run, finish, message) attach a local "
+    "task automatically per caller or connection, and mindie_execution addresses any execution "
+    "directly by execution_id. Sessions with no managed hosts stay local. Normal run/status calls "
+    "receive coordination messages opportunistically; use mindie_message only for a substantive "
+    "request or reply."
 )
 
 
@@ -90,10 +93,60 @@ def canonical_name(name: str) -> str:
     return ALIASES.get(name, name)
 
 
-def call_tool(name: str, arguments: dict[str, Any] | None, metadata: dict | None = None) -> dict[str, Any]:
+def _resolve_mcp_caller(
+    metadata: dict | None,
+    *,
+    default_caller_id: str = "mcp-direct",
+) -> tuple[str, str, str, str | None]:
+    """Extract `(client, native_id, agent_id, conflict_label)` without gating hookless callers."""
+    if isinstance(metadata, dict):
+        if "kimi_code/session_id" in metadata:
+            native = metadata["kimi_code/session_id"]
+            agent = metadata.get("kimi_code/agent_id", "")
+            if not isinstance(native, str) or not native.strip() or len(native) > 512 or not isinstance(agent, str):
+                raise ValueError("invalid native Kimi call identity")
+            return ("kimi", native, "" if agent == "main" else agent, "Kimi")
+        if "x-codex-turn-metadata" in metadata:
+            turn = metadata["x-codex-turn-metadata"]
+            native = turn.get("thread_id") if isinstance(turn, dict) else None
+            if not isinstance(native, str) or not native.strip() or len(native) > 512:
+                raise ValueError("invalid native Codex call identity")
+            top_thread = metadata.get("threadId")
+            if top_thread is not None and top_thread != native:
+                raise ValueError("contradictory native Codex call identity")
+            if "sessionId" in metadata and metadata.get("sessionId") != turn.get("session_id"):
+                raise ValueError("contradictory native Codex call identity")
+            return ("codex", native, "", "Codex")
+        for key, client_name in (
+            ("claudecode/sessionId", "claude"),
+            ("workbuddy.ai/conversationId", "wb"),
+            ("conversationId", "mcp"),
+            ("threadId", "codex"),
+            ("sessionId", "mcp"),
+            ("session_id", "mcp"),
+        ):
+            raw = metadata.get(key)
+            if isinstance(raw, str) and raw.strip() and len(raw) <= 512:
+                return (client_name, raw.strip(), "", None)
+    return ("mcp", default_caller_id, "", None)
+
+
+_DEFAULT_CALLER_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "mindie_coordinator_default_caller_id", default="mcp-direct"
+)
+
+
+def call_tool(
+    name: str,
+    arguments: dict[str, Any] | None,
+    metadata: dict | None = None,
+    *,
+    default_caller_id: str | None = None,
+) -> dict[str, Any]:
+    caller_id = default_caller_id or _DEFAULT_CALLER_ID.get()
     with bind_context((metadata or {}).get("mindie_diagnostics") or {}):
         try:
-            return _call_tool(name, arguments, metadata)
+            return _call_tool(name, arguments, metadata, default_caller_id=caller_id)
         except ManagedTaskContextRequired as exc:
             return tool_result(context_required_result(canonical_name(name), arguments or {}, exc))
 
@@ -106,47 +159,50 @@ def tool_result(result):
     }
 
 
-@observed_tool(lambda name, arguments, metadata=None: canonical_name(name), component="mindie-coordinator")
-def _call_tool(name, arguments, metadata=None):
+@observed_tool(lambda name, arguments, metadata=None, **kwargs: canonical_name(name), component="mindie-coordinator")
+def _call_tool(name, arguments, metadata=None, *, default_caller_id="mcp-direct"):
     canonical = canonical_name(name)
     if canonical not in TOOL_SCHEMAS:
         raise ProtocolError(-32602, f"unknown task tool: {name}")
     # A persistent MCP server's environment can outlive the native caller.
-    # It must use the caller's context, never the thread that launched it.
+    # Never adopt os.environ or Path.cwd() of the server process.
     arguments = dict(arguments or {})
-    # Environment operations do not act on a task. Resolve native ownership
-    # only when a task is needed or the caller explicitly selects its state.
-    needs_context = canonical not in ENV_TOOLS or bool(arguments.get("context_file"))
-    if needs_context and metadata and "kimi_code/session_id" in metadata:
-        native = metadata["kimi_code/session_id"]
-        agent = metadata.get("kimi_code/agent_id", "")
-        if not isinstance(native, str) or not native.strip() or not isinstance(agent, str):
-            raise ValueError("invalid native Kimi call identity")
-        if agent == "main":
-            agent = ""
-        context = AgentSessions().native_context("kimi", native, agent)
-        supplied = arguments.get("context_file")
-        if supplied and supplied != context["context_file"]:
-            raise ValueError("context_file differs from this native Kimi caller")
-        arguments["context_file"] = context["context_file"]
-    elif needs_context and metadata and "x-codex-turn-metadata" in metadata:
-        # Native Codex tools/call supplies this object per invocation, including
-        # calls inside functions.exec which do not pass through PreToolUse.
-        turn = metadata["x-codex-turn-metadata"]
-        native = turn.get("thread_id") if isinstance(turn, dict) else None
-        if not isinstance(native, str) or not native.strip():
-            raise ValueError("invalid native Codex call identity")
-        context = AgentSessions().native_context("codex", native)
-        supplied = arguments.get("context_file")
-        if supplied and supplied != context["context_file"]:
-            raise ValueError("context_file differs from this native Codex caller")
-        arguments["context_file"] = context["context_file"]
+    supplied = arguments.get("context_file")
+    if canonical in ENV_TOOLS and not supplied:
+        payload = mindie_call(canonical, arguments, allow_native_context=False)
+        return tool_result(payload["result"])
+    if canonical == "mindie.execution" and not supplied:
+        exec_ref = arguments.get("execution_id") or arguments.get("run_id")
+        if isinstance(exec_ref, str) and exec_ref:
+            resolved = AgentSessions().context_for_execution(exec_ref)
+            if resolved is not None:
+                arguments["context_file"] = resolved["context_file"]
+                payload = mindie_call(canonical, arguments, allow_native_context=False)
+                return tool_result(payload["result"])
+    client, native, agent, conflict_label = _resolve_mcp_caller(
+        metadata, default_caller_id=default_caller_id
+    )
+    if supplied and conflict_label is None:
+        payload = mindie_call(canonical, arguments, allow_native_context=False)
+        return tool_result(payload["result"])
+    store = AgentSessions()
+    if supplied and conflict_label is not None:
+        try:
+            existing = store.native_context(client, native, agent)
+        except ManagedTaskContextRequired:
+            existing = None
+        if existing is not None and supplied != existing["context_file"]:
+            raise ValueError(f"context_file differs from this native {conflict_label} caller")
+        payload = mindie_call(canonical, arguments, allow_native_context=False)
+        return tool_result(payload["result"])
+    context = store.ensure_context(client, native, None, agent_id=agent, resume=False)
+    arguments["context_file"] = context["context_file"]
     payload = mindie_call(canonical, arguments, allow_native_context=False)
     # Some native clients expose text only, including Grok 1.0.25.
     return tool_result(payload["result"])
 
 
-def handle(message: dict[str, Any]) -> dict[str, Any] | None:
+def handle(message: dict[str, Any], *, default_caller_id: str = "mcp-direct") -> dict[str, Any] | None:
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}
@@ -172,7 +228,11 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
             metadata = params.get("_meta")
             if metadata is not None and not isinstance(metadata, dict):
                 raise ValueError("tools/call _meta must be an object")
-            return _result(request_id, call_tool(name, arguments, metadata))
+            token = _DEFAULT_CALLER_ID.set(default_caller_id)
+            try:
+                return _result(request_id, call_tool(name, arguments, metadata))
+            finally:
+                _DEFAULT_CALLER_ID.reset(token)
         return _error(request_id, -32601, f"method not found: {method}")
     except ProtocolError as exc:
         return _error(request_id, exc.code, str(exc))
@@ -268,8 +328,9 @@ class StdioTransport:
 
 def serve(reader: BinaryIO, writer: BinaryIO) -> int:
     transport = StdioTransport(reader, writer)
+    connection_id = "conn-" + uuid.uuid4().hex
     def respond(message):
-        response = handle(message)
+        response = handle(message, default_caller_id=connection_id)
         if response is not None:
             transport.send(response)
     # Separate capacity keeps stop/status usable even when all wait workers

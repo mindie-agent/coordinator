@@ -7,14 +7,14 @@ Task-scoped Ascend NPU runtime orchestration, parity materialization, and multi-
 - **Single Device & Port Authority**: The host-side queue (`mindie_coordinator/host/mindie_npu_coordination.py`) is the sole authority for NPU device leases (`ASCEND_RT_VISIBLE_DEVICES`), service ports (`MINDIE_SERVICE_PORT`), and container process-tree draining.
 - **Git-Identity Parity**: Workspace snapshots are identified and materialized strictly by Git commit / tree identity (`source_head`, `snapshot_commit`), never by ad-hoc source file content hashes.
 - **State Honesty & No Silent Fallbacks**: Distinguish `completed`, `failed`, and `unknown` external effects. Never mask failures as empty dicts or `exit 0`, never let `except OSError:` swallow `TimeoutError`, and never blindly replay an uncertain external write.
-- **No Self-Bricking**: Reserve `unknown` / `inconclusive` strictly for irreversible external writes (`submit` / `stop` timeout after dispatch); local errors never permanently lock a task root (`TaskRootBusy` / permanent `fault` / `suppressed` are abolished).
+- **No Self-Bricking & Zero Session-Binding Gates**: Reserve `unknown` / `inconclusive` strictly for irreversible external writes (`submit` / `stop` timeout after dispatch); local errors never permanently lock a task root (`TaskRootBusy` / permanent `fault` / `suppressed` are abolished). All MCP and CLI operations (`hosts`, `probe`, `container`, `lease`, `session`, `run`, `execution`, `finish`, `message`) work over standard MCP without prior session hooks, private `_meta` fields, or caller-supplied `context_file`; `mindie.execution` resolves `execution_id` directly by handle.
 
 ## 2. Module Map (`mindie_coordinator/`)
 
-- `task_server.py`: Stdio JSON-RPC 2.0 MCP server (`mindie.session`, `mindie.run`, `mindie.execution`, `mindie.finish`).
+- `task_server.py`: Stdio JSON-RPC 2.0 MCP server (`mindie.hosts`, `mindie.probe`, `mindie.container`, `mindie.lease`, `mindie.session`, `mindie.run`, `mindie.execution`, `mindie.finish`, `mindie.message`).
 - `ops.py` & `presentation.py`: MCP tool validation, error classification, and structured human/agent output formatting.
-- `task_client.py` & `agent_session.py`: Local session attachment, task context persistence, and Git common-dir binding.
-- `hooks/mindie_session.py`: Cross-client session hook adapter (Claude Code, Codex, Cursor, Kimi, OpenCode).
+- `task_client.py` & `agent_session.py`: On-demand session attachment (`ensure_context`), handle-based execution lookup (`context_for_execution`), and Git common-dir source defaults.
+- `hooks/mindie_session.py`: Optional convenience session hook adapter (Claude Code, Codex, Cursor, Kimi, OpenCode)—never required for MCP or CLI execution.
 - `service.py`: Central `CoordinatorService` orchestrating placement, source parity, preparation, submission, and recovery.
 - `placement.py`: Pure constraint solver matching recipe/ABI/SoC/topology requirements to attested host candidates.
 - `fleet_probe.py`: Concurrent SSH fleet polling of host NPU queues and prepared runtime catalogs.

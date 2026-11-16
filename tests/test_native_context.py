@@ -41,26 +41,36 @@ def test_explicit_context_wins_and_invalid_path_never_falls_back(native_env):
     assert len(AgentSessions(native_env).sessions()) == 1
 
 
-def test_missing_or_conflicting_identity_does_not_create_state(native_env, monkeypatch):
+def test_missing_env_attaches_workspace_and_conflicting_identity_fails(native_env, monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_SESSION_ID", "another-native-id")
     with pytest.raises(ValueError, match="conflicting native"):
         load_context()
     assert not native_env.exists()
+    monkeypatch.delenv("CODEX_SESSION_ID")
     monkeypatch.delenv("CODEX_THREAD_ID")
-    with pytest.raises(ValueError, match="managed task tools require"):
-        load_context()
-    assert not native_env.exists()
+    monkeypatch.chdir(tmp_path)
+    local_ctx = load_context()
+    assert local_ctx["attachment"]["client"] == "local"
+    assert local_ctx["attachment"]["cwd"] == str(tmp_path.resolve())
 
 
-def test_mcp_does_not_adopt_the_server_process_native_identity(native_env):
+def test_mcp_zero_metadata_succeeds_without_adopting_server_process_identity(native_env, monkeypatch, tmp_path):
     from mindie_coordinator.task_server import call_tool
-    reply = call_tool("mindie_session", {})
-    assert reply["isError"]
-    assert not native_env.exists()
+    monkeypatch.setenv("CODEX_THREAD_ID", "resident-server")
+    monkeypatch.setenv("CODEX_SESSION_ID", "resident-server")
+    monkeypatch.chdir(tmp_path)
+    reply = call_tool("mindie_session", {"full": True})
+    assert not reply["isError"], reply
+    data = reply["structuredContent"]["data"]
+    assert data["attachment"]["client"] == "mcp"
+    assert data["attachment"]["native_session_id"] != "resident-server"
+    assert data["attachment"]["cwd"] is None
 
 
 @pytest.mark.parametrize("client,key", [("grok", "GROK_SESSION_ID"), ("kimi", "KIMI_SESSION_ID")])
-def test_native_shell_uses_existing_attachment_after_cd(native_env, monkeypatch, tmp_path, client, key):
+def test_native_shell_uses_existing_attachment_after_cd_and_attaches_new_session(
+    native_env, monkeypatch, tmp_path, client, key,
+):
     monkeypatch.delenv("CODEX_THREAD_ID")
     monkeypatch.setenv(key, "actual-native")
     store = AgentSessions(native_env)
@@ -68,25 +78,25 @@ def test_native_shell_uses_existing_attachment_after_cd(native_env, monkeypatch,
     monkeypatch.chdir(tmp_path)
     assert load_context()["context_file"] == expected["context_file"]
     assert load_context()["attachment"]["cwd"] == str(tmp_path / "original")
-    monkeypatch.setenv(key, "unknown-native")
-    with pytest.raises(ValueError, match="missing or ambiguous"):
-        load_context()
-    assert len(store.sessions()) == 1
+    monkeypatch.setenv(key, "fresh-unhooked-native")
+    fresh = load_context()
+    assert fresh["session"]["id"] != expected["session"]["id"]
+    assert len(store.sessions()) == 2
 
 
 def test_kimi_native_child_does_not_fall_back_to_parent(native_env, monkeypatch, tmp_path):
     monkeypatch.delenv("CODEX_THREAD_ID")
     monkeypatch.setenv("KIMI_SESSION_ID", "native-kimi")
-    monkeypatch.setenv("KIMI_AGENT_ID", "child")
     store = AgentSessions(native_env)
     parent = store.attach("kimi", "native-kimi", str(tmp_path))
     monkeypatch.setenv("KIMI_AGENT_ID", "main")
     assert load_context()["context_file"] == parent["context_file"]
-    monkeypatch.setenv("KIMI_AGENT_ID", "child")
-    with pytest.raises(ValueError, match="missing or ambiguous"):
-        load_context()
     child = store.attach("kimi", "native-kimi", str(tmp_path), parent_context=parent["context_file"], agent_id="child")
+    monkeypatch.setenv("KIMI_AGENT_ID", "child")
     assert load_context()["context_file"] == child["context_file"]
+    monkeypatch.setenv("KIMI_AGENT_ID", "unhooked-subagent")
+    isolated = load_context()
+    assert isolated["session"]["id"] != parent["session"]["id"]
 
 
 def test_kimi_mcp_call_metadata_is_per_call_and_visible_as_text(native_env, monkeypatch, tmp_path):
@@ -102,10 +112,10 @@ def test_kimi_mcp_call_metadata_is_per_call_and_visible_as_text(native_env, monk
         assert json.loads(reply["content"][0]["text"]) == reply["structuredContent"]
     with pytest.raises(ValueError, match="differs from this native Kimi caller"):
         call_tool("mindie_session", {"context_file": first["context_file"]}, {"kimi_code/session_id": "second"})
-    reply = call_tool("mindie_session", {}, {
+    reply = call_tool("mindie_session", {"full": True}, {
         "kimi_code/session_id": "first", "kimi_code/agent_id": "unknown-child"})
-    assert reply["isError"]
-    assert reply["structuredContent"]["error_details"]["reason"] == "missing"
+    assert not reply["isError"], reply
+    assert reply["structuredContent"]["data"]["session"]["id"] != first["session"]["id"]
 
 
 def codex_call_metadata(native):
@@ -224,13 +234,11 @@ def test_stdio_environment_calls_continue_without_attachment(native_env, client)
     assert process.returncode == 0, process.stderr
     replies = {reply["id"]: reply for reply in map(json.loads, process.stdout.splitlines())}
     assert set(replies) == {1, 2, 3, 4, 5}
-    for request_id in (2, 3):
+    for request_id in (2, 3, 4):
         assert "result" in replies[request_id], replies[request_id]
         assert not replies[request_id]["result"]["isError"], replies[request_id]
-    assert replies[4]["result"]["isError"]
-    assert replies[4]["result"]["structuredContent"]["status"] == "managed_task_context_required"
     assert replies[5]["result"] == {}
-    assert AgentSessions(native_env).sessions() == []
+    assert len(AgentSessions(native_env).sessions()) == 1
 
 
 def test_codex_native_call_metadata_routes_each_call_to_existing_attachment(native_env, monkeypatch, tmp_path):
@@ -276,22 +284,70 @@ def test_codex_invalid_metadata_never_falls_back_to_process_identity(native_env,
     assert not native_env.exists()
 
 
-@pytest.mark.parametrize("metadata", [None, {}, {"threadId": "native-first"}, {"session_id": "native-first"}])
-def test_codex_missing_call_metadata_has_no_alias_or_process_fallback(native_env, metadata):
+@pytest.mark.parametrize("metadata", [
+    None,
+    {},
+    {"threadId": "work-mode-thread"},
+    {"session_id": "plain-session"},
+    {
+        "threadId": "automation-thread",
+        "x-codex-turn-metadata": {
+            "session_id": "automation-thread",
+            "thread_id": "automation-thread",
+            "thread_source": "automation",
+        },
+    },
+    {
+        "threadId": "subagent-thread",
+        "x-codex-turn-metadata": {
+            "session_id": "parent-thread",
+            "thread_id": "subagent-thread",
+            "thread_source": "subagent",
+        },
+    },
+])
+def test_mcp_accepts_hookless_work_automation_subagent_and_plain_callers(native_env, monkeypatch, metadata):
     from mindie_coordinator.task_server import call_tool
-    assert call_tool("mindie_session", {}, metadata)["isError"]
-    assert not native_env.exists()
+    monkeypatch.setenv("CODEX_THREAD_ID", "resident-process-env")
+    reply = call_tool("mindie_session", {"full": True}, metadata)
+    assert not reply["isError"], reply
+    attachment = reply["structuredContent"]["data"]["attachment"]
+    assert attachment["native_session_id"] != "resident-process-env"
+    assert attachment["cwd"] is None
+    assert reply["structuredContent"]["data"]["source_defaults"]["sources"] == {}
 
 
-def test_codex_unknown_metadata_does_not_create_or_reassign_attachment(native_env, tmp_path):
+def test_handle_addressed_execution_resolves_across_windows_without_context_file(native_env, tmp_path):
+    from mindie_coordinator.task_server import call_tool
+    store = AgentSessions(native_env)
+    owner_ctx = store.attach("codex", "window-a", str(tmp_path))
+    row = store.execution(owner_ctx, "req-handle", {"command": "true"})
+    row.update(phase="cancelled", user="alice", roles=[])
+    store.save_execution(row)
+    resolved = store.context_for_execution(row["id"])
+    assert resolved is not None
+    assert resolved["session"]["id"] == owner_ctx["session"]["id"]
+    # Another window / automation with no context_file resolves the execution handle directly.
+    cross_meta = {
+        "threadId": "automation-2300",
+        "x-codex-turn-metadata": {
+            "session_id": "automation-2300",
+            "thread_id": "automation-2300",
+            "thread_source": "automation",
+        },
+    }
+    observed = call_tool("mindie_execution", {"execution_id": row["id"], "action": "evidence"}, cross_meta)
+    assert "another MindIE task" not in observed["structuredContent"]["summary"]
+
+
+def test_codex_contradictory_metadata_does_not_reassign_attachment(native_env, tmp_path):
     from mindie_coordinator.task_server import call_tool
     store = AgentSessions(native_env)
     known = store.attach("codex", "known", str(tmp_path))
     metadata = codex_call_metadata("unknown")
     metadata["threadId"] = metadata["x-codex-turn-metadata"]["session_id"] = "known"
-    reply = call_tool("mindie_session", {"context_file": known["context_file"]}, metadata)
-    assert reply["isError"]
-    assert reply["structuredContent"]["error_details"]["submission_state"] == "not_sent"
+    with pytest.raises(ValueError, match="contradictory native Codex"):
+        call_tool("mindie_session", {"context_file": known["context_file"]}, metadata)
     assert len(store.sessions()) == 1
     assert store.native_context("codex", "known")["context_file"] == known["context_file"]
 
@@ -572,3 +628,59 @@ def test_existing_container_image_mismatch_cannot_be_relabelled_as_requested_ima
     assert bootstrap.kwargs["args"][0:2] == ["mindie-alice", "2201"]
     assert bootstrap.kwargs["args"][6] == "false"
     service.backend.machines.upsert_machine.assert_not_called()
+
+
+def test_attach_without_resume_does_not_nest_write_transactions_and_lease_receipt_failure_preserves_grant(native_env, tmp_path, monkeypatch):
+    from mindie_coordinator import env_manager
+    from mindie_coordinator.ops import mindie_call
+
+    store = AgentSessions(native_env)
+    first = store.attach("mcp", "conn-1", None, resume=False)
+    second = store.attach("mcp", "conn-1", None, resume=False)
+    assert second["context_file"] == first["context_file"]
+    assert second["session"]["id"] == first["session"]["id"]
+
+    monkeypatch.setattr(
+        env_manager, "_resolve_host_target",
+        lambda args, store: ("a2-box", {"host": "173.125.1.2", "port": 22, "user": "root"}, None),
+    )
+    monkeypatch.setattr(
+        env_manager.HostQueue, "request",
+        lambda self, spec, payload: {"task": {"state": "granted", "fence_token": 7, "granted_devices": [0], "granted_service_port": 18001}, "coordination_epoch": "ep-1"},
+    )
+    monkeypatch.setattr(env_manager, "_save_leases", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    acquired = mindie_call("mindie.lease", {"action": "acquire", "alias": "a2-box", "npu_count": 1}, allow_native_context=False)["result"]
+    assert acquired["outcome"] == "success"
+    assert acquired["data"]["fence_token"] == 7
+    assert acquired["data"]["receipt_unconfirmed"] is True
+    assert "receipt_warning" in acquired["data"]
+
+    from mindie_coordinator import ops as ops_mod
+    from mindie_coordinator import task_server
+    monkeypatch.setattr(env_manager, "handle_probe", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ssh transport interrupted")))
+    failed_probe = ops_mod.mindie_call("mindie.probe", {"action": "npu", "alias": "a2-box"}, allow_native_context=False)["result"]
+    assert failed_probe["error_details"].get("submission_state") != "not_sent"
+
+    wb_attached = store.attach("wb", "wb-conv-42", str(tmp_path))
+    wb_client, wb_native, wb_agent, _ = task_server._resolve_mcp_caller(
+        {"workbuddy.ai/conversationId": "wb-conv-42"}, default_caller_id="conn-fallback"
+    )
+    assert (wb_client, wb_native, wb_agent) == ("wb", "wb-conv-42", "")
+    wb_resumed = store.attach(wb_client, wb_native, None, agent_id=wb_agent)
+    assert wb_resumed["session"]["id"] == wb_attached["session"]["id"]
+
+    saved_calls = []
+    monkeypatch.setattr(env_manager, "_load_leases", lambda *a, **k: (_ for _ in ()).throw(OSError("lease cache unreadable")))
+    monkeypatch.setattr(env_manager, "_save_leases", lambda *a, **k: saved_calls.append((a, k)))
+    monkeypatch.setattr(
+        env_manager.HostQueue, "request",
+        lambda self, spec, payload: {"task": {"state": "released", "fence_token": 7}},
+    )
+    released = mindie_call(
+        "mindie.lease", {"action": "release", "alias": "a2-box", "lease_id": "lease-1", "fence_token": 7},
+        allow_native_context=False,
+    )["result"]
+    assert released["outcome"] == "success"
+    assert released["data"]["receipt_unconfirmed"] is True
+    assert "receipt_warning" in released["data"]
+    assert saved_calls == []

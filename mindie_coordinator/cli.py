@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+
+NATIVE_CALL_ENV = "MINDIE_COORDINATOR_NATIVE_CALL"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     task = sub.add_parser("task-server", help="Serve MindIE task and coordination tools over stdio MCP")
     task.add_argument("--describe", action="store_true",
                       help="print the capability declaration and tool list as JSON, then exit")
+    task_cli = sub.add_parser("task", help="Run session, run, execution or finish through the task facade")
+    task_cli.add_argument("arguments", nargs=argparse.REMAINDER)
     provision = sub.add_parser(
         "provision",
         help="Prepare this user's container mindie-<user> from a named image/recipe",
@@ -110,6 +115,10 @@ def _dispatch_cli(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if args.command == "task-server":
         from mindie_coordinator.task_server import main as task_main
         return task_main(["--describe"] if args.describe else [])
+    if args.command == "task":
+        from mindie_coordinator.mindie import main as task_main
+        metadata = os.environ.get(NATIVE_CALL_ENV)
+        return task_main(args.arguments, metadata=json.loads(metadata) if metadata else None)
     if args.command in {"hosts", "probe", "container", "lease"}:
         from mindie_coordinator.ops import mindie_call
 

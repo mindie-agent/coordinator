@@ -6,11 +6,15 @@ persistent local MindIE task identities, source worktree bindings, and execution
 records in `sessions.sqlite3`.
 
 [Invariants]
-- Native sessions are attachments, not task IDs: a new root native session
-  creates a new task; resuming that native session retains its task; only an
-  explicit association or child attachment joins another existing task.
+- Native sessions are optional grouping attachments, never admission gates:
+  any root, automation, subagent, CLI, or standard MCP caller without a prior
+  hook attaches a local task on demand, and handle-addressed `execution_id`
+  operations resolve their owning task directly from `sessions.sqlite3`.
 - Source worktrees are inspected in place (`git rev-parse`); never materializes
   duplicate local checkouts or mutates worktrees.
+- A hookless or workspace-free attachment records `cwd=None` and defaults to
+  `sources={}` unless explicit sources are supplied; never adopts an MCP server
+  process's own `cwd` or launch-time environment.
 
 [Timeouts & Locks]
 - SQLite `sessions.sqlite3` uses `WAL`, `synchronous=FULL`, `timeout=10`, and
@@ -37,8 +41,12 @@ from pathlib import Path
 from mindie_coordinator.state_paths import agent_sessions_root
 from mindie_coordinator.client_paths import client_path
 
-CLIENTS = {"claude", "grok", "kimi", "codex", "cursor", "dsh", "agy", "antigravity", "wb", "workbuddy"}
-_CLIENT_ALIASES = {"antigravity": "agy", "workbuddy": "wb"}
+CLIENTS = {
+    "claude", "grok", "kimi", "codex", "cursor", "dsh",
+    "agy", "antigravity", "wb", "workbuddy", "oc", "opencode",
+    "local", "mcp",
+}
+_CLIENT_ALIASES = {"antigravity": "agy", "workbuddy": "wb", "opencode": "oc"}
 
 
 class ManagedTaskContextRequired(ValueError):
@@ -202,8 +210,8 @@ class AgentSessions:
             temporary.unlink(missing_ok=True)
         return context
 
-    def attach(self, client: str, native_session_id: str, cwd: str, *, parent_context: str = "",
-               association: str = "", agent_id: str = "") -> dict:
+    def attach(self, client: str, native_session_id: str, cwd: str | None = None, *, parent_context: str = "",
+               association: str = "", agent_id: str = "", resume: bool = True) -> dict:
         if client not in CLIENTS or not native_session_id or len(native_session_id) > 512:
             raise ValueError("a supported client and its actual native session id are required")
         client = _normalize_client(client)
@@ -218,7 +226,7 @@ class AgentSessions:
         # parent's native session id for child conversations.
         identity = [client, native_session_id, agent_id]
         key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-        actual_cwd = str(Path(client_path(cwd)).expanduser().resolve())
+        actual_cwd = str(Path(client_path(cwd)).expanduser().resolve()) if cwd is not None else None
         with self.transaction() as db:
             existing = self.find(db, "attachment", key)
             if not existing:
@@ -242,24 +250,25 @@ class AgentSessions:
                 if parent and old["session_id"] != parent["session"]["id"]:
                     raise ValueError("native session already belongs to another task")
                 session = self.get(db, "session", old["session_id"])
-                if parent_context:
-                    # A child resume keeps the fresh-attach invariant: never
-                    # join a task whose finish has already started.
-                    if session["state"] != "open":
-                        raise ValueError("task is finished; explicitly reopen it before attaching")
-                elif session["state"] == "finishing":
-                    raise ValueError("task is finishing; wait for the coordinator to complete cleanup")
-                elif session["state"] == "finished":
-                    session["state"] = "open"
-                    self.put(db, "session", session)
-                if old.get("cwd") != actual_cwd:
-                    # A native handoff can move this attachment. Never retain
-                    # the previous mutable automatic source after that move.
-                    old.pop("sources", None)
-                    old.pop("source_mode", None)
-                    old.pop("source_error", None)
-                old.update(state="attached", resumed_at=now, cwd=actual_cwd)
-                self.put(db, "attachment", old)
+                if resume:
+                    if parent_context:
+                        # A child resume keeps the fresh-attach invariant: never
+                        # join a task whose finish has already started.
+                        if session["state"] != "open":
+                            raise ValueError("task is finished; explicitly reopen it before attaching")
+                    elif session["state"] == "finishing":
+                        raise ValueError("task is finishing; wait for the coordinator to complete cleanup")
+                    elif session["state"] == "finished":
+                        session["state"] = "open"
+                        self.put(db, "session", session)
+                    if old.get("cwd") != actual_cwd:
+                        # A native handoff can move this attachment. Never retain
+                        # the previous mutable automatic source after that move.
+                        old.pop("sources", None)
+                        old.pop("source_mode", None)
+                        old.pop("source_error", None)
+                    old.update(state="attached", resumed_at=now, cwd=actual_cwd)
+                    self.put(db, "attachment", old)
         return self._publish(key)
 
     def native_context(self, client: str, native_session_id: str, agent_id: str = "") -> dict:
@@ -271,6 +280,56 @@ class AgentSessions:
         if len(matches) != 1:
             raise ManagedTaskContextRequired("missing" if not matches else "ambiguous")
         return self.context(matches[0]["id"])
+
+    def ensure_context(self, client: str, native_session_id: str, cwd: str | None = None, *,
+                       agent_id: str = "", resume: bool = False) -> dict:
+        """Resolve an existing attachment or create a fresh local task without hook gating."""
+        try:
+            return self.native_context(client, native_session_id, agent_id)
+        except ManagedTaskContextRequired as exc:
+            if exc.reason != "missing":
+                raise
+        context = self.attach(client, native_session_id, cwd, agent_id=agent_id, resume=resume)
+        if cwd is not None:
+            try:
+                return self.bind_native_sources(context)
+            except TimeoutError:
+                raise
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return context
+        return context
+
+    def context_for_execution(self, execution_id: str) -> dict | None:
+        """Resolve the owning task context directly from a 64-hex execution_id handle."""
+        if not isinstance(execution_id, str) or len(execution_id) != 64 or any(
+                ch not in "0123456789abcdef" for ch in execution_id):
+            return None
+        with self.transaction() as db:
+            row = self.find(db, "execution", execution_id)
+            if row is None:
+                return None
+            session_id = row["session_id"]
+            attachments = [
+                item for item in self.rows(db, "attachment")
+                if item.get("session_id") == session_id
+            ]
+            if attachments:
+                selected = next(
+                    (item for item in attachments if item.get("state") == "attached"),
+                    attachments[0],
+                )
+                attachment_id = selected["id"]
+            else:
+                attachment_id = hashlib.sha256(
+                    json.dumps(["local", f"execution-{session_id}", ""]).encode()
+                ).hexdigest()
+                self.put(db, "attachment", {
+                    "id": attachment_id, "session_id": session_id, "client": "local",
+                    "native_session_id": f"execution-{session_id}", "agent_id": None,
+                    "parent_id": None, "association": "handle", "cwd": None,
+                    "state": "attached", "created_at": time.time(),
+                })
+        return self._publish(attachment_id)
 
     def bind_user(self, context: dict, user: str, *, github_identity: dict | None = None,
                   explicit: bool = False) -> dict:
@@ -334,6 +393,8 @@ class AgentSessions:
             # HEADs); absence of a new map does not revoke that selection.
             sources = {name: reference["path"] for name, reference in attachment["sources"].items()}
         if sources is None:
+            if attachment.get("cwd") is None:
+                return self.context(attachment["id"])
             reference = worktree_reference(attachment["cwd"])
             common = Path(reference["git_common_dir"])
             name = common.parent.name if common.name == ".git" else common.stem
@@ -463,41 +524,41 @@ class AgentSessions:
 def load_context(context_file: str = "", *, allow_native_context: bool = True) -> dict:
     filename = context_file or os.environ.get("MINDIE_CONTEXT_FILE", "")
     if not filename:
+        if not allow_native_context:
+            return AgentSessions().ensure_context("mcp", "default", None, resume=False)
         wb_session = (
             os.environ.get("WORKBUDDY_SESSION_ID", "").strip()
             or os.environ.get("WORKBUDDY_CONVERSATION_ID", "").strip()
             or os.environ.get("CODEBUDDY_SESSION_ID", "").strip()
         )
         callers = [(client, os.environ.get(key, "").strip()) for client, key in
-                   (("codex", "CODEX_THREAD_ID"), ("cursor", "CURSOR_CONVERSATION_ID"),
-                    ("grok", "GROK_SESSION_ID"), ("kimi", "KIMI_SESSION_ID"),
-                    ("agy", "AGY_CONVERSATION_ID"))]
+                   (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_SESSION_ID"),
+                    ("cursor", "CURSOR_CONVERSATION_ID"), ("grok", "GROK_SESSION_ID"),
+                    ("kimi", "KIMI_SESSION_ID"), ("agy", "AGY_CONVERSATION_ID"),
+                    ("dsh", "DSH_SESSION_ID"), ("oc", "OPENCODE_SESSION_ID"))]
         if wb_session:
             callers.append(("wb", wb_session))
         callers = [(client, native) for client, native in callers if native]
         if len(callers) > 1:
             raise ValueError("conflicting native client identities; pass context_file explicitly")
-        if callers and callers[0][0] in {"grok", "kimi"} and allow_native_context:
+        agent = ""
+        if callers:
             client, native = callers[0]
-            agent = os.environ.get("KIMI_AGENT_ID", "").strip() if client == "kimi" else ""
-            if client == "kimi" and agent == "main":
-                agent = ""
-            # These clients attach before tools run. A later shell cd does not
-            # create a task or change its sources; an unknown child stays unknown.
-            return AgentSessions().native_context(client, native, agent)
-        # Codex and Cursor expose native ids to local commands even when the
-        # session hook cannot export MINDIE_CONTEXT_FILE to their environment.
-        # Resolve only that identity; cwd is attachment metadata, never a key.
-        client, native = callers[0] if callers else ("codex", "")
-        session = os.environ.get("CODEX_SESSION_ID", "").strip() if client == "codex" else ""
-        if not native or not allow_native_context:
-            raise ManagedTaskContextRequired()
-        if client == "cursor" and str(uuid.UUID(native)) != native:
-            # Cursor encodes/truncates arbitrary ids before shell export.
-            # Its native UUID is lossless; never guess an encoded identity.
-            raise ValueError("unsupported native Cursor shell identity; pass context_file explicitly")
-        if session and session != native:
-            raise ValueError("conflicting native Codex identities; pass context_file explicitly")
+            if client == "kimi":
+                agent = os.environ.get("KIMI_AGENT_ID", "").strip()
+                if agent == "main":
+                    agent = ""
+            if client == "cursor" and str(uuid.UUID(native)) != native:
+                # Cursor encodes/truncates arbitrary ids before shell export.
+                # Its native UUID is lossless; never guess an encoded identity.
+                raise ValueError("unsupported native Cursor shell identity; pass context_file explicitly")
+            session = os.environ.get("CODEX_SESSION_ID", "").strip() if client == "codex" else ""
+            if session and session != native:
+                raise ValueError("conflicting native Codex identities; pass context_file explicitly")
+        else:
+            resolved_cwd = str(Path.cwd().resolve())
+            client = "local"
+            native = "cwd-" + hashlib.sha256(resolved_cwd.encode("utf-8")).hexdigest()[:24]
         parent = os.environ.get("MINDIE_PARENT_CONTEXT", "")
         association = os.environ.get("MINDIE_ATTACH_CONTEXT", "")
         if parent or association:
@@ -506,12 +567,12 @@ def load_context(context_file: str = "", *, allow_native_context: bool = True) -
         else:
             store = AgentSessions()
         try:
-            existing = store.native_context(client, native)
+            existing = store.native_context(client, native, agent)
         except ManagedTaskContextRequired as exc:
             if exc.reason != "missing":
                 raise
             context = store.attach(client, native, str(Path.cwd()),
-                                   parent_context=parent, association=association)
+                                   parent_context=parent, association=association, agent_id=agent)
             try:
                 return store.bind_native_sources(context)
             except TimeoutError:
@@ -525,7 +586,7 @@ def load_context(context_file: str = "", *, allow_native_context: bool = True) -
             # Preserve association validation without treating a later shell
             # cd as a native worktree handoff or replacing its source defaults.
             return store.attach(client, native, existing["attachment"]["cwd"],
-                                parent_context=parent, association=association)
+                                parent_context=parent, association=association, agent_id=agent)
         return existing
     path = Path(client_path(filename)).expanduser().resolve(strict=True)
     reference = json.loads(path.read_text(encoding="utf-8"))

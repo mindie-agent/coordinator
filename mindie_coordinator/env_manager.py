@@ -708,23 +708,27 @@ def handle_lease(
         if service_port is not None:
             env_vars["MINDIE_SERVICE_PORT"] = str(service_port)
 
-        leases = _load_leases(base_dir)
         lease_record = {
             "lease_id": lease_id, "alias": alias, "host": host_spec["host"], "owner": owner_user,
             "fence_token": fence_token, "coordination_epoch": epoch,
             "devices": allocated_devices, "service_port": service_port, "state": raw_state,
         }
-        leases[f"{alias}:{lease_id}"] = lease_record
-        leases[lease_id] = lease_record
-        _save_leases(base_dir, leases)
-
-        return {
+        out = {
             "state": "active" if raw_state in {"granted", "active", "starting"} else raw_state,
             "lease_state": raw_state, "action": "acquire", "alias": alias, "host": host_spec["host"],
             "lease_id": lease_id, "owner": owner_user, "fence_token": fence_token,
             "devices": allocated_devices, "ascend_rt_visible_devices": visible_str,
             "service_port": service_port, "env": env_vars, "lease": task, "remote_dev_alias": alias,
         }
+        try:
+            leases = _load_leases(base_dir)
+            leases[f"{alias}:{lease_id}"] = lease_record
+            leases[lease_id] = lease_record
+            _save_leases(base_dir, leases)
+        except (TimeoutError, OSError, ValueError) as exc:
+            out["receipt_warning"] = f"{type(exc).__name__}: {exc}"
+            out["receipt_unconfirmed"] = True
+        return out
 
     if action == "heartbeat":
         lease_id = safe_id(str(args.get("lease_id") or "").strip())
@@ -739,53 +743,53 @@ def handle_lease(
             fence_token = tasks[0].get("fence_token") if tasks else None
         if fence_token is None:
             raise caller_error(f"no fence_token found for lease {lease_id!r}; pass `fence_token` or acquire the lease first")
-        response = host_queue.request(
-            host_spec, {"action": "heartbeat", "task_id": lease_id, "fence_token": int(fence_token), "heartbeat_ttl_seconds": ttl_seconds, **remote_sd}
-        )
+        response = host_queue.request(host_spec, {"action": "heartbeat", "task_id": lease_id, "fence_token": int(fence_token), "heartbeat_ttl_seconds": ttl_seconds, **remote_sd})
         task = response.get("task") or {}
         raw_state = str(task.get("state") or response.get("status") or "active")
         allocated_devices = task.get("granted_devices") if task.get("granted_devices") is not None else (task.get("allocated_npus") or [])
         service_port = task.get("granted_service_port") if task.get("granted_service_port") is not None else task.get("service_port")
-        return {
-            "state": "active" if raw_state in {"granted", "active", "starting"} else raw_state,
-            "lease_state": raw_state, "action": "heartbeat", "alias": alias, "host": host_spec["host"],
-            "lease_id": lease_id, "fence_token": int(fence_token), "devices": allocated_devices,
-            "ascend_rt_visible_devices": ",".join(str(d) for d in allocated_devices),
-            "service_port": service_port, "lease": task,
-        }
+        return {"state": "active" if raw_state in {"granted", "active", "starting"} else raw_state,
+                "lease_state": raw_state, "action": "heartbeat", "alias": alias, "host": host_spec["host"],
+                "lease_id": lease_id, "fence_token": int(fence_token), "devices": allocated_devices,
+                "ascend_rt_visible_devices": ",".join(str(d) for d in allocated_devices), "service_port": service_port, "lease": task}
 
     if action == "release":
         lease_id = safe_id(str(args.get("lease_id") or "").strip())
         if not lease_id:
             raise caller_error("mindie_lease(action='release') requires `lease_id`")
-        leases = _load_leases(base_dir)
+        lease_read_error: Exception | None = None
+        try:
+            leases = _load_leases(base_dir)
+        except (TimeoutError, OSError, ValueError) as exc:
+            leases, lease_read_error = {}, exc
         stored = leases.get(f"{alias}:{lease_id}") or leases.get(lease_id) or {}
         fence_token = args.get("fence_token") if args.get("fence_token") is not None else stored.get("fence_token")
         if fence_token is None:
             tasks = host_queue.request(host_spec, {"action": "status", "task_id": lease_id, "no_probe": True, **remote_sd}).get("tasks") or []
             fence_token = tasks[0].get("fence_token") if tasks else None
         if fence_token is not None:
-            response = host_queue.request(
-                host_spec,
-                {"action": "release", "task_id": lease_id, "fence_token": int(fence_token), "free_samples": int(args.get("free_samples") or 1), "interval_seconds": float(args.get("interval_seconds") or 0.0), **remote_sd},
-            )
+            req = {"action": "release", "task_id": lease_id, "fence_token": int(fence_token),
+                   "free_samples": int(args.get("free_samples") or 1), "interval_seconds": float(args.get("interval_seconds") or 0.0), **remote_sd}
+            response = host_queue.request(host_spec, req)
         else:
             response = host_queue.request(host_spec, {"action": "cancel", "task_id": lease_id, **remote_sd})
-        for key in (f"{alias}:{lease_id}", lease_id):
-            leases.pop(key, None)
-        _save_leases(base_dir, leases)
         task = response.get("task") or {}
         raw_state = str(task.get("state") or response.get("status") or "released")
-        return {
-            "state": "released" if raw_state in {"released", "cancelled"} else raw_state,
-            "lease_state": raw_state, "action": "release", "alias": alias, "host": host_spec["host"],
-            "lease_id": lease_id, "fence_token": int(fence_token) if fence_token is not None else None, "lease": task,
-        }
-
+        out = {"state": "released" if raw_state in {"released", "cancelled"} else raw_state,
+               "lease_state": raw_state, "action": "release", "alias": alias, "host": host_spec["host"],
+               "lease_id": lease_id, "fence_token": int(fence_token) if fence_token is not None else None, "lease": task}
+        if lease_read_error is not None:
+            out.update(receipt_warning=f"{type(lease_read_error).__name__}: {lease_read_error}", receipt_unconfirmed=True)
+            return out
+        try:
+            for key in (f"{alias}:{lease_id}", lease_id):
+                leases.pop(key, None)
+            _save_leases(base_dir, leases)
+        except (TimeoutError, OSError, ValueError) as exc:
+            out.update(receipt_warning=f"{type(exc).__name__}: {exc}", receipt_unconfirmed=True)
+        return out
     raise caller_error(f"unsupported mindie.lease action: {action!r}")
 
 
-__all__ = [
-    "handle_container", "handle_hosts", "handle_lease", "handle_probe", "probe_mindie_sd_runtime_readiness",
-    "probe_xllm_runtime_readiness", "validate_mindie_sd_runtime_env", "validate_vllm_ascend_runtime_env", "validate_xllm_runtime_env",
-]
+__all__ = ["handle_container", "handle_hosts", "handle_lease", "handle_probe", "probe_mindie_sd_runtime_readiness",
+           "probe_xllm_runtime_readiness", "validate_mindie_sd_runtime_env", "validate_vllm_ascend_runtime_env", "validate_xllm_runtime_env"]
