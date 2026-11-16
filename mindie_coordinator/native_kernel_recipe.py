@@ -20,6 +20,12 @@ CMake configure/build tree.
 - Parameter generation subprocess (`ascendc_bin_param_build.py`) has `timeout=60`s.
 - Variant `opc` compilations run concurrently via `ThreadPoolExecutor` bounded
   by `MAX_JOBS` or the CPU/RAM recommendation from `_recommend_max_jobs()`.
+- Cache reads hold the entry's shared advisory lock (eviction is non-blocking
+  exclusive); kernel build/publication staging holds its `.staging-*` lock for
+  the complete build. Stale staging is removed only after acquiring that lock
+  and exceeding the age grace.
+- Kernel restore and publication resolve the same `<cache-root>/.locks/` entry
+  lock as pool eviction; an unacquirable lock is a miss/busy skip, never I/O.
 
 [Side-Effect Policy]
 - Stages intermediate files in a temporary `.mindie-runtime/kernel-recipe-*`
@@ -48,6 +54,9 @@ RECIPE_TOOLS = ('ascendc_bin_param_build.py', 'ascendc_ops_config.py',
 KERNEL_CONTENT_SCHEMA = 'mindie-native-kernel-content/1'
 NATIVE_CONTENT_KEY_SCHEMA = 'mindie-native-content/1'
 KERNEL_CONTENT_MANIFEST = 'manifest.json'
+KERNEL_STAGING_MAX_AGE = 3600
+KERNEL_CONTENT_STAGING = ('.kernel-content-', '.trash-', '.native-content-')
+KERNEL_COMPILE_STAGING = ('kernel-recipe-',)
 KERNEL_COMPILE_FLAG_KEYS = (
     'CMAKE_BUILD_TYPE', 'SOC_VERSION', 'MINDIE_SOC_VERSION',
     'COMPILE_CUSTOM_KERNELS', 'MINDIE_COMPILE_CUSTOM_KERNELS', 'MINDIE_USE_CLANG15',
@@ -69,6 +78,40 @@ def _recipe_child(root: Path, name: str) -> Path:
 
 def _recipe_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _staging_lock(path: Path):
+    """Resolve the shared staging-lock helper in package or concatenated use."""
+    helper = globals().get('hold_staging_lock')
+    if helper is None:
+        from .native_cache_pool import hold_staging_lock as helper
+    return helper(path)
+
+
+def _sweep_stale_directories(directory: Path, prefixes, *,
+                             max_age_seconds: float = KERNEL_STAGING_MAX_AGE) -> None:
+    """Remove killed staging only when its builder lock is provably free."""
+    helper = globals().get('sweep_staging_directories')
+    if helper is None:
+        from .native_cache_pool import sweep_staging_directories as helper
+    helper(directory, prefixes, max_age_seconds=max_age_seconds)
+
+
+def _maintain_kernel_cache(cache: Path, key: str) -> None:
+    """Bound the shared cache after publication; never fail a completed compile."""
+    evict = globals().get('evict_native_cache')
+    if not callable(evict):
+        try:
+            from .native_cache_pool import evict_native_cache as evict
+        except ImportError:  # pragma: no cover - concatenated namespace without pool
+            return
+    root = cache.parent if cache.name == 'kernel' else cache
+    try:
+        evict(root, keep={key})
+    except TimeoutError:
+        raise
+    except OSError:
+        pass
 
 
 def _cgroup_cpu_cores() -> int:
@@ -167,50 +210,95 @@ def _drop_kernel_content(cache: Path, key: str) -> None:
     if entry.parent.resolve() != cache.resolve():
         return
     if entry.is_dir() and not entry.is_symlink():
-        shutil.rmtree(entry)
+        _remove_cache_tree(entry)
     elif entry.exists() or entry.is_symlink():
         entry.unlink()
+    if os.path.lexists(entry):
+        raise OSError('kernel content entry still exists: ' + str(entry))
+
+
+def _kernel_entry_lock(cache: Path, key: str, *, exclusive: bool = False,
+                       blocking: bool = True):
+    """Entry lock resolving to the pool root shared with eviction."""
+    helper = globals().get('_cache_entry_lock')
+    if helper is None:
+        from .native_cache_pool import _cache_entry_lock as helper
+    return helper(cache, 'kernel', key, exclusive=exclusive, blocking=blocking)
+
+
+def _remove_cache_tree(path: Path) -> None:
+    """Use the shared verified cache-tree remover in package/concatenated use."""
+    helper = globals().get('_remove_tree')
+    if helper is None:
+        from .native_cache_pool import _remove_tree as helper
+    helper(Path(path))
+
+
+def _drop_restore_destination(destination: Path) -> None:
+    """Remove only a partial kernel output tree this restore just created."""
+    if destination.is_dir() and not destination.is_symlink():
+        _remove_cache_tree(destination)
+    elif destination.exists() or destination.is_symlink():
+        destination.unlink(missing_ok=True)
+    if os.path.lexists(destination):
+        raise OSError('kernel restore destination still exists: ' + str(destination))
 
 
 def restore_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str, *, read_recipe) -> bool:
-    """Map a previously verified kernel entry; False only when no entry exists."""
+    """Map a previously verified kernel entry; False only when no entry exists.
+
+    The shared entry lock keeps eviction from renaming the source mid-copy.
+    Any partial restore failure removes this attempt's destination before the
+    caller falls back to fresh compilation.
+    """
     entry = cache / key
-    if not entry.is_dir():
-        return False
-    manifest = json.loads((entry / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
-    if (manifest.get('schema_version') != KERNEL_CONTENT_SCHEMA or manifest.get('cache_key') != key
-            or manifest.get('operator') != plan['operator'] or manifest.get('unit') != plan['unit']
-            or manifest.get('native_to') != plan.get('native_to')):
-        raise ValueError('kernel content entry does not describe this build')
-    expected = manifest.get('files')
-    if not isinstance(expected, dict) or not expected:
-        raise ValueError('kernel content entry has no file proof')
-    if _kernel_cache_files(entry) != expected:
-        raise ValueError('kernel content entry bytes changed')
-    generated = sorted((entry / 'gen').glob('*.sh'))
-    if [read_recipe(path) for path in generated] != manifest.get('generated_recipes'):
-        raise ValueError('kernel content entry recipe changed')
-    destination = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
-    if destination.exists():
-        raise ValueError('kernel content restore requires a fresh build directory')
-    destination.mkdir(parents=True)
-    for relative in expected:
-        target = _recipe_child(destination, relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        source = _recipe_child(entry, relative)
+    with _kernel_entry_lock(cache, key) as acquired:
+        if not acquired or not entry.is_dir():
+            return False
+        manifest = json.loads((entry / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
+        if (manifest.get('schema_version') != KERNEL_CONTENT_SCHEMA or manifest.get('cache_key') != key
+                or manifest.get('operator') != plan['operator'] or manifest.get('unit') != plan['unit']
+                or manifest.get('native_to') != plan.get('native_to')):
+            raise ValueError('kernel content entry does not describe this build')
+        expected = manifest.get('files')
+        if not isinstance(expected, dict) or not expected:
+            raise ValueError('kernel content entry has no file proof')
+        if _kernel_cache_files(entry) != expected:
+            raise ValueError('kernel content entry bytes changed')
+        generated = sorted((entry / 'gen').glob('*.sh'))
+        if [read_recipe(path) for path in generated] != manifest.get('generated_recipes'):
+            raise ValueError('kernel content entry recipe changed')
+        destination = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
+        if destination.exists():
+            raise ValueError('kernel content restore requires a fresh build directory')
+        destination.mkdir(parents=True)
         try:
-            os.link(source, target)
+            for relative in expected:
+                target = _recipe_child(destination, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = _recipe_child(entry, relative)
+                try:
+                    os.link(source, target)
+                except TimeoutError:
+                    raise
+                except OSError as exc:
+                    fallback = {getattr(errno, name, None) for name in
+                                ('EXDEV', 'EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP', 'EMLINK', 'EINVAL')}
+                    if exc.errno not in fallback:
+                        raise
+                    shutil.copy2(source, target)
+            if _kernel_cache_files(destination) != expected:
+                raise ValueError('kernel content restore produced different bytes')
+        except BaseException:
+            _drop_restore_destination(destination)
+            raise
+        try:
+            os.utime(entry, None)
         except TimeoutError:
             raise
-        except OSError as exc:
-            fallback = {getattr(errno, name, None) for name in
-                        ('EXDEV', 'EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP', 'EMLINK', 'EINVAL')}
-            if exc.errno not in fallback:
-                raise
-            shutil.copy2(source, target)
-    if _kernel_cache_files(destination) != expected:
-        raise ValueError('kernel content restore produced different bytes')
-    return True
+        except OSError:
+            pass
+        return True
 
 
 def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str, recipes: list) -> dict:
@@ -219,6 +307,8 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
     binary = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
     files = _kernel_cache_files(binary)
     candidate = _kernel_cache_manifest(plan, key, recipes, files)
+    cache.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_directories(cache, KERNEL_CONTENT_STAGING)
 
     def check_existing(existing, observed_files):
         if any(existing.get(field) != value for field, value in candidate.items() if field != 'files'):
@@ -226,41 +316,61 @@ def publish_kernel_recipe_content(root: Path, plan: dict, cache: Path, key: str,
         if observed_files != existing.get('files') or observed_files != files:
             raise ValueError('same kernel content key produced different artifacts')
 
-    if destination.exists():
-        try:
-            existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
-            observed_files = _kernel_cache_files(destination)
-        except TimeoutError:
-            raise
-        except (OSError, ValueError):
-            # The entry is incomplete/corrupt; rebuild it from this compile.
-            _drop_kernel_content(cache, key)
-        else:
-            check_existing(existing, observed_files)
-            return {'status': 'present', 'cache_key': key}
-    cache.mkdir(parents=True, exist_ok=True)
-    temp = Path(tempfile.mkdtemp(prefix='.kernel-content-', dir=cache))
-    try:
-        for relative in files:
-            target = _recipe_child(temp, relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(_recipe_child(binary, relative), target)
-        if _kernel_cache_files(temp) != files:
-            raise ValueError('kernel content publication copied different bytes')
-        (temp / KERNEL_CONTENT_MANIFEST).write_text(json.dumps(candidate, sort_keys=True, indent=2) + '\n')
-        try:
-            os.rename(temp, destination)
-        except TimeoutError:
-            raise
-        except OSError as exc:
-            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
+    present = False
+    with _kernel_entry_lock(cache, key, exclusive=True) as acquired:
+        if not acquired:
+            return {'status': 'busy', 'cache_key': key}
+        if destination.exists():
+            try:
+                existing = json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8'))
+                observed_files = _kernel_cache_files(destination)
+            except TimeoutError:
                 raise
-            check_existing(json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8')),
-                           _kernel_cache_files(destination))
-            return {'status': 'present', 'cache_key': key}
-    finally:
-        if temp.exists():
-            shutil.rmtree(temp)
+            except (OSError, ValueError):
+                # The entry is incomplete/corrupt; rebuild it from this compile.
+                _drop_kernel_content(cache, key)
+            else:
+                check_existing(existing, observed_files)
+                try:
+                    os.utime(destination, None)
+                except TimeoutError:
+                    raise
+                except OSError:
+                    pass
+                present = True
+    if present:
+        _maintain_kernel_cache(cache, key)
+        return {'status': 'present', 'cache_key': key}
+    temp = Path(tempfile.mkdtemp(prefix='.kernel-content-', dir=cache))
+    with _staging_lock(temp):
+        try:
+            for relative in files:
+                target = _recipe_child(temp, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(_recipe_child(binary, relative), target)
+            if _kernel_cache_files(temp) != files:
+                raise ValueError('kernel content publication copied different bytes')
+            (temp / KERNEL_CONTENT_MANIFEST).write_text(json.dumps(candidate, sort_keys=True, indent=2) + '\n')
+            try:
+                os.rename(temp, destination)
+            except TimeoutError:
+                raise
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not destination.is_dir():
+                    raise
+                check_existing(json.loads((destination / KERNEL_CONTENT_MANIFEST).read_text(encoding='utf-8')),
+                               _kernel_cache_files(destination))
+                _maintain_kernel_cache(cache, key)
+                return {'status': 'present', 'cache_key': key}
+        finally:
+            if temp.exists():
+                try:
+                    _remove_cache_tree(temp)
+                except TimeoutError:
+                    raise
+                except OSError:
+                    pass
+    _maintain_kernel_cache(cache, key)
     return {'status': 'published', 'cache_key': key}
 
 
@@ -423,129 +533,147 @@ def compile_kernel_recipe(root: Path, plan: dict, environment: dict, *, read_rec
             missing = [name for name in measured if not metadata.get(name)]
             print('native-incremental: kernel content cache skipped; measured metadata missing: '
                   + ', '.join(missing), flush=True)
+    destination = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
+    if destination.exists():
+        _drop_restore_destination(destination)
+        print('native-incremental: removed incomplete kernel output directory ' + plan['unit'],
+              flush=True)
+    _sweep_stale_directories(root / '.mindie-runtime', KERNEL_COMPILE_STAGING)
     stage = Path(tempfile.mkdtemp(prefix='kernel-recipe-', dir=root / '.mindie-runtime'))
     started = False
     completed = False
-    try:
-        binary = stage / 'binary' / plan['unit']
-        generated = binary / 'gen'
-        generated.mkdir(parents=True)
-        info = stage / 'operator.ini'
-        info.write_text(ini, encoding='utf-8')
-        tools = root / 'vllm-ascend/csrc/cmake/scripts/util'
-        result = subprocess.run([sys.executable, str(tools / 'ascendc_bin_param_build.py'),
-                                 str(info), str(generated), plan['unit']], env=environment, timeout=60,
-                                stdin=subprocess.DEVNULL)
-        if result.returncode:
-            if result.returncode < 0:
-                raise subprocess.CalledProcessError(result.returncode, result.args)
-            raise RecipeUnavailable('upstream parameter generator rejected installed metadata')
-        scripts = sorted(generated.glob('*.sh'))
-        prior = json.loads(_recipe_child(root, plan['kernel_root'] + '/config/' + plan['unit'] + '/' + plan['operator'] + '.json').read_text(encoding='utf-8'))
-        generated_recipes = [read_recipe(script) for script in scripts]
-        if (not scripts or any(row is None for row in generated_recipes)
-                or sorted(generated_recipes, key=lambda row: row['name']) != sorted(variants, key=lambda row: row.get('name', ''))):
-            raise RecipeUnavailable('generated options or parameters differ from the effective build recipe')
-        if len(scripts) != len(prior.get('binList', [])):
-            raise RecipeUnavailable('generated variant count differs from installed dispatch')
-        # A fresh private compiler view prevents any installed old CPP from
-        # preceding BUILD_KERNEL_SRC in upstream's relative-path resolver.
-        dynamic_path = stage / 'impl/dynamic' / (plan['operator'] + '.py')
-        dynamic_path.parent.mkdir(parents=True)
-        prefix = dynamic.rsplit('/dynamic/', 1)[0]
-        for name in plan['recipe_files']:
-            if name.startswith(prefix + '/ascendc/'):
-                target = _recipe_child(stage / 'impl', name[len(prefix) + 1:])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(_recipe_child(root, name), target)
-        source = _recipe_child(root, 'vllm-ascend/' + plan['source'])
-        source_dir = dynamic_path.parent / 'op_kernel'
-        shutil.copytree(source.parent, source_dir)
-        staged_source = source_dir / source.name
-        dynamic_path.write_text(_guarded_dynamic(_recipe_child(root, dynamic).read_text(encoding='utf-8'),
-            staged_source, plan['source_sha256'], root), encoding='utf-8')
-        output = binary / 'bin' / plan['operator']
-        output.mkdir(parents=True)
-        vendor = plan['kernel_root'].split('/op_impl/ai_core/tbe/', 1)[0]
-        environment = {**environment, 'ASCEND_CUSTOM_OPP_PATH': str(_recipe_child(root, vendor)) +
-            (':' + environment['ASCEND_CUSTOM_OPP_PATH'] if environment.get('ASCEND_CUSTOM_OPP_PATH') else ''),
-            'HI_PYTHON': sys.executable, 'TILINGKEY_PAR_COMPILE': '1', 'BIN_FILENAME_HASHED': '1'}
-        print(f'native-incremental: recipe OPC variants={len(scripts)}', flush=True)
-        def compile_one(script):
-            proof = stage / (script.stem + '.source.json')
-            # Upstream scripts check output presence but can mask OPC's exit
-            # code. Preserve their setup and flags, and retain the actual exit
-            # before any later shell command overwrites it.
-            command = script.read_text(encoding='utf-8')
-            command, count = re.subn(r'(^[ \t]*res=\$\(opc [^\n]*\)[ \t]*$)',
-                lambda match: match[0] + '\nmindie_opc_status=$?\n'
-                'if [ "$mindie_opc_status" -ne 0 ]; then printf "%s\\n" "$res"; exit "$mindie_opc_status"; fi',
-                command, flags=re.MULTILINE)
-            if count != 1:
-                raise ValueError('generated OPC command is not uniquely observable')
-            script.write_text(command, encoding='utf-8')
-            subprocess.run(['bash', str(script), str(dynamic_path), str(output)],
-                cwd=generated, env={**environment, 'MINDIE_KERNEL_SOURCE_PROOF': str(proof)}, check=True,
-                timeout=600, stdin=subprocess.DEVNULL)
-            if json.loads(proof.read_text(encoding='utf-8')) != {'source': str(staged_source.resolve()), 'sha256': plan['source_sha256']}:
-                raise ValueError('variant has no successful fixed CPP compiler proof')
-        started = True
-        # Wait for every owned compiler even when a sibling fails. The outer
-        # preparation process remains the process-family cancellation owner.
-        requested_jobs = environment.get('MAX_JOBS', '')
-        if requested_jobs.isdecimal() and int(requested_jobs) > 0:
-            workers = int(requested_jobs)
-        else:
-            workers = _recommend_max_jobs()
-        if environment.get('MINDIE_COMPILE_JOBS_LIMIT'):
-            workers = min(workers, int(environment['MINDIE_COMPILE_JOBS_LIMIT']))
-        if workers < 1:
-            raise ValueError('insufficient memory for one compiler worker')
-        with ThreadPoolExecutor(max_workers=min(len(scripts), workers)) as executor:
-            futures = [executor.submit(compile_one, script) for script in scripts]
-            errors = []
-            for future in futures:
+    with _staging_lock(stage):
+        try:
+            binary = stage / 'binary' / plan['unit']
+            generated = binary / 'gen'
+            generated.mkdir(parents=True)
+            info = stage / 'operator.ini'
+            info.write_text(ini, encoding='utf-8')
+            tools = root / 'vllm-ascend/csrc/cmake/scripts/util'
+            result = subprocess.run([sys.executable, str(tools / 'ascendc_bin_param_build.py'),
+                                     str(info), str(generated), plan['unit']], env=environment, timeout=60,
+                                    stdin=subprocess.DEVNULL)
+            if result.returncode:
+                if result.returncode < 0:
+                    raise subprocess.CalledProcessError(result.returncode, result.args)
+                raise RecipeUnavailable('upstream parameter generator rejected installed metadata')
+            scripts = sorted(generated.glob('*.sh'))
+            prior = json.loads(_recipe_child(root, plan['kernel_root'] + '/config/' + plan['unit'] + '/' + plan['operator'] + '.json').read_text(encoding='utf-8'))
+            generated_recipes = [read_recipe(script) for script in scripts]
+            if (not scripts or any(row is None for row in generated_recipes)
+                    or sorted(generated_recipes, key=lambda row: row['name']) != sorted(variants, key=lambda row: row.get('name', ''))):
+                raise RecipeUnavailable('generated options or parameters differ from the effective build recipe')
+            if len(scripts) != len(prior.get('binList', [])):
+                raise RecipeUnavailable('generated variant count differs from installed dispatch')
+            # A fresh private compiler view prevents any installed old CPP from
+            # preceding BUILD_KERNEL_SRC in upstream's relative-path resolver.
+            dynamic_path = stage / 'impl/dynamic' / (plan['operator'] + '.py')
+            dynamic_path.parent.mkdir(parents=True)
+            prefix = dynamic.rsplit('/dynamic/', 1)[0]
+            for name in plan['recipe_files']:
+                if name.startswith(prefix + '/ascendc/'):
+                    target = _recipe_child(stage / 'impl', name[len(prefix) + 1:])
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(_recipe_child(root, name), target)
+            source = _recipe_child(root, 'vllm-ascend/' + plan['source'])
+            source_dir = dynamic_path.parent / 'op_kernel'
+            shutil.copytree(source.parent, source_dir)
+            staged_source = source_dir / source.name
+            dynamic_path.write_text(_guarded_dynamic(_recipe_child(root, dynamic).read_text(encoding='utf-8'),
+                staged_source, plan['source_sha256'], root), encoding='utf-8')
+            output = binary / 'bin' / plan['operator']
+            output.mkdir(parents=True)
+            vendor = plan['kernel_root'].split('/op_impl/ai_core/tbe/', 1)[0]
+            environment = {**environment, 'ASCEND_CUSTOM_OPP_PATH': str(_recipe_child(root, vendor)) +
+                (':' + environment['ASCEND_CUSTOM_OPP_PATH'] if environment.get('ASCEND_CUSTOM_OPP_PATH') else ''),
+                'HI_PYTHON': sys.executable, 'TILINGKEY_PAR_COMPILE': '1', 'BIN_FILENAME_HASHED': '1'}
+            print(f'native-incremental: recipe OPC variants={len(scripts)}', flush=True)
+            def compile_one(script):
+                proof = stage / (script.stem + '.source.json')
+                # Upstream scripts check output presence but can mask OPC's exit
+                # code. Preserve their setup and flags, and retain the actual exit
+                # before any later shell command overwrites it.
+                command = script.read_text(encoding='utf-8')
+                command, count = re.subn(r'(^[ \t]*res=\$\(opc [^\n]*\)[ \t]*$)',
+                    lambda match: match[0] + '\nmindie_opc_status=$?\n'
+                    'if [ "$mindie_opc_status" -ne 0 ]; then printf "%s\\n" "$res"; exit "$mindie_opc_status"; fi',
+                    command, flags=re.MULTILINE)
+                if count != 1:
+                    raise ValueError('generated OPC command is not uniquely observable')
+                script.write_text(command, encoding='utf-8')
+                subprocess.run(['bash', str(script), str(dynamic_path), str(output)],
+                    cwd=generated, env={**environment, 'MINDIE_KERNEL_SOURCE_PROOF': str(proof)}, check=True,
+                    timeout=600, stdin=subprocess.DEVNULL)
+                if json.loads(proof.read_text(encoding='utf-8')) != {'source': str(staged_source.resolve()), 'sha256': plan['source_sha256']}:
+                    raise ValueError('variant has no successful fixed CPP compiler proof')
+            started = True
+            # Wait for every owned compiler even when a sibling fails. The outer
+            # preparation process remains the process-family cancellation owner.
+            requested_jobs = environment.get('MAX_JOBS', '')
+            if requested_jobs.isdecimal() and int(requested_jobs) > 0:
+                workers = int(requested_jobs)
+            else:
+                workers = _recommend_max_jobs()
+            if environment.get('MINDIE_COMPILE_JOBS_LIMIT'):
+                workers = min(workers, int(environment['MINDIE_COMPILE_JOBS_LIMIT']))
+            if workers < 1:
+                raise ValueError('insufficient memory for one compiler worker')
+            with ThreadPoolExecutor(max_workers=min(len(scripts), workers)) as executor:
+                futures = [executor.submit(compile_one, script) for script in scripts]
+                errors = []
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        errors.append(exc)
+                if errors:
+                    raise errors[0]
+            expected = {row['binary'] + suffix for row in generated_recipes for suffix in ('.o', '.json')}
+            if ({path.name for path in output.iterdir()} != expected
+                    or any(not path.is_file() for path in output.iterdir())):
+                raise ValueError('compiler did not produce every complete variant output')
+            subprocess.run([sys.executable, str(tools / 'ascendc_ops_config.py'), '-p', str(binary / 'bin'),
+                            '-s', plan['unit']], env=environment, check=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+            destination = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
+            destination.mkdir(parents=True)
+            (binary / 'bin').rename(destination / 'bin')
+            final_gen = destination / 'gen'
+            for script in scripts:
+                script.write_text(script.read_text(encoding='utf-8').replace(str(generated.resolve()), str(final_gen.resolve())), encoding='utf-8')
+            generated.rename(final_gen)
+            if [read_recipe(path) for path in sorted(final_gen.glob('*.sh'))] != generated_recipes:
+                raise ValueError('relocated compiler evidence changed its effective recipe')
+            completed = True
+            if cache_key is not None:
                 try:
-                    future.result()
-                except Exception as exc:
-                    errors.append(exc)
-            if errors:
-                raise errors[0]
-        expected = {row['binary'] + suffix for row in generated_recipes for suffix in ('.o', '.json')}
-        if ({path.name for path in output.iterdir()} != expected
-                or any(not path.is_file() for path in output.iterdir())):
-            raise ValueError('compiler did not produce every complete variant output')
-        subprocess.run([sys.executable, str(tools / 'ascendc_ops_config.py'), '-p', str(binary / 'bin'),
-                        '-s', plan['unit']], env=environment, check=True, timeout=120,
-                        stdin=subprocess.DEVNULL)
-        destination = _recipe_child(root, 'vllm-ascend/csrc/build/binary/' + plan['unit'])
-        destination.mkdir(parents=True)
-        (binary / 'bin').rename(destination / 'bin')
-        final_gen = destination / 'gen'
-        for script in scripts:
-            script.write_text(script.read_text(encoding='utf-8').replace(str(generated.resolve()), str(final_gen.resolve())), encoding='utf-8')
-        generated.rename(final_gen)
-        if [read_recipe(path) for path in sorted(final_gen.glob('*.sh'))] != generated_recipes:
-            raise ValueError('relocated compiler evidence changed its effective recipe')
-        completed = True
-        if cache_key is not None:
-            try:
-                publish_kernel_recipe_content(root, plan, content_cache, cache_key, generated_recipes)
-                print('native-incremental: kernel content cache stored ' + cache_key, flush=True)
-            except TimeoutError:
+                    stored = publish_kernel_recipe_content(root, plan, content_cache, cache_key,
+                                                           generated_recipes)
+                    if stored.get('status') == 'busy':
+                        print('native-incremental: kernel content cache busy; store skipped '
+                              + cache_key, flush=True)
+                    else:
+                        print('native-incremental: kernel content cache stored ' + cache_key,
+                              flush=True)
+                except TimeoutError:
+                    raise
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    # Compilation already succeeded; an optional cache write must
+                    # not turn a complete owned build into a failure.
+                    print('native-incremental: kernel content cache store failed: ' + str(exc), flush=True)
+            return True
+        except RecipeUnavailable as exc:
+            if started:
                 raise
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                # Compilation already succeeded; an optional cache write must
-                # not turn a complete owned build into a failure.
-                print('native-incremental: kernel content cache store failed: ' + str(exc), flush=True)
-        return True
-    except RecipeUnavailable as exc:
-        if started:
-            raise
-        print('native-incremental: recipe fallback: ' + str(exc), flush=True)
-        return False
-    finally:
-        if started and not completed:
-            print('native-incremental: retained failed compiler stage: ' + str(stage), flush=True)
-        else:
-            shutil.rmtree(stage)
+            print('native-incremental: recipe fallback: ' + str(exc), flush=True)
+            return False
+        finally:
+            if started and not completed:
+                print('native-incremental: retained failed compiler stage: ' + str(stage), flush=True)
+            else:
+                try:
+                    shutil.rmtree(stage)
+                except TimeoutError:
+                    raise
+                except OSError:
+                    pass

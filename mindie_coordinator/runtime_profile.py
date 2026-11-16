@@ -14,7 +14,8 @@ profiles and native custom-op bundle manifests (`.mindie-runtime/ready-profile.j
 
 [Timeouts & Locks]
 - `native_import_smoke` runs in an isolated subprocess with `timeout=30`s.
-- Bundle publication uses atomic `tempfile.mkdtemp` + `os.rename` into `<cache>/<build_key>`.
+- Bundle publication holds an exclusive `.staging-*` builder lock for the
+  complete `mkdtemp`/copy/verify/rename into `<cache>/<build_key>`.
 
 [Side-Effect Policy]
 - Never installs packages, creates containers, or loads models.
@@ -724,6 +725,10 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
     import time
     timings = timings if timings is not None else {}
     cache.mkdir(parents=True, exist_ok=True)
+    sweep = globals().get('sweep_staging_directories')
+    if sweep is None:
+        from .native_cache_pool import sweep_staging_directories as sweep
+    sweep(cache, ('.publish-',))
     destination = cache / manifest["build_key"]
     if destination.exists():
         existing = json.loads((destination / "manifest.json").read_text(encoding='utf-8'))
@@ -737,38 +742,47 @@ def _publish_captured_bundle(root: Path, cache: Path, manifest: dict[str, Any], 
         timings['bundle_verify'] = time.monotonic() - started
         return destination
     temp = Path(tempfile.mkdtemp(prefix=".publish-", dir=cache))
-    try:
-        names = set(manifest["files"]) | {row["path"] for row in manifest["evidence"].values()}
-        if "manifest.json" in names:
-            raise ValueError("reserved bundle path: manifest.json")
-        started = time.monotonic()
-        for name in names:
-            target = temp / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(checked_file(root, name), target)
-        timings['bundle_copy'] = time.monotonic() - started
-        (temp / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
-        started = time.monotonic()
-        verify(temp, manifest, check_environment=False)
-        timings['bundle_verify'] = time.monotonic() - started
+    staging_lock = globals().get('hold_staging_lock')
+    if staging_lock is None:
+        from .native_cache_pool import hold_staging_lock as staging_lock
+    with staging_lock(temp):
         try:
-            os.rename(temp, destination)
-        except TimeoutError:
-            raise
-        except OSError:
-            # Another complete publication may win this immutable key. Never
-            # replace it or mistake a failed/partial destination for success.
-            if not destination.is_dir():
+            names = set(manifest["files"]) | {row["path"] for row in manifest["evidence"].values()}
+            if "manifest.json" in names:
+                raise ValueError("reserved bundle path: manifest.json")
+            started = time.monotonic()
+            for name in names:
+                target = temp / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(checked_file(root, name), target)
+            timings['bundle_copy'] = time.monotonic() - started
+            (temp / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+            started = time.monotonic()
+            verify(temp, manifest, check_environment=False)
+            timings['bundle_verify'] = time.monotonic() - started
+            try:
+                os.rename(temp, destination)
+            except TimeoutError:
                 raise
-            existing = json.loads((destination / 'manifest.json').read_text(encoding='utf-8'))
-            identity_fields = ('schema_version', 'profile', 'profile_key', 'build_inputs', 'build_key', 'runtime_root', 'files')
-            if any(existing.get(key) != manifest.get(key) for key in identity_fields):
-                raise ValueError('concurrent publication produced different artifacts')
-            verify(destination, existing, check_environment=False)
-        return destination
-    finally:
-        if temp.exists():
-            shutil.rmtree(temp)
+            except OSError:
+                # Another complete publication may win this immutable key. Never
+                # replace it or mistake a failed/partial destination for success.
+                if not destination.is_dir():
+                    raise
+                existing = json.loads((destination / 'manifest.json').read_text(encoding='utf-8'))
+                identity_fields = ('schema_version', 'profile', 'profile_key', 'build_inputs', 'build_key', 'runtime_root', 'files')
+                if any(existing.get(key) != manifest.get(key) for key in identity_fields):
+                    raise ValueError('concurrent publication produced different artifacts')
+                verify(destination, existing, check_environment=False)
+            return destination
+        finally:
+            if temp.exists():
+                try:
+                    shutil.rmtree(temp)
+                except TimeoutError:
+                    raise
+                except OSError:
+                    pass
 
 def restore(root: Path, bundle: Path, expected_build_key: str) -> None:
     """Preparation-only restoration, after owner proves all its workers stopped."""

@@ -22,9 +22,15 @@ bundle store/restore/rollback (`store_shared_native`, `restore_shared_native`,
   bundle. The next lookup verifies SHA-256 and republishes from the bundle.
 
 [Timeouts & Locks]
-- Shared cache index updates use `tempfile.mkstemp` + atomic `os.replace`.
+- Shared cache index updates use `tempfile.mkstemp` + an exclusive
+  `.staging-*` builder lock + atomic `os.replace`.
 - Content entries publish into a private `mkdtemp` directory and become visible
   with one `os.rename`; no partially published key is ever used.
+- Restore holds the cache-root shared lock while it snapshots the verified
+  bundle manifest into the execution root, so `revalidate` survives later
+  eviction during dependency installation.
+- Store/restore skip cleanly when that shared lock cannot be acquired; they
+  never read or publish shared cache bytes unlocked.
 
 [Side-Effect Policy]
 - Writes only inside the new execution view root or `/tmp/mindie-native-cache`.
@@ -44,31 +50,34 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-# The remote builder executes these modules in one namespace. Declare that
-# cross-module contract to static tools without importing deployment helpers locally.
+# Remote concatenation executes these modules in one namespace; this only
+# declares that cross-module contract to static tools.
 if TYPE_CHECKING:
     from .build_inputs import BUILD_INPUT_ENV_KEYS, VLLM_ASCEND_REINSTALL_PATTERNS, submodule_content
     from .native_incremental import kernel_rebuild_plan, native_tree_entries
     from .runtime_profile import (
-        _publish_captured_bundle, build_key, build_toolchain_from_logs, checked_file,
-        digest, file_digest, native_compatibility_key, native_compatibility_receipt,
-        native_import_receipt, native_import_smoke, native_source_mapping,
-        native_vendor_launch_environment, native_vendor_paths, profile_key, publish,
-        verified_preparation, verify, verify_environment, verify_native_compatibility,
+        _publish_captured_bundle, build_key, build_toolchain_from_logs, checked_file, digest,
+        file_digest, native_compatibility_key, native_compatibility_receipt, native_import_receipt,
+        native_import_smoke, native_source_mapping, native_vendor_launch_environment,
+        native_vendor_paths, profile_key, publish, verified_preparation, verify, verify_environment,
+        verify_native_compatibility,
     )
 
 try:  # Local package use. Remote concatenation must exec native_cache_pool first.
     from .native_cache_pool import (
         NATIVE_CONTENT_MANIFEST as NATIVE_CONTENT_MANIFEST,
         NATIVE_CONTENT_SCHEMA as NATIVE_CONTENT_SCHEMA,
-        _drop_native_content, _link_or_copy, _read_native_content,
-        native_cache_receipt as native_cache_receipt,
+        _cache_operation, _drop_native_content, _link_or_copy, _read_native_content,
+        cache_busy_result, evict_native_cache, native_cache_receipt as native_cache_receipt,
         native_content_key,
         native_content_key_material as native_content_key_material,
-        publish_native_content,
+        publish_native_content, touch_native_cache_entry,
     )
 except (ImportError, KeyError):  # pragma: no cover - concatenated namespace
     pass
+
+
+SHARED_NATIVE_BUNDLE_SNAPSHOT = '.mindie-runtime/shared-native-bundle.json'
 
 
 def safe_destination(root: Path, relative: str) -> Path:
@@ -76,6 +85,26 @@ def safe_destination(root: Path, relative: str) -> Path:
     if path.is_absolute() or '..' in path.parts:
         raise ValueError('unsafe execution artifact destination')
     return root / path
+
+
+def _staging_guard(path: Path):
+    """Resolve the shared staging-lock helper in package or concatenated use."""
+    helper = globals().get('hold_staging_lock')
+    if helper is None:
+        from .native_cache_pool import hold_staging_lock as helper
+    return helper(path)
+
+
+def _snapshot_shared_bundle(root: Path, name: str, manifest_bytes: bytes) -> None:
+    """Keep the exact verified manifest inside the execution root."""
+    target = safe_destination(root, SHARED_NATIVE_BUNDLE_SNAPSHOT)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.tmp')
+    payload = {'schema_version': 1, 'bundle': name,
+               'bundle_manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest(),
+               'manifest_text': manifest_bytes.decode('utf-8')}
+    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+    os.replace(temporary, target)
 
 
 def copy_dependencies(source_site: Path, destination_site: Path) -> list[str]:
@@ -130,17 +159,14 @@ def write_source_metadata(root: Path, versions: dict, distributions: dict | None
             else:
                 output.unlink(missing_ok=True)
         version_file = safe_destination(root, name + '/' + package + '/_version.py')
-        # Use the recipe's own version writer, including prerelease/local tuple
-        # semantics; preserve the real HEAD rather than synthetic ancestry.
+        # Preserve real HEAD and prerelease tuple semantics via the recipe writer.
         try:
             from setuptools_scm import dump_version
             dump_version(str(root / name), version, package + '/_version.py')
         except ImportError:
             version_file.parent.mkdir(parents=True, exist_ok=True)
-            version_file.write_text(
-                f'__version__ = version = {version!r}\n__version_tuple__ = version_tuple = (0, 1)\n',
-                encoding='utf-8',
-            )
+            version_file.write_text(f'__version__ = version = {version!r}\n'
+                                    f'__version_tuple__ = version_tuple = (0, 1)\n', encoding='utf-8')
         with version_file.open('a', encoding='utf-8') as stream:
             stream.write('\n__commit_id__ = commit_id = ' + repr(row.get('source_head')) + '\n')
 
@@ -159,8 +185,7 @@ def copy_native_view(root: Path, source_root: Path, manifest: dict, versions: di
         target = safe_destination(root, name)
         if target.exists():
             if target.is_file() and file_digest(target) == row['sha256']:
-                # Fixed source materialization may already contain an identical
-                # generated-looking config file. Never overwrite a differing file.
+                # Never overwrite a differing generated-looking config file.
                 continue
             raise ValueError('native output already exists in fresh view: ' + name)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -184,9 +209,8 @@ def shared_input_key(preparation: dict, image_digest: str) -> str:
     if not image_digest or not all(preparation.get('native', {}).get(name) for name in ('vllm', 'vllm-ascend')):
         raise ValueError('shared native cache requires fixed native inputs and image digest')
     environment = preparation.get('environment', {})
-    # A default image and its explicit immutable reference can resolve to the
-    # same Docker image. Request spelling is not compiled-output identity;
-    # restore checks requested constraints against the measured profile.
+    # Request spelling is not compiled-output identity; restore still checks
+    # the requested constraints against the measured profile.
     return digest({'image': image_digest, 'dependencies': preparation.get('dependencies'),
                    'native': preparation['native'], 'build_env': environment.get('build_env', {})})
 
@@ -197,25 +221,50 @@ def shared_base_key(preparation: dict, image_digest: str) -> str:
     return shared_input_key(baseline, image_digest)
 
 
+def _maintain_shared_native(cache: Path, keep) -> None:
+    try:
+        evict_native_cache(cache, keep={value for value in keep if value})
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        print('shared native cache maintenance failed: ' + str(exc), file=sys.stderr, flush=True)
+
+
 def store_shared_native(root: Path, cache: Path) -> dict:
     """Automatically cache only the existing verified output bundle and metadata."""
+    with _cache_operation(cache) as acquired:
+        if not acquired:
+            return cache_busy_result()
+        result = _store_shared_native(root, cache)
+    _maintain_shared_native(cache, {result.get('bundle'), result.get('cache_key')})
+    return result
+
+
+def _store_shared_native(root: Path, cache: Path) -> dict:
     manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))
     manifest = _with_distribution_metadata(manifest)
     bundle = publish(root, cache / 'bundles', manifest)
     result = _index_native_bundle(cache, manifest, bundle)
     content = publish_native_content(bundle, cache, manifest)
-    return {**result, 'native_content': content, 'cache_key': content['cache_key'],
-            'linked_files': 0}
+    return {**result, 'native_content': content, 'cache_key': content['cache_key'], 'linked_files': 0}
 
 
 def _store_captured_native(root: Path, cache: Path, manifest: dict, timings: dict) -> dict:
     """Only the managed capture's current stack supplies this fresh manifest."""
+    with _cache_operation(cache) as acquired:
+        if not acquired:
+            return cache_busy_result()
+        result = _store_captured_native_unlocked(root, cache, manifest, timings)
+    _maintain_shared_native(cache, {result.get('bundle'), result.get('cache_key')})
+    return result
+
+
+def _store_captured_native_unlocked(root: Path, cache: Path, manifest: dict, timings: dict) -> dict:
     manifest = _with_distribution_metadata(manifest)
     bundle = _publish_captured_bundle(root, cache / 'bundles', manifest, timings=timings)
     result = _index_native_bundle(cache, manifest, bundle)
     content = publish_native_content(bundle, cache, manifest)
-    return {**result, 'native_content': content, 'cache_key': content['cache_key'],
-            'linked_files': 0}
+    return {**result, 'native_content': content, 'cache_key': content['cache_key'], 'linked_files': 0}
 
 
 def _with_distribution_metadata(manifest: dict) -> dict:
@@ -236,16 +285,18 @@ def _index_native_bundle(cache: Path, manifest: dict, bundle: Path) -> dict:
     cache.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.index-', dir=cache)
     try:
-        with os.fdopen(fd, 'w') as stream:
-            json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
-        os.replace(temporary, cache / (key + '.json'))
+        with _staging_guard(temporary):
+            with os.fdopen(fd, 'w') as stream:
+                json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
+            os.replace(temporary, cache / (key + '.json'))
         # This index only selects a candidate. Its exact native delta and all
         # copied outputs must still be checked before an incremental build.
         base = shared_base_key(preparation, manifest['profile']['image_digest'])
         fd, temporary = tempfile.mkstemp(prefix='.index-', dir=cache)
-        with os.fdopen(fd, 'w') as stream:
-            json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
-        os.replace(temporary, cache / ('base-' + base + '.json'))
+        with _staging_guard(temporary):
+            with os.fdopen(fd, 'w') as stream:
+                json.dump({'bundle': bundle.name, 'native_key': preparation['native_key']}, stream)
+            os.replace(temporary, cache / ('base-' + base + '.json'))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -324,7 +375,27 @@ def revalidate_shared_native(root: Path, cache: Path) -> dict:
     name = receipt.get('bundle', '')
     if not re.fullmatch('[0-9a-f]{64}', name):
         raise ValueError('shared native receipt has no fixed bundle')
-    data = (cache / 'bundles' / name / 'manifest.json').read_bytes()
+    try:
+        data = (cache / 'bundles' / name / 'manifest.json').read_bytes()
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        # Eviction may remove the shared path after restore. The execution
+        # root owns an exact verified snapshot written while restore held the
+        # cache lock, so dependency installation cannot invalidate this proof.
+        snapshot_path = safe_destination(root, SHARED_NATIVE_BUNDLE_SNAPSHOT)
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding='utf-8'))
+        except TimeoutError:
+            raise
+        except (OSError, ValueError):
+            raise FileNotFoundError('selected shared native bundle is unavailable') from exc
+        if not isinstance(snapshot, dict):
+            raise ValueError('shared native bundle snapshot changed') from exc
+        text_value = snapshot.get('manifest_text')
+        if snapshot.get('bundle') != name or not isinstance(text_value, str):
+            raise ValueError('shared native bundle snapshot changed') from exc
+        data = text_value.encode('utf-8')
     if hashlib.sha256(data).hexdigest() != receipt.get('bundle_manifest_sha256'):
         raise ValueError('selected shared native bundle manifest changed')
     profile = json.loads(data)['profile']
@@ -340,6 +411,19 @@ def revalidate_shared_native(root: Path, cache: Path) -> dict:
 def restore_shared_native(root: Path, cache: Path, preparation: dict, image_digest: str, versions: dict,
                           machine_type: str | None = None, candidate: dict | None = None) -> dict:
     """Map an ABI-compatible cached bundle into this execution's own sources."""
+    with _cache_operation(cache) as acquired:
+        if not acquired:
+            return cache_busy_result(preparation)
+        result = _restore_shared_native_unlocked(
+            root, cache, preparation, image_digest, versions,
+            machine_type=machine_type, candidate=candidate)
+    _maintain_shared_native(cache, {result.get('bundle'), result.get('cache_key')})
+    return result
+
+
+def _restore_shared_native_unlocked(root: Path, cache: Path, preparation: dict, image_digest: str,
+                                    versions: dict, machine_type: str | None = None,
+                                    candidate: dict | None = None) -> dict:
     key = shared_input_key(preparation, image_digest)
     try:
         requested_content_key = native_content_key(preparation)
@@ -490,6 +574,10 @@ def restore_shared_native(root: Path, cache: Path, preparation: dict, image_dige
     except Exception:
         discard_shared_native(root)
         raise
+    _snapshot_shared_bundle(root, str(pointer['bundle']), manifest_bytes)
+    if cache_key:
+        touch_native_cache_entry(cache / cache_key)
+    touch_native_cache_entry(cache / 'bundles' / str(pointer['bundle']))
     return receipt
 
 

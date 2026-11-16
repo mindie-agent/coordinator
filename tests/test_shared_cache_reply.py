@@ -1,6 +1,7 @@
 """Trim only the internal wire reply; durable restore/rollback proof is complete."""
 import copy
 import json
+import shutil
 import sys
 
 import pytest
@@ -121,3 +122,20 @@ def test_shared_restore_timeout_is_not_converted_to_miss(monkeypatch):
     namespace['restore_shared_native'] = lambda *a, **k: (_ for _ in ()).throw(TimeoutError('cache read timed out'))
     with pytest.raises(TimeoutError, match='timed out'):
         exec(compile(cache.REMOTE_SHARED_SUFFIX, '<shared-native>', 'exec'), namespace)
+
+
+def test_revalidate_survives_bundle_eviction_after_restore(bundle):
+    source, target, shared, preparation, manifest, relative, versions = bundle
+    stored = cache.store_shared_native(source, shared)
+    restored = cache.restore_shared_native(
+        target, shared, preparation, 'sha256:same-image', versions)
+    assert restored['status'] == 'hit'
+    snapshot = target / cache.SHARED_NATIVE_BUNDLE_SNAPSHOT
+    assert snapshot.is_file()
+    # Simulate a concurrent cache publisher evicting the selected bundle and
+    # every other content entry while dependency installation is still running.
+    shutil.rmtree(shared / 'bundles' / stored['bundle'])
+    cache.evict_native_cache(shared, keep=set(), max_entries=1, max_total_bytes=1)
+    assert not (shared / 'bundles' / stored['bundle']).exists()
+    assert cache.revalidate_shared_native(target, shared) == {
+        'status': 'validated', 'bundle': stored['bundle']}

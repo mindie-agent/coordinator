@@ -122,6 +122,7 @@ def host_queue_module_path(path: Path | str | None = None) -> Path:
 BUNDLED_HOST_MODULES = (
     "mindie_npu_coordination_resources.py",
     "mindie_npu_coordination_probe.py",
+    "mindie_npu_coordination_retention.py",
     "mindie_npu_coordination_state.py",
     "mindie_npu_coordination_leases.py",
     "mindie_npu_coordination.py",

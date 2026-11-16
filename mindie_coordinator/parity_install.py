@@ -43,6 +43,7 @@ from mindie_coordinator.parity_snapshot import (
 from mindie_coordinator.parity_support import (
     SshEndpoint, ensure_local_git_identity, now_utc, quoted, ssh_exec, ssh_exec_stream,
 )
+from mindie_coordinator.storage_retention import write_fixed_input_descriptor
 
 def materialize_command(
     *, workspace_id: str, runtime_id: str, endpoint: dict, sources: dict[str, str],
@@ -70,14 +71,9 @@ def materialize_command(
         # The durable descriptor is already captured by submission. This file
         # transports that data; parity must not capture a newer working tree.
         state = Path(workspace_root or tempfile.gettempdir()) / ".mindie-local" / "fixed-inputs"
-        state.mkdir(parents=True, exist_ok=True)
         transport_key = hashlib.sha256(json.dumps(source_snapshot, sort_keys=True).encode()).hexdigest()[:20]
-        descriptor = state / (source_snapshot["id"] + '-' + transport_key + ".json")
-        if not descriptor.exists():
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=state, delete=False) as out:
-                json.dump(source_snapshot, out)
-                temporary = Path(out.name)
-            os.replace(temporary, descriptor)
+        descriptor = write_fixed_input_descriptor(
+            state, source_snapshot["id"] + '-' + transport_key + ".json", source_snapshot)
         command.extend(["--snapshot-file", str(descriptor)])
     return command
 
@@ -364,17 +360,22 @@ def runtime_install_step_script(
                 '  fi',
                 '  return "$status"',
                 '}',
+                'prune_prepare_logs() {',
+                '  ls -1t "$1"/* 2>/dev/null | tail -n +17 | while read -r stale; do rm -f "$stale"; done',
+                '}',
                 'run_with_progress() {',
                 '  phase="$1"',
                 '  message="$2"',
                 '  expected_seconds="$3"',
                 '  shift 3',
                 '  mkdir -p "$MINDIE_RUNTIME_ROOT/.mindie-runtime/prepare-logs"',
+                '  prune_prepare_logs "$MINDIE_RUNTIME_ROOT/.mindie-runtime/prepare-logs" || true',
                 '  log_file="$(mktemp "$MINDIE_RUNTIME_ROOT/.mindie-runtime/prepare-logs/${phase}.XXXXXX")"',
                 '  set +e',
                 '  run_with_log_progress "$phase" "$message" "$expected_seconds" "$log_file" "$@"',
                 '  status=$?',
                 '  set -e',
+                '  prune_prepare_logs "$MINDIE_RUNTIME_ROOT/.mindie-runtime/prepare-logs" || true',
                 '  return "$status"',
                 '}',
                 'configure_pip_index() {',
@@ -513,12 +514,16 @@ def runtime_install_step_script(
         )
     elif step == 'install-vllm-ascend-incremental':
         import inspect
-        from mindie_coordinator import native_incremental, native_kernel_recipe, runtime_profile
+        from mindie_coordinator import (
+            native_cache_pool, native_incremental, native_kernel_recipe, runtime_profile,
+        )
         script = Path(native_incremental.__file__).read_text(encoding='utf-8')
+        pool = Path(native_cache_pool.__file__).read_text(encoding='utf-8').replace('from __future__ import annotations\n', '')
         compiler = Path(native_kernel_recipe.__file__).read_text(encoding='utf-8').replace('from __future__ import annotations\n', '')
         lines.extend([
             '"$PYTHON" - "$MINDIE_RUNTIME_ROOT" <<\'MINDIE_NATIVE_INCREMENTAL\'',
             script,
+            pool,
             compiler,
             inspect.getsource(runtime_profile.compiled_opc_recipe),
             'import sys',
