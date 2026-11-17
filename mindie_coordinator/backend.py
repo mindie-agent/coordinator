@@ -145,11 +145,14 @@ class RemoteBackend(BackendPreparationMixin):
 
     def preflight(self, binding, command, env):
         from mindie_coordinator.managed_execution import ExecutionRequestError, task_preamble
+        warnings: list[str] = []
         if (env or {}).get("MINDIE_SKIP_OP_PREFLIGHT") != "1" and binding.get("source_snapshot"):
             from mindie_coordinator.op_preflight import check_snapshot_op_contracts, format_op_violations
             violations = check_snapshot_op_contracts(binding["source_snapshot"])
             if violations:
-                raise ExecutionRequestError(format_op_violations(violations))
+                warnings.append(format_op_violations(violations))
+                if isinstance(binding, dict):
+                    binding["preflight_warnings"] = list(warnings)
         script = "set -e\n" + "\n".join(f"export {key}={shlex.quote(value)}" for key, value in env.items())
         script += "\n" + task_preamble(binding) + "\nexport MINDIE_SERVICE_PORT=0\n" + command
         result = self.shell.run(binding["endpoint"], script, timeout_ms=120000)
@@ -158,6 +161,7 @@ class RemoteBackend(BackendPreparationMixin):
             detail = Path(refs["stderr"]).read_text(errors="replace") if refs.get("stderr") else str(result)
             cause = detail.strip().splitlines()[-1][-300:] if detail.strip() else result.get("summary", "no stderr")
             raise ExecutionRequestError(f"preflight failed before NPU allocation: {cause}\nlog refs: {refs}")
+        return {"preflight_warnings": warnings} if warnings else {}
 
     def activate_prepared(self, runtime, request, receipt):
         """Map the supervisor identity and activate through one host authority call."""
@@ -276,40 +280,14 @@ class RemoteBackend(BackendPreparationMixin):
         return True
 
     def _inspect_manifest(self, runtime, *, snapshots=None, expected_digest=None, prepared_view=False):
+        from mindie_coordinator.workers.ready_probe_worker import READY_PROBE_SUFFIX
         python = runtime.get("python") or "python3"
         module = _package_file("runtime_profile.py").read_text(encoding='utf-8')
         request = json.dumps({"root": runtime["endpoint"].get("cwd") or runtime["endpoint"]["root"],
                               "snapshots": snapshots or {}, "prepared_view": prepared_view,
                               **({"expected_manifest_digest": expected_digest} if expected_digest is not None else {})})
         build_source = _package_file("build_inputs.py").read_text(encoding='utf-8')
-        runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n" + '''
-import subprocess
-import sys
-args = json.loads(sys.argv[1])
-root = Path(args["root"])
-manifest = json.loads((root / ".mindie-runtime/ready-profile.json").read_text(encoding='utf-8'))
-if args.get('prepared_view') and 'expected_manifest_digest' in args and digest(manifest) != args['expected_manifest_digest']:
-    raise ValueError('runtime changed before launch')
-if args.get('prepared_view'):
-    verify_execution_view(root, manifest)
-else:
-    verify(root, manifest)
-if not args.get('prepared_view') and manifest['profile'].get('kind') != 'command' and _build_namespace["runtime_build_inputs"](root, manifest["profile"], manifest["profile_key"]) != manifest["build_inputs"]:
-    raise ValueError("cache miss: installed native artifacts do not match current source inputs")
-for name, expected in args["snapshots"].items():
-    repo = root / name
-    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, encoding="utf-8", timeout=30, stdin=subprocess.DEVNULL).strip()
-    dirty = subprocess.check_output(["git", "-C", str(repo), "diff", "HEAD", "--name-only", "--ignore-submodules=dirty"], text=True, encoding="utf-8", timeout=30, stdin=subprocess.DEVNULL)
-    if head != expected or dirty.strip():
-        raise ValueError("runtime source differs from pinned snapshot: " + name)
-if 'expected_manifest_digest' in args:
-    actual_digest = digest(manifest)
-    if actual_digest != args['expected_manifest_digest']:
-        raise ValueError('runtime changed before launch')
-    print(json.dumps({'manifest_digest': actual_digest}))
-else:
-    print(json.dumps(manifest))
-'''
+        runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n" + READY_PROBE_SUFFIX
         view = runtime['endpoint'].get('cwd') or runtime['endpoint']['root']
         prefix = self._probe_preamble(runtime, view)
         command = (prefix + shlex.quote(python) + " - " + shlex.quote(request)
@@ -324,34 +302,14 @@ else:
         A differing source tree is not adopted by guessing build scope.
         """
         from mindie_coordinator.parity import validate_relative_posix_path
+        from mindie_coordinator.workers.ready_probe_worker import QUALIFY_DONOR_SUFFIX
         records = source_snapshot.get('records', [])
         for record in records:
             validate_relative_posix_path(record['relpath'], label='artifact donor source')
         request = {'root': runtime['endpoint']['root'], 'records': records, 'include_manifest': include_manifest}
         module = _package_file('runtime_profile.py').read_text(encoding='utf-8')
         build_source = _package_file('build_inputs.py').read_text(encoding='utf-8')
-        runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n" + r'''
-import subprocess, sys
-args = json.loads(sys.argv[1])
-root = Path(args['root'])
-manifest = json.loads((root / '.mindie-runtime/ready-profile.json').read_text(encoding='utf-8'))
-verify(root, manifest)
-if _build_namespace['runtime_build_inputs'](root, manifest['profile'], manifest['profile_key']) != manifest['build_inputs']:
-    print(json.dumps({'qualified': False, 'reason': 'installed native artifacts do not match current source inputs'}))
-    raise SystemExit(0)
-build_info = 'vllm-ascend/vllm_ascend/_build_info.py'
-if (root / build_info).is_file() and build_info not in manifest['files']:
-    print(json.dumps({'qualified': False, 'reason': 'generated build metadata has no verified donor hash'}))
-    raise SystemExit(0)
-for row in args['records']:
-    repo = root / row['relpath']
-    tree = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD^{tree}'], text=True, timeout=30, stdin=subprocess.DEVNULL).strip()
-    dirty = subprocess.check_output(['git', '-C', str(repo), 'diff', 'HEAD', '--name-only', '--ignore-submodules=dirty'], text=True, timeout=30, stdin=subprocess.DEVNULL).strip()
-    if tree != row['tree'] or dirty:
-        print(json.dumps({'qualified': False, 'reason': 'source tree differs', 'source': row['relpath']}))
-        raise SystemExit(0)
-print(json.dumps({'qualified': True, 'build_key': manifest['build_key'], **({'manifest': manifest} if args.get('include_manifest') else {})}))
-'''
+        runner = "\n_build_namespace = {}\nexec(" + repr(build_source) + ", _build_namespace)\n" + QUALIFY_DONOR_SUFFIX
         root = runtime['endpoint']['root']
         prefix = self._probe_preamble(runtime, root)
         script = prefix + '\n' + shlex.quote(runtime['python']) + ' - ' + shlex.quote(json.dumps(request))

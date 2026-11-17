@@ -18,6 +18,7 @@ jobs:
     # `uv venv` (no `--clear`) is the first documented command; it must work
     # as a developer meets it on a clone.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -29,12 +30,17 @@ jobs:
           activate-environment: false
 
       - name: Documented developer setup
-        # remote-dev is public. Fetch it anonymously; do not reintroduce a
-        # private-token step or a git credential rewrite.
         env:
           HOME: ${{ runner.temp }}/empty-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/xdg-config
+          XDG_DATA_HOME: ${{ runner.temp }}/xdg-data
+          MINDIE_CONFIG_HOME: ${{ runner.temp }}/mindie-config
+          MINDIE_DATA_HOME: ${{ runner.temp }}/mindie-data
+          MINDIE_DIAGNOSTICS_ROOT: ${{ runner.temp }}/mindie-diag
+          REMOTE_DEV_AUTH_DIR: ${{ runner.temp }}/rdev-auth
+          REMOTE_DEV_STATE_DIR: ${{ runner.temp }}/rdev-state
         run: |
-          mkdir -p "$HOME"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$MINDIE_CONFIG_HOME" "$MINDIE_DATA_HOME" "$MINDIE_DIAGNOSTICS_ROOT" "$REMOTE_DEV_AUTH_DIR" "$REMOTE_DEV_STATE_DIR"
           uv venv
           uv pip install -e ".[test]"
           .venv/bin/python -m pytest -q -m "not live_npu" --durations=20 --junitxml=linux-coordinator.xml
@@ -50,10 +56,10 @@ jobs:
           path: linux-coordinator.xml
 
   wheel:
-    # P14: build the wheel, install it into a clean venv, import the
-    # package, run the console script. Public Git dependencies resolve from
-    # wheel metadata; no preinstalled or CI-only dependency pins.
+    # Out-of-tree installed-artifact smoke gate: build wheel, switch to blank
+    # temp directory outside checkout, verify package + worker resources + MCP initialize.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -63,18 +69,23 @@ jobs:
           python-version: '3.12'
           activate-environment: false
 
-      - name: Build, install the wheel, import, and --help
+      - name: Build, install the wheel out-of-tree, import, CLI --help, and MCP initialize
         env:
           HOME: ${{ runner.temp }}/empty-home
+          MINDIE_CONFIG_HOME: ${{ runner.temp }}/mindie-config
+          MINDIE_DATA_HOME: ${{ runner.temp }}/mindie-data
+          MINDIE_DIAGNOSTICS_ROOT: ${{ runner.temp }}/mindie-diag
         run: |
-          mkdir -p "$HOME"
-          unset GH_TOKEN GITHUB_TOKEN REMOTE_DEV_READ_TOKEN
+          mkdir -p "$HOME" "$MINDIE_CONFIG_HOME" "$MINDIE_DATA_HOME" "$MINDIE_DIAGNOSTICS_ROOT"
+          unset GH_TOKEN GITHUB_TOKEN REMOTE_DEV_READ_TOKEN PYTHONPATH
           uv build
           cd "${{ runner.temp }}"
+          mkdir -p blank-smoke && cd blank-smoke
           uv venv .venv-wheel
           VIRTUAL_ENV="$PWD/.venv-wheel" uv pip install "${{ github.workspace }}"/dist/*.whl
-          .venv-wheel/bin/python -c "import mindie_coordinator, pathlib; p=pathlib.Path(mindie_coordinator.__file__).resolve(); assert 'site-packages' in p.parts, p"
+          .venv-wheel/bin/python -c "import mindie_coordinator, pathlib; from mindie_coordinator.workers import load_worker_source; p=pathlib.Path(mindie_coordinator.__file__).resolve(); assert 'site-packages' in p.parts, p; assert 'select_python' in load_worker_source('python_selector.py')"
           .venv-wheel/bin/mindie-coordinator --help
+          printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}\n' | .venv-wheel/bin/python -m mindie_coordinator.task_server | grep -q '"protocolVersion"'
 
   windows:
     runs-on: windows-latest
@@ -108,8 +119,6 @@ jobs:
           HOME: ${{ runner.temp }}/coordinator-test-home
           USERPROFILE: ${{ runner.temp }}/coordinator-test-home
         run: |
-          # Use Git Bash for local Linux-peer fixtures. The Windows bash.exe
-          # alias can point at WSL with no distribution installed on the runner.
           $gitBin = Join-Path $env:ProgramFiles 'Git/bin'
           if (-not (Test-Path -LiteralPath (Join-Path $gitBin 'bash.exe'))) {
             throw 'Git Bash is required by the local Linux-peer test fixtures'
@@ -150,6 +159,7 @@ jobs:
     needs: [developer-setup, wheel, windows, macos]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}

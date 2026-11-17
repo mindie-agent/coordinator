@@ -105,9 +105,8 @@ def test_cold_venv_setup_is_carried_by_first_owned_job(preparation, monkeypatch)
     assert process.step == 'finalize-runtime'
 
 
-def test_unverified_idle_execution_root_automatically_repairs_while_active_raises_busy():
+def test_unverified_idle_execution_root_automatically_repairs_while_active_returns_waiting():
     from mindie_coordinator.provision.task_environment import (
-        TaskRootBusy,
         isolated_root,
         prepare_task_environment,
         task_runtime_id,
@@ -132,17 +131,26 @@ def test_unverified_idle_execution_root_automatically_repairs_while_active_raise
             self.backend = FakeBackend()
             self.runtime_busy = lambda _rid: busy
 
+        @staticmethod
+        def transaction():
+            import contextlib
+            return contextlib.nullcontext(None)
+
+        def rows(self, _db, _kind):
+            return [{'id': runtime_id, 'root': root, 'state': 'needs_repair', 'attestation': {'profile_key': 'pk'}}]
+
         def catalog(self):
             return [{'runtime_id': runtime_id, 'root': root, 'state': 'needs_repair'}]
 
         def register(self, rid, spec, **_kwargs):
             return {'id': rid, 'root': spec['endpoint']['root'], 'state': 'ready', 'attestation': {'profile_key': 'pk'}}
 
-    with pytest.raises(TaskRootBusy, match='active task'):
-        prepare_task_environment(
-            FakePool(busy=True), user='alice', session_id=session_id, role_name=role_name,
-            environment={}, donor=donor, sources={}, source_snapshot=snapshot,
-        )
+    waiting = prepare_task_environment(
+        FakePool(busy=True), user='alice', session_id=session_id, role_name=role_name,
+        environment={}, donor=donor, sources={}, source_snapshot=snapshot,
+    )
+    assert waiting['status'] == 'waiting'
+    assert 'active task' in waiting['reason']
     assert prepared_calls == []
 
     recovered = prepare_task_environment(

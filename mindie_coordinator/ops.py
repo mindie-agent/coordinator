@@ -325,9 +325,14 @@ def mindie_call(name, args, *, allow_native_context=True):
             outcome = "success"
         if name == "mindie.finish" and outcome == "success" and status != "finished":
             outcome = "blocked"
+        extra_fields = {"data": value}
+        if isinstance(value, dict) and value.get("receipt_unconfirmed") is True:
+            extra_fields["receipt_unconfirmed"] = True
+            if value.get("receipt_warning") is not None:
+                extra_fields["receipt_warning"] = value["receipt_warning"]
         result = make_result(tool=name, target=target, outcome=outcome, status=status,
                              summary="MindIE " + status.replace("_", " "),
-                             duration_ms=int((time.monotonic() - started) * 1000), extra={"data": value},
+                             duration_ms=int((time.monotonic() - started) * 1000), extra=extra_fields,
                              next=continuation(name, args, value) if outcome in {"failed", "blocked", "timeout"} else None)
     except Exception as exc:
         if isinstance(exc, ManagedTaskContextRequired):

@@ -33,6 +33,7 @@ from mindie_coordinator.provision.image_resolver import (
     PROGRESS_SENTINEL,
     SENTINEL,
 )
+from mindie_coordinator.workers import load_worker_source
 
 _BOOTSTRAP_TEMPLATE = _BOOTSTRAP_TEMPLATE_HEAD + _BOOTSTRAP_TEMPLATE_TAIL
 
@@ -44,4 +45,5 @@ def render_bootstrap_host_script() -> str:
         .replace("__LOCAL_IMAGE_DISCOVERY_PY__", LOCAL_IMAGE_DISCOVERY_PY)
         .replace("__LOCAL_IMAGE_DISCOVERY_POLICY__", IMAGE_POLICY_LOCAL_LATEST)
         .replace("__INSTALL_PUBLIC_KEY_SH__", INSTALL_PUBLIC_KEY_SH)
+        .replace("__PYTHON_SELECTOR_PY__", load_worker_source("python_selector.py").rstrip("\n"))
     )

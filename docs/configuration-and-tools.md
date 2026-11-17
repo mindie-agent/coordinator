@@ -38,7 +38,9 @@ mindie-coordinator provision --host YOUR_HOST \
 - **查看执行留存证据（`action="evidence"`）**：
   随时按 `section="sources"`（当时用的哪版代码）、`"preparation"`（环境准备各阶段耗时）、`"build"`（编译产物回执）或 `"diagnostics"`（脱敏诊断包）查看完整记录。
 - **借卡前先跑预检（`preflight`）**：
-  支持传入 `preflight` 命令，在真正去排队借 NPU 卡之前，先用选好的 Python 解释器跑一遍无卡预检（比如检查语法或配置是否正确）。如果预检报错，直接中止并返回错误输出，不会白白排队占卡。
+  支持传入 `preflight` 命令，在真正去排队借 NPU 卡之前，先用选好的 Python 解释器跑一遍无卡预检（比如检查语法或配置是否正确）。如果显式传入的 `preflight` 命令退出非零，直接中止并返回错误输出，不会白白排队占卡；而静态算子启发式扫描（`op_preflight`）仅作为非阻塞 `preflight_warnings` 提示附加在结果中，绝不会误拦正常任务。
+- **零 Hook 直连与重连恢复（`P2.7`）**：
+  所有 MCP 工具（`mindie_hosts`、`mindie_probe`、`mindie_container`、`mindie_lease` 以及 `mindie_session`、`mindie_run`、`mindie_execution`）均支持标准零 `_meta`、零 `context_file` 直接调用；主机与容器配置保存在 `<state_dir>/machines.json`，并自动同步生成供 `remote-dev` 消费的 `<state_dir>/endpoints.json`。连接重连或切换子代理后，凭显式 `execution_id` 即可直接恢复查询、日志追踪或停止对应任务。
 
 ---
 

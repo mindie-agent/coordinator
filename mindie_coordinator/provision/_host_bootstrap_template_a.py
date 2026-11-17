@@ -403,25 +403,32 @@ elif command -v yum >/dev/null 2>&1; then
     echo "no supported package manager found for ssh installation" >&2
     exit 97
   fi
+  _mindie_boot_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  if [ -z "$_mindie_boot_py" ]; then
+    for _p in /usr/local/python*/bin/python3 /usr/bin/python3; do
+      if [ -x "$_p" ]; then _mindie_boot_py="$_p"; break; fi
+    done
+  fi
   _mindie_runtime_python=""
-  for _d in $(ls -1d /usr/local/python*/bin 2>/dev/null | sort -V -r); do
-    if [ -x "$_d/python3" ]; then
-      _mindie_runtime_python="$_d/python3"
-      break
-    fi
-  done
-  if [ -z "$_mindie_runtime_python" ] && command -v python3 >/dev/null 2>&1; then
-    _mindie_runtime_python="$(command -v python3)"
+  if [ -n "$_mindie_boot_py" ]; then
+    _mindie_runtime_python="$("$_mindie_boot_py" -I - python <<'MINDIE_PY_SEL' 2>/dev/null || true
+__PYTHON_SELECTOR_PY__
+MINDIE_PY_SEL
+)"
   fi
   if [ -n "$_mindie_runtime_python" ]; then
-    install -d -m 0755 /etc/pip
-    cat > /etc/pip.conf <<'EOF_PIP'
+    if [ ! -s /etc/pip.conf ] && [ ! -s /etc/pip/pip.conf ] && [ -z "${PIP_INDEX_URL:-}" ]; then
+      install -d -m 0755 /etc/pip
+      cat > /etc/pip.conf <<'EOF_PIP'
 [global]
 index-url = https://repo.huaweicloud.com/repository/pypi/simple
 trusted-host = repo.huaweicloud.com
 EOF_PIP
-    chmod 0644 /etc/pip.conf
-    echo "[mindie-bootstrap] pip configured: /etc/pip.conf (index=huaweicloud)"
+      chmod 0644 /etc/pip.conf
+      echo "[mindie-bootstrap] pip configured: /etc/pip.conf (index=huaweicloud)"
+    else
+      echo "[mindie-bootstrap] preserving existing pip configuration"
+    fi
   else
     echo "[mindie-bootstrap] runtime python not found, skipping pip setup"
   fi
@@ -455,13 +462,23 @@ fi
 __INSTALL_PUBLIC_KEY_SH__
 remote_dev_install_public_key "$pubkey" /root/.ssh
 install -d -m 0755 /run/sshd /etc/profile.d /etc/mindie
+_mindie_boot_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+if [ -z "$_mindie_boot_py" ]; then
+  for _p in /usr/local/python*/bin/python3 /usr/bin/python3; do
+    if [ -x "$_p" ]; then _mindie_boot_py="$_p"; break; fi
+  done
+fi
+_mindie_sel_py=""
+if [ -n "$_mindie_boot_py" ]; then
+  _mindie_sel_py="$("$_mindie_boot_py" -I - python <<'MINDIE_PY_SEL' 2>/dev/null || true
+__PYTHON_SELECTOR_PY__
+MINDIE_PY_SEL
+)"
+fi
 _mindie_python_dir=""
-for _d in $(ls -1d /usr/local/python*/bin 2>/dev/null | sort -V -r); do
-  if [ -x "$_d/python3" ]; then
-    _mindie_python_dir="$_d"
-    break
-  fi
-done
+if [ -n "$_mindie_sel_py" ] && [ -x "$_mindie_sel_py" ]; then
+  _mindie_python_dir="$(dirname "$_mindie_sel_py")"
+fi
 if [ -n "$_mindie_python_dir" ]; then
   _path_prefix="$_mindie_python_dir:/usr/local/bin:/usr/local/sbin"
 else
@@ -570,14 +587,18 @@ elif command -v python3 >/dev/null 2>&1; then
   _mindie_runtime_python="$(command -v python3)"
 fi
 if [ -n "$_mindie_runtime_python" ]; then
-  install -d -m 0755 /etc/pip
-  cat > /etc/pip.conf <<'EOF_PIP'
+  if [ ! -s /etc/pip.conf ] && [ ! -s /etc/pip/pip.conf ] && [ -z "${PIP_INDEX_URL:-}" ]; then
+    install -d -m 0755 /etc/pip
+    cat > /etc/pip.conf <<'EOF_PIP'
 [global]
 index-url = https://repo.huaweicloud.com/repository/pypi/simple
 trusted-host = repo.huaweicloud.com
 EOF_PIP
-  chmod 0644 /etc/pip.conf
-  echo "[mindie-bootstrap] pip configured: /etc/pip.conf (index=huaweicloud)"
+    chmod 0644 /etc/pip.conf
+    echo "[mindie-bootstrap] pip configured: /etc/pip.conf (index=huaweicloud)"
+  else
+    echo "[mindie-bootstrap] preserving existing pip configuration"
+  fi
 else
   echo "[mindie-bootstrap] runtime python not found, skipping pip setup"
 fi

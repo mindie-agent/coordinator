@@ -14,13 +14,13 @@ import json
 from pathlib import Path
 
 EXECUTION_KEYS = ("execution_id", "run_id", "state", "service", "error", "error_ref", "error_details", "recording_error", "reason", "progress",
-                  "source_snapshot_id", "sources", "role_progress",
+                  "source_snapshot_id", "sources", "role_progress", "preflight_warnings", "receipt_warning", "receipt_unconfirmed",
                   "observed_at", "cancel_requested", "service_port", "provisioning_started", "host_observations",
                   "worktrees_preserved", "resources_released", "stdout", "stderr", "tail", "preparation_logs", "observation_freshness",
                   "runtime_update", "active_executions", "wait_until", "wait_timed_out", "wait_error", "logs_pending", "tail_error", "evidence")
 ROLE_KEYS = ("name", "state", "runtime_id", "host", "root", "service_port", "error", "error_details", "lease_state",
-             "quiet", "descendants_drained", "stdout", "stderr", "status_observed_at", "command_timings", "slot_id", "slot_cleanup", "recording_error")
-TEXT_KEYS = {"stdout", "stderr", "tail", "tail_error", "wait_error", "error", "reason", "summary", "warnings"}
+             "quiet", "descendants_drained", "stdout", "stderr", "status_observed_at", "command_timings", "slot_id", "slot_cleanup", "recording_error", "preflight_warnings")
+TEXT_KEYS = {"stdout", "stderr", "tail", "tail_error", "wait_error", "error", "reason", "summary", "warnings", "preflight_warnings", "receipt_warning"}
 MAX_COMPACT_BYTES = 16000
 
 
@@ -112,7 +112,12 @@ def present(result: dict, directory: Path, *, full=False, target=False) -> dict:
     except TimeoutError:
         raise
     except OSError as exc:
-        result = {**result, "warnings": [*result.get("warnings", []), f"Full record write failed: {exc}"]}
+        extra_receipt = (
+            {"receipt_warning": f"Full record write failed: {exc}", "receipt_unconfirmed": True}
+            if result.get("outcome") == "success"
+            else {}
+        )
+        result = {**result, "warnings": [*result.get("warnings", []), f"Full record write failed: {exc}"], **extra_receipt}
     if full:
         return result
     data = compact_data(result.get("data") or {}, target=target)
