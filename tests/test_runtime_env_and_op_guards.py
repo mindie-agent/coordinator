@@ -249,17 +249,18 @@ def test_snapshot_op_preflight_and_catalog_persistence(tmp_path):
     assert "torch_npu.npu_rms_norm" in formatted
 
     from mindie_coordinator.backend import RemoteBackend
-    from mindie_coordinator.managed_execution import ExecutionRequestError
 
-    class FailingShellIfCalled:
-        def run(self, *_args, **_kwargs):
-            raise AssertionError("remote shell should not be called when static op preflight fails")
+    shell_calls = []
 
-    backend = RemoteBackend(shell=FailingShellIfCalled())
-    with pytest.raises(ExecutionRequestError, match="Ascend operator contract preflight failed"):
-        backend.preflight(
-            {"endpoint": {"cwd": "/vllm-workspace"}, "source_snapshot": snapshot},
-            "python3 -c 'print(1)'",
-            {},
-        )
+    class RecordingShell:
+        def run(self, target, command, **_kwargs):
+            shell_calls.append((target, command))
+            return {"outcome": "success", "refs": {}}
+
+    backend = RemoteBackend(shell=RecordingShell())
+    binding = {"endpoint": {"cwd": "/vllm-workspace"}, "source_snapshot": snapshot}
+    reply = backend.preflight(binding, "python3 -c 'print(1)'", {})
+    assert len(shell_calls) == 1
+    assert "Ascend operator contract preflight" in binding["preflight_warnings"][0]
+    assert reply["preflight_warnings"] == binding["preflight_warnings"]
 

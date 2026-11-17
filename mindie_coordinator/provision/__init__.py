@@ -39,7 +39,6 @@ from mindie_coordinator.machine_directory import (
 from mindie_coordinator.provision import host_ops
 from mindie_coordinator.provision.image_resolver import image_family, infer_machine_type_from_image
 from mindie_coordinator.provision.task_environment import (  # noqa: F401
-    TaskRootBusy,
     isolated_python,
     isolated_root,
     prepare_task_environment,
@@ -296,7 +295,14 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "image": {"requested": image},
         "user": user,
     }
-    directory.upsert_machine(record)
+    receipt_meta: dict[str, Any] = {}
+    try:
+        directory.upsert_machine(record)
+    except (TimeoutError, OSError, MachineDirectoryUnavailable) as exc:
+        receipt_meta = {
+            "receipt_warning": f"{type(exc).__name__}: {exc}",
+            "receipt_unconfirmed": True,
+        }
     return {
         "user": user,
         "container_name": container,
@@ -307,4 +313,5 @@ def _record_ready_container(host, image, user, host_user, host_port, chosen_port
         "privileged": bool(privileged),
         "state": "ready",
         **({"python": python_path} if python_path else {}),
+        **receipt_meta,
     }

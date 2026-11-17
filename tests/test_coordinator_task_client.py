@@ -94,12 +94,10 @@ class PoolSessionTests(_PoolTests):
         with self.assertRaisesRegex(ValueError, "ports overlap"):
             self.pool.register("port-conflict", conflict)
 
-    def test_return_requires_fresh_admin_verification(self):
+    def test_return_preserves_owner_isolation_and_re_verifies_on_next_checkout(self):
         binding = self.bind("alice", self.root / "a")
-        self.assertEqual(self.pool.return_runtime("alice", binding["id"])["runtime_state"], "needs_repair")
+        self.assertEqual(self.pool.return_runtime("alice", binding["id"])["runtime_state"], "ready")
         session = self.pool.session_open("bob", "bob-session", {"va": str(self.root / "b")})
-        self.assertEqual(self.pool.checkout("bob", session["id"], "profile-a", "bob", binding["runtime_id"])["status"], "cache_miss")
-        self.pool.register(binding["runtime_id"], runtime_spec(1, user="alice"))
         self.assertEqual(self.pool.checkout("bob", session["id"], "profile-a", "bob", binding["runtime_id"])["status"], "cache_miss")
         self.assertEqual(self.pool.checkout("alice", binding["intent"]["session"], "profile-a", "alice-again", binding["runtime_id"])["state"], "bound")
 
@@ -120,23 +118,19 @@ class PoolSessionTests(_PoolTests):
         self.pool.return_runtime("alice", binding["id"])
         with self.assertRaisesRegex(ValueError, "returned binding"):
             self.bind("alice", self.root / "a")
-        self.pool.register("runtime-a2", runtime_spec(2, user="alice"))
         fresh = self.pool.checkout("alice", binding["intent"]["session"], "profile-a", "checkout-2")
         self.assertEqual(fresh["state"], "bound")
         self.assertNotEqual(fresh["id"], binding["id"])
-        # The returned runtime stays quarantined; the fresh request binds the
-        # other ready root in the same user container.
-        self.assertNotEqual(fresh["runtime_id"], binding["runtime_id"])
+        self.assertEqual(fresh["runtime_id"], binding["runtime_id"])
         self.assertEqual(fresh["container_name"], binding["container_name"])
-        quarantined = next(row for row in self.pool.catalog() if row["runtime_id"] == binding["runtime_id"])
-        self.assertEqual(quarantined["state"], "needs_repair")
 
-    def test_checkout_marks_a_drifted_runtime_needs_repair_and_binds_the_next_candidate(self):
+    def test_checkout_skips_drifted_runtime_without_bricking_and_binds_next_candidate(self):
         original = self.backend.inspect
+        drift_enabled = True
 
         def inspect(runtime, **kwargs):
             observed = original(runtime, **kwargs)
-            if runtime.get("container_name") == "mindie-alice" and runtime["endpoint"]["cwd"].endswith("/1"):
+            if drift_enabled and runtime.get("container_name") == "mindie-alice" and runtime["endpoint"]["cwd"].endswith("/1"):
                 observed["build_key"] = "drifted"
             return observed
 
@@ -145,10 +139,14 @@ class PoolSessionTests(_PoolTests):
         binding = self.bind("alice", self.root / "a")
         self.assertEqual(binding["runtime_id"], "runtime-a2")
         drifted = next(row for row in self.pool.catalog() if row["runtime_id"] == "runtime-a")
-        self.assertEqual(drifted["state"], "needs_repair")
-        self.assertIn("prepared environment changed", drifted["error"])
+        self.assertEqual(drifted["state"], "ready")
         session = self.pool.session_open("bob", "bob-session", {"va": str(self.root / "b")})
         self.assertEqual(self.pool.checkout("bob", session["id"], "profile-a", "bob", "runtime-a")["status"], "cache_miss")
+        # Once transient drift clears, runtime-a self-recovers without manual repair.
+        drift_enabled = False
+        recovered = self.pool.checkout("alice", binding["intent"]["session"], "profile-a", "alice-recovered", "runtime-a")
+        self.assertEqual(recovered["state"], "bound")
+        self.assertEqual(recovered["runtime_id"], "runtime-a")
 
     @unittest.skipIf(os.name == "nt", "executes Linux container imports and launch payload locally")
     def test_managed_launch_imports_bound_sources_from_task_root(self):

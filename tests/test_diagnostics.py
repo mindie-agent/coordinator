@@ -267,16 +267,21 @@ def test_scheduled_worker_sqlite_locked_does_not_demote_failed(owned, monkeypatc
     assert latest.get("preparation_jobs")
 
 
-def test_task_root_busy_waits_instead_of_permanent_failed(owned):
-    from mindie_coordinator.provision.task_environment import TaskRootBusy
-    from mindie_coordinator.service import DONE, PERMANENT_ERRORS
+def test_task_root_busy_returns_waiting_without_exception_or_permanent_failed(owned, monkeypatch):
+    from mindie_coordinator.service import DONE
     owner, store, _, row = owned
-    assert TaskRootBusy not in PERMANENT_ERRORS
-    reply = owner._record_execution_error(store, row, TaskRootBusy("execution root is busy"))
-    assert reply["state"] == "waiting"
-    assert row["phase"] == "waiting"
+    row["remote_session"] = {"id": "sess-1"}
+    row.setdefault("spec", {})["source_snapshot"] = {"id": "snap-1", "sources": {}, "records": []}
+    monkeypatch.setattr(
+        "mindie_coordinator.provision.prepare_task_environment",
+        lambda *_a, **_kw: {"status": "waiting", "reason": "execution root has an active task"},
+    )
+    reply = owner._prepare_role(
+        store, "alice", row, {"name": "worker"}, {}, {"host": "192.0.2.1", "ssh_port": 46000}
+    )
+    assert reply["status"] == "waiting"
+    assert "active task" in reply["reason"]
     assert row["phase"] not in DONE
-    assert "TaskRootBusy" in reply["error"]
 
 
 def test_diagnostic_disk_failure_preserves_error_and_authoritative_failure(owned, monkeypatch):

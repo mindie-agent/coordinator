@@ -12,8 +12,9 @@ dependency preparation artifacts, and registers ready runtimes in `RuntimePool`.
   returns a verified profile.
 
 [Timeouts & Locks]
-- Raises `TaskRootBusy` if the deterministic task root is currently bound by an
-  active execution rather than overwriting or bricking the root.
+- Returns `{"status": "waiting", "reason": ...}` if the deterministic task root
+  is currently bound by an active execution rather than overwriting or bricking
+  the root.
 
 [Side-Effect Policy]
 - Reuses donor container SSH endpoint read-only; all writes occur inside the
@@ -105,10 +106,6 @@ def create_venv_script(root: str, python: str, donor_python: str | None = None) 
     )
 
 
-class TaskRootBusy(RuntimeError):
-    """The deterministic task root is still bound; wait instead of overwriting."""
-
-
 def reusable_preparation(snapshot: dict, environment: dict, donor: dict) -> dict:
     """Known recipe inputs, independent of task, role and materialization paths."""
     records = {row['relpath']: row for row in snapshot.get('records', [])}
@@ -180,11 +177,11 @@ def prepare_task_environment(
                 binding = pool.checkout(user, checkout_session, runtime['attestation']['profile_key'],
                                         checkout_request, runtime['id'])
                 if binding.get('status') == 'cache_miss':
-                    raise TaskRootBusy('execution root is not available for its managed binding')
+                    return {"status": "waiting", "reason": "execution root is not available for its managed binding"}
                 return {**runtime, 'binding': binding}
             return runtime
         if pool.runtime_busy and pool.runtime_busy(existing["runtime_id"]):
-            raise TaskRootBusy(f"execution root {root} has an active task")
+            return {"status": "waiting", "reason": f"execution root {root} has an active task"}
 
     raw_host = donor.get("host_endpoint") or {}
     host_port = raw_host.get("port")

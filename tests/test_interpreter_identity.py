@@ -14,7 +14,7 @@ from mindie_coordinator.service_gang import ServiceGangMixin
 
 
 def make_environment(root):
-    venv.EnvBuilder(with_pip=False).create(root)
+    venv.EnvBuilder(with_pip=False, symlinks=(sys.platform != "win32")).create(root)
     return root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
 

@@ -60,7 +60,6 @@ from mindie_coordinator.preparation_process import (
     PreparationUncertain,
     stop_preparation_process,
 )
-from mindie_coordinator.provision.task_environment import TaskRootBusy
 from mindie_coordinator.ready_runtime import user_container_name
 from mindie_coordinator.topology_gang_common import GangLeaseError
 
@@ -374,21 +373,20 @@ class ServiceGangMixin:
             except PreparationCancelled:
                 return None
 
-        try:
-            if len(placements) == 1:
-                prepared_roles = [prepare(placements[0])]
-            else:
-                with ThreadPoolExecutor(max_workers=min(4, len(placements)),
-                                        thread_name_prefix="mindie-prepare") as workers:
-                    prepared_roles = list(workers.map(prepare, placements))
-        except TaskRootBusy as exc:
-            return {"status": "waiting", "reason": str(exc)}
+        if len(placements) == 1:
+            prepared_roles = [prepare(placements[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(placements)),
+                                    thread_name_prefix="mindie-prepare") as workers:
+                prepared_roles = list(workers.map(prepare, placements))
         ids = []
         bindings = []
         snapshots = {}
         for (role, _donor), prepared in zip(placements, prepared_roles):
             if prepared is None:
                 return {"status": "waiting", "reason": "execution cancellation requested during preparation"}
+            if prepared.get("status") == "waiting":
+                return {"status": "waiting", "reason": prepared.get("reason") or "execution root is busy"}
             catalog = {item["runtime_id"]: item for item in self.pool.catalog()}
             item = catalog.get(prepared["id"])
             if item is None or not runtime_matches(item, environment, role, host_specs):
@@ -634,6 +632,8 @@ class ServiceGangMixin:
         # Each finished role remains recoverable while its siblings prepare.
         # A crash before this save is also covered by the pool's durable
         # execution-session binding, which finish reads below.
+        if prepared.get("status") == "waiting":
+            return prepared
         if prepared.get("binding"):
             with self._lock_for("progress", row["id"]):
                 row.setdefault("prepared_bindings", {})[role["name"]] = prepared["binding"]

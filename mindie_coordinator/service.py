@@ -587,7 +587,7 @@ class CoordinatorService(ServiceGangMixin, ServiceEvidenceMixin, TaskMessages):
             from mindie_coordinator.op_preflight import check_snapshot_op_contracts, format_op_violations
             violations = check_snapshot_op_contracts(source_snapshot)
             if violations:
-                raise ExecutionRequestError(format_op_violations(violations))
+                row["preflight_warnings"] = [format_op_violations(violations)]
             row["op_preflight_passed"] = True
             self._save_execution(store, row)
         for role in row["roles"]:

@@ -8,11 +8,14 @@ Implements the four direct environment management handlers (`handle_hosts`,
 
 [Invariants]
 - `handle_hosts` and `handle_container` keep `<state_dir>/machines.json` and
-  `<state_dir>/remote_dev_endpoints.json` synchronized atomically.
+  `<state_dir>/endpoints.json` synchronized atomically.
 - `handle_lease` delegates card allocation and fencing to `HostQueue` and caches
   lease metadata (`fence_token`, `coordination_epoch`, `devices`) in `leases.json`.
 - Container removal releases only that container owner's `container_ssh` row
   after confirmed removal/absence; failed or unknown removal keeps it.
+- Once a primary remote operation (`provision`, `remove`, `lease`) succeeds,
+  local registry/receipt persistence failures keep `state="ready"`/`"active"`/`"released"`
+  and attach `receipt_warning` + `receipt_unconfirmed=True` (Principle 14).
 - `validate_vllm_ascend_runtime_env` is a pure in-memory deterministic validator.
 
 [Timeouts & Locks]
@@ -20,7 +23,7 @@ Implements the four direct environment management handlers (`handle_hosts`,
 - `validate_vllm_ascend_runtime_env` performs zero I/O, subprocesses, or waits.
 
 [Side-Effect Policy]
-- Persists `machines.json`, `remote_dev_endpoints.json`, and `leases.json` via
+- Persists `machines.json`, `endpoints.json`, and `leases.json` via
   atomic `.tmp` + `replace()`.
 """
 
@@ -63,20 +66,12 @@ from mindie_coordinator.vllm_ascend_env import (
 )
 
 
-def _resolve_store(
-    directory: MachineDirectory | None = None,
-    state_dir: Path | str | None = None,
-) -> tuple[MachineDirectory, Path]:
+def _resolve_store(directory: MachineDirectory | None = None, state_dir: Path | str | None = None) -> tuple[MachineDirectory, Path]:
     base = Path(state_dir).expanduser().resolve() if state_dir is not None else coordinator_state_dir()
-    if directory is not None:
-        return directory, base
-    return MachineDirectory(path=base / "machines.json"), base
+    return (directory, base) if directory is not None else (MachineDirectory(path=base / "machines.json"), base)
 
 
-def _resolve_host_target(
-    args: Mapping[str, Any],
-    store: MachineDirectory,
-) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+def _resolve_host_target(args: Mapping[str, Any], store: MachineDirectory) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     """Return `(alias, host_spec, full_record_or_None)` from tool arguments."""
     target = str(args.get("alias") or args.get("host") or "").strip()
     try:
@@ -84,31 +79,20 @@ def _resolve_host_target(
         host_info = rec.get("host") or {}
         ip = str(host_info.get("ip") or host_info.get("host") or "").strip()
         alias = str(rec.get("alias") or ip).strip()
-        spec = {
-            "host": ip,
-            "port": int(args.get("port") or host_info.get("port") or 22),
-            "user": str(args.get("user") or host_info.get("user") or "root").strip() or "root",
-        }
-        if args.get("identity_file") or host_info.get("identity_file"):
-            spec["identity_file"] = str(args.get("identity_file") or host_info["identity_file"])
-        if args.get("auth_ref") or host_info.get("auth_ref"):
-            spec["auth_ref"] = str(args.get("auth_ref") or host_info["auth_ref"])
+        spec = {"host": ip, "port": int(args.get("port") or host_info.get("port") or 22),
+                "user": str(args.get("user") or host_info.get("user") or "root").strip() or "root"}
+        for key in ("identity_file", "auth_ref"):
+            if args.get(key) or host_info.get(key):
+                spec[key] = str(args.get(key) or host_info[key])
         return alias, spec, rec
     except (MachineDirectoryUnavailable, MachineNotFoundError):
         if not target:
-            raise caller_error(
-                "no machine registered or specified; pass `host` (or `alias`) or register a machine with mindie_hosts(action='upsert', ...)"
-            )
-        # Allow direct ad-hoc host IP/hostname when explicitly provided
-        spec = {
-            "host": str(args.get("host") or target).strip(),
-            "port": int(args.get("port") or 22),
-            "user": str(args.get("user") or "root").strip() or "root",
-        }
-        if args.get("identity_file"):
-            spec["identity_file"] = str(args["identity_file"])
-        if args.get("auth_ref"):
-            spec["auth_ref"] = str(args["auth_ref"])
+            raise caller_error("no machine registered or specified; pass `host` (or `alias`) or register a machine with mindie_hosts(action='upsert', ...)")
+        spec = {"host": str(args.get("host") or target).strip(), "port": int(args.get("port") or 22),
+                "user": str(args.get("user") or "root").strip() or "root"}
+        for key in ("identity_file", "auth_ref"):
+            if args.get(key):
+                spec[key] = str(args[key])
         return target, spec, None
 
 
@@ -263,19 +247,15 @@ def handle_hosts(
         inv_path = store.upsert_machine(record, set_default=bool(args.get("set_default")))
         endpoints_doc = store.endpoints_document()
         npu_top_sync = _sync_host_to_npu_top(
-            host=host_ip,
-            port=port,
-            user=user,
-            alias=alias,
-            machine_type=host_entry.get("machine_type"),
-            auth_ref=host_entry.get("auth_ref"),
+            host=host_ip, port=port, user=user, alias=alias,
+            machine_type=host_entry.get("machine_type"), auth_ref=host_entry.get("auth_ref"),
         )
         return {
             "state": "ready", "action": "upsert", "alias": alias, "record": record, "probe": probe_summary,
-            "npu_top_sync": npu_top_sync,
-            **({"authentication": authentication} if authentication else {}),
+            "npu_top_sync": npu_top_sync, **({"authentication": authentication} if authentication else {}),
             "inventory_path": str(inv_path), "endpoints_file": str(endpoints_file_path(inv_path.parent)),
-            "default_alias": endpoints_doc.get("default_alias"), "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
+            "default_alias": endpoints_doc.get("default_alias"),
+            "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
         }
 
     if action == "remove":
@@ -508,19 +488,24 @@ def handle_container(
             user=args.get("container_user") or args.get("user_namespace") or args.get("user_tag") or args.get("user"),
             host_user=host_spec["user"], host_port=host_spec["port"],
             ssh_port=int(args["ssh_port"]) if args.get("ssh_port") else None,
-            machine_type=machine_type,
-            password=args.get("password"),
-            password_env=args.get("password_env"),
-            auth_ref=host_spec.get("auth_ref"),
-            identity_file=host_spec.get("identity_file"),
+            machine_type=machine_type, password=args.get("password"), password_env=args.get("password_env"),
+            auth_ref=host_spec.get("auth_ref"), identity_file=host_spec.get("identity_file"),
             machines=store, reserve_port=_reserve_port, alias=alias,
         )
-        if args.get("set_default"):
-            store.set_default(alias)
-        endpoints_doc = store.endpoints_document()
+        receipt_meta: dict[str, Any] = {}
+        if provisioned.get("receipt_unconfirmed"):
+            receipt_meta = {"receipt_warning": provisioned.get("receipt_warning"), "receipt_unconfirmed": True}
+        try:
+            if args.get("set_default"):
+                store.set_default(alias)
+            endpoints_doc = store.endpoints_document()
+        except (TimeoutError, OSError, MachineDirectoryUnavailable, ValueError) as exc:
+            endpoints_doc = {}
+            receipt_meta = {"receipt_warning": f"{type(exc).__name__}: {exc}", "receipt_unconfirmed": True}
         return {
             "state": "ready", "action": "provision", "alias": alias,
             "provisioned": provisioned, "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
+            **receipt_meta,
         }
 
     if action == "inspect":
@@ -580,14 +565,21 @@ def handle_container(
                     "remote_dev_endpoint": (store.endpoints_document().get("endpoints") or {}).get(alias),
                 }
 
-        if rec is not None:
-            cleaned = {k: v for k, v in rec.items() if k != "container"}
-            store.upsert_machine(cleaned)
-        endpoints_doc = store.endpoints_document()
+        receipt_meta = {}
+        try:
+            if rec is not None:
+                cleaned = {k: v for k, v in rec.items() if k != "container"}
+                store.upsert_machine(cleaned)
+            endpoints_doc = store.endpoints_document()
+        except (TimeoutError, OSError, MachineDirectoryUnavailable) as exc:
+            if unbind_only:
+                raise
+            endpoints_doc = {}
+            receipt_meta = {"receipt_warning": f"{type(exc).__name__}: {exc}", "receipt_unconfirmed": True}
         return {
             "state": "ready", "action": "remove", "alias": alias, "container_name": container_name or None,
             "unbind_only": unbind_only, "removal": removal, "reservation_release": release,
-            "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias),
+            "remote_dev_endpoint": (endpoints_doc.get("endpoints") or {}).get(alias), **receipt_meta,
         }
 
     raise caller_error(f"unsupported mindie.container action: {action!r}")

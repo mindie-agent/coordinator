@@ -38,7 +38,9 @@ The existing `rc`, `main`, `stable`, and `local-latest` selectors still select v
 - **Inspecting Recorded Evidence (`action="evidence"`)**:
   Query `section="sources"`, `"preparation"`, `"build"`, or `"diagnostics"` to inspect the exact Git commit snapshot, preparation stage timings, native build receipts, or redacted `support_bundle`.
 - **Pre-Lease Preflight Checks (`preflight`)**:
-  Run a lightweight validation command with the selected Python interpreter and placeholder port `0` **before** acquiring any NPU lease. If preflight fails, launch aborts immediately and returns `stderr` without wasting queue time or NPU leases.
+  Run a lightweight validation command with the selected Python interpreter and placeholder port `0` **before** acquiring any NPU lease. If an explicit `preflight` command exits non-zero, launch aborts immediately and returns `stderr` without wasting queue time or NPU leases; static operator AST heuristics (`op_preflight`) emit non-blocking `preflight_warnings` only and never abort submissions.
+- **Zero-Hook MCP Invocation & Explicit-Handle Reconnect (`P2.7`)**:
+  All MCP tools (`mindie_hosts`, `mindie_probe`, `mindie_container`, `mindie_lease`, `mindie_session`, `mindie_run`, `mindie_execution`) work out of the box on standard MCP `tools/call` with zero `_meta` and no required `context_file`. Host and container inventory lives in `<state_dir>/machines.json` and atomically syncs `<state_dir>/endpoints.json` for `remote-dev`. Across MCP reconnects or subagents, passing an explicit `execution_id` directly resolves and observes or stops that execution.
 
 ---
 

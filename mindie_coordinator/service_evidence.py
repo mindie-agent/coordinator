@@ -316,11 +316,9 @@ class ServiceEvidenceMixin:
 
     def _record_execution_error(self, store, row, exc) -> dict[str, Any]:
         from mindie_coordinator.managed_execution import ExecutionRequestError
-        from mindie_coordinator.provision.task_environment import TaskRootBusy
         already_failed = row.get("phase") == "failed"
-        waiting = isinstance(exc, TaskRootBusy)
-        permanent = already_failed or ((not waiting) and isinstance(exc, _service_module().PERMANENT_ERRORS))
-        if (not waiting and isinstance(exc, RemoteCommandError) and exc.returncode != 255
+        permanent = already_failed or isinstance(exc, _service_module().PERMANENT_ERRORS)
+        if (isinstance(exc, RemoteCommandError) and exc.returncode != 255
                 and row.get("phase") == "preparing" and not row.get("roles")):
             permanent = True
         if (not already_failed and not isinstance(exc, ExecutionRequestError)
@@ -349,10 +347,7 @@ class ServiceEvidenceMixin:
                     if key not in details:
                         details[key] = value
             row["error_details"] = details
-        if waiting:
-            row["phase"] = "waiting"
-        else:
-            row["phase"] = "failed" if permanent else "uncertain"
+        row["phase"] = "failed" if permanent else "uncertain"
         self._save_execution(store, row)
         if permanent and not already_failed and row.get("preparation_jobs"):
             try:

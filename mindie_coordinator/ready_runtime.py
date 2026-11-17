@@ -11,9 +11,10 @@ inheriting managed job supervision from `ManagedExecution`.
 - Remote host/container calls execute under per-entity locks (`_entity_lock`)
   outside `self.lock`, so one slow/hung host never blocks unrelated runs or
   heartbeats.
-- Any failure after `run["epoch"]` is recorded transitions the run to `uncertain`
-  (never silently reset or replaced); recovery observes the existing `task_id`
-  on the same `coordination_epoch`.
+- Any failure after a mutating host `submit` is dispatched (`submit_dispatched`
+  or `submitted`) transitions the run to `uncertain` (never silently reset or
+  replaced); pre-submit read/preflight failures remain `pending` so retries and
+  cancellations self-recover cleanly without wedging.
 
 [Timeouts & Locks]
 - SQLite uses `WAL` mode, `synchronous=FULL`, `BEGIN IMMEDIATE`, `timeout=60`s.
@@ -351,7 +352,9 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                         if binding["state"] != "bound":
                             raise ValueError("this checkout request id belongs to a returned binding; use a new request id")
                         return binding
-                candidates = [row["id"] for row in self.rows(db, "runtime") if row["state"] == "ready"
+                candidates = [row["id"] for row in self.rows(db, "runtime")
+                              if row["state"] in {"ready", "needs_repair"}
+                              and not row.get("draining")
                               and not row.get('reuse_only')
                               and row.get("user") == owner
                               and row["attestation"]["profile_key"] == profile_key
@@ -360,7 +363,9 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                 with self._entity_lock("runtime", candidate):
                     with self.lock, self.transaction() as db:
                         runtime = self.get(db, "runtime", candidate)
-                        if (runtime["state"] != "ready" or runtime.get("user") != owner
+                        if (runtime["state"] not in {"ready", "needs_repair"}
+                                or runtime.get("draining")
+                                or runtime.get("user") != owner
                                 or runtime["attestation"]["profile_key"] != profile_key):
                             continue
                     # Probes stay outside the global lock: a hung host blocks
@@ -372,9 +377,9 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                     except Exception as exc:
                         with self.lock, self.transaction() as db:
                             latest = self.get(db, "runtime", candidate)
-                            if latest["state"] == "ready" and latest["attestation"] == runtime["attestation"]:
-                                latest["state"] = "needs_repair"
-                                latest["error"] = str(exc)[:500]
+                            if latest["state"] in {"ready", "needs_repair"} and latest["attestation"] == runtime["attestation"]:
+                                latest["state"] = "draining" if latest.get("draining") else "ready"
+                                latest["last_probe_error"] = str(exc)[:500]
                                 self.put(db, "runtime", latest)
                         continue
                     row = self._checkout_row(owner, session, key, runtime, observed, requested_runtime=runtime_id)
@@ -382,9 +387,13 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                         # Re-validate after the lock-free probe: a concurrent
                         # drain/return/re-register must win over this snapshot.
                         latest = self.get(db, "runtime", candidate)
-                        if latest["state"] != "ready" or latest["attestation"] != runtime["attestation"]:
+                        if (latest["state"] not in {"ready", "needs_repair"}
+                                or latest.get("draining")
+                                or latest["attestation"] != runtime["attestation"]):
                             continue
                         latest["state"] = "bound"
+                        latest.pop("error", None)
+                        latest.pop("last_probe_error", None)
                         self.put(db, "runtime", latest)
                         self.put(db, "binding", row)
                         self.event(db, owner, "runtime-bound", binding=key, runtime=runtime["id"])
@@ -411,14 +420,12 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
             runtime = self.get(db, "runtime", binding["runtime_id"])
             if binding["state"] != "returned":
                 binding["state"] = "returned"
-                runtime["state"] = "draining" if runtime.get("draining") else "needs_repair"
+                runtime["state"] = "draining" if runtime.get("draining") else "ready"
                 self.put(db, "binding", binding)
                 self.put(db, "runtime", runtime)
                 self.event(db, owner, "runtime-returned", binding=binding_id)
             return {"status": "returned", "runtime_state": runtime["state"],
-                    "next": "owner cleans only its workers; managed supervision re-registers automatically "
-                            "through register's full idle/profile verification, otherwise an administrator "
-                            "re-verifies and registers the idle runtime"}
+                    "next": "checkout re-verifies idle runtime profile and attestation before reuse"}
 
     def refresh(self, owner: str, binding_id: str):
         """Accept an owner's explicitly prepared new native bundle, before queueing."""
@@ -506,7 +513,8 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                     raise ExecutionRequestError("runtime/profile changed since checkout")
             run = {"id": key, "owner": owner, "binding_id": binding_id, "intent": intent,
                    "task_id": "pool-" + uuid.uuid4().hex, "state": "pending", "epoch": None,
-                   "deadline": self.clock() + queue_seconds, "last_poll": 0, "created_at": utc_now(), "submitted": False}
+                   "deadline": self.clock() + queue_seconds, "last_poll": 0, "created_at": utc_now(),
+                   "submitted": False, "submit_dispatched": False}
             with self.lock, self.transaction() as db:
                 # Re-validate after the lock-free probe: a concurrent return or
                 # refresh must not be overwritten by this stale snapshot.
@@ -553,16 +561,21 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                     # observing its exact task; never submit a replacement.
                     snapshot = self.backend.host(runtime, {"action": "status", "no_probe": False})
                     if snapshot["coordination_epoch"] != run["epoch"]:
-                        raise ValueError("host epoch changed; ownership requires operator reconciliation")
-                    matches = [task for task in snapshot["tasks"] if task["task_id"] == run["task_id"]]
-                    if not matches and run["submitted"]:
-                        raise ValueError("host task disappeared; ownership remains unresolved")
-                    if matches:
-                        run["task"] = matches[0]
-                        run["state"] = matches[0]["state"]
-                        run["submitted"] = True
+                        if not run.get("submitted") and not run.get("submit_dispatched"):
+                            run["epoch"] = snapshot["coordination_epoch"]
+                            run["state"] = "pending"
+                        else:
+                            raise ValueError("host epoch changed; ownership requires operator reconciliation")
                     else:
-                        run["state"] = "pending"
+                        matches = [task for task in snapshot["tasks"] if task["task_id"] == run["task_id"]]
+                        if not matches and run["submitted"]:
+                            raise ValueError("host task disappeared; ownership remains unresolved")
+                        if matches:
+                            run["task"] = matches[0]
+                            run["state"] = matches[0]["state"]
+                            run["submitted"] = True
+                        else:
+                            run["state"] = "pending"
                     # Observation is not a retry of a possibly non-idempotent
                     # activate/preflight action. Caller observes before retry.
                     action = "poll"
@@ -625,6 +638,9 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                         submit["service_port"] = intent["service_port"]
                         submit["service_ports"] = runtime.get("service_ports", [])
                     combined = fresh_preflight or getattr(self.backend, "submit_and_acquire", None)
+                    run["submit_dispatched"] = True
+                    with self.lock, self.transaction() as db:
+                        self.put(db, "run", run)
                     with self._run_operation(run, "admission"):
                         if callable(combined):
                             # Persisted epoch/task identity survives a lost reply.
@@ -683,9 +699,15 @@ class RuntimePool(RuntimePoolReportingMixin, ManagedExecution):
                     run["environment"]["MINDIE_SERVICE_PORT"] = str(int(service_port))
                     run["service_port"] = int(service_port)
             except Exception as exc:
-                # No host epoch means no mutating host request was sent yet.
+                # Only mark `uncertain` if a mutating host request (`submit`) was
+                # actually dispatched or previously confirmed. Pre-submit read or
+                # preflight errors remain `pending` and refresh epoch on retry.
                 if not (_managed and (action == "preflight" or _preflight_new) and run.get("preflight_error")):
-                    run["state"] = "uncertain" if run["epoch"] is not None else "pending"
+                    if run.get("submit_dispatched") or run.get("submitted"):
+                        run["state"] = "uncertain"
+                    else:
+                        run["state"] = "pending"
+                        run["epoch"] = None
                 run["error"] = str(exc)[:500]
             run["last_poll"] = self.clock()
             try:
