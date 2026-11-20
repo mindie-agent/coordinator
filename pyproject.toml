@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mindie-coordinator"
-version = "0.7.13"
+version = "0.7.14"
 description = "Local MindIE coordinator: task stdio MCP and host NPU allocation"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@54ac7c03c78f9e02f379051d1613a4427559e10d",
-    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@64c5a8d0ca9fe344e7af05f89fc0de6249f2368a",
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@7464cbb4381e9dc996871d192eb3f05f61dfdb28",
+    "remote-dev @ git+https://github.com/mindie-agent/remote-dev@784fc2ca1db172f683889a6d47543c37141b3278",
     "setuptools-scm>=8",
 ]
 

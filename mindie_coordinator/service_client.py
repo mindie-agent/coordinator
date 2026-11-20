@@ -21,8 +21,8 @@ loop bound onto `CoordinatorService`.
   `RUN_PRUNE_COOLDOWN_SECONDS` (`300`s) within `RUN_PRUNE_BUDGET_SECONDS` (`1`s).
 
 [Side-Effect Policy]
-- Mutates only coordinator IPC/startup markers and daemon process state; the
-  daemon tick loop persists through the service/pool/store owners.
+- Mutates only coordinator IPC/startup markers and daemon process state; on
+  Windows, daemon spawn requests Win32 Job breakaway with `winerror=5` fallback.
 - Progress workers record errors onto the persisted execution, never a stub
   dispatch row, so a sqlite lock cannot rewrite ``failed`` to ``uncertain``.
 """
@@ -103,8 +103,9 @@ def lock_path(state_dir: Path) -> Path:
 def require_native_owner(state_dir: Path, *, platform: str | None = None) -> None:
     if (platform or os.name) == "nt":
         return
+    base = state_dir if isinstance(state_dir, Path) else Path(state_dir)
     try:
-        address = json.loads((Path(state_dir) / IPC_NAME).read_text(encoding="utf-8"))
+        address = json.loads((base / IPC_NAME).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return
     except TimeoutError:
@@ -317,16 +318,52 @@ def _ensure_daemon_locked(state_dir: Path, client: CoordinatorClient) -> Coordin
             raise RuntimeError("daemon shutdown is still pending")
     from mindie_coordinator.local_exec import utf8_python_env
 
-    log_path = Path(state_dir) / "daemon.log"
+    state = state_dir if isinstance(state_dir, Path) else Path(state_dir)
+    log_path = state / "daemon.log"
     environment = utf8_python_env()
-    environment.setdefault("REMOTE_DEV_STATE_DIR", str(Path(state_dir).resolve().parent / "remote-dev-state"))
-    options = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
-               if os.name == "nt" else {"start_new_session": True})
+    environment.setdefault("REMOTE_DEV_STATE_DIR", str(state.resolve().parent / "remote-dev-state"))
+    command = [sys.executable, "-m", "mindie_coordinator", "daemon", "--state-dir", str(state)]
     with log_path.open("ab") as log:
-        process = service_module.subprocess.Popen(
-            [sys.executable, "-m", "mindie_coordinator", "daemon", "--state-dir", str(state_dir)],
-            stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=environment, **options,
-        )
+        if os.name == "nt":
+            no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+            new_group = (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP")
+                else 0x00000200
+            )
+            base_flags = no_window | new_group
+            breakaway_flag = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            try:
+                process = service_module.subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                    env=environment,
+                    creationflags=base_flags | breakaway_flag,
+                )
+            except TimeoutError:
+                raise
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != 5:
+                    raise
+                process = service_module.subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                    env=environment,
+                    creationflags=base_flags,
+                )
+        else:
+            process = service_module.subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                env=environment,
+                start_new_session=True,
+            )
     deadline = time.time() + 5
     while time.time() < deadline:
         try:
@@ -382,7 +419,7 @@ def serve(service_instance) -> int:
     path = socket_path(service_instance.state_dir)
     server = None
     marker = service_instance.state_dir / IPC_NAME
-    temporary = marker.with_name(marker.name + "." + uuid.uuid4().hex + ".tmp")
+    temporary = marker.with_name(f"{marker.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         path.unlink(missing_ok=True)
         windows = os.name == "nt"

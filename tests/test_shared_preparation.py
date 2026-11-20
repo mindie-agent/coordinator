@@ -18,12 +18,26 @@ from mindie_coordinator.backend import RemoteBackend
 from mindie_coordinator.provision.task_environment import reusable_preparation
 
 
+def _win_long_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    raw = os.fspath(path)
+    if raw.startswith("\\\\?\\"):
+        return Path(raw)
+    norm = os.path.abspath(raw)
+    if norm.startswith("\\\\?\\"):
+        return Path(norm)
+    if norm.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + norm.lstrip("\\"))
+    return Path("\\\\?\\" + norm)
+
+
 @pytest.fixture
 def bundle(tmp_path, monkeypatch, native_extension):
     monkeypatch.setattr(cache, 'native_import_receipt', profile.native_import_receipt, raising=False)
-    monkeypatch.setattr(cache, 'native_import_receipt', profile.native_import_receipt, raising=False)
-    source, target, shared = tmp_path / 'alice-build', tmp_path / 'bob-execution', tmp_path / 'host-cache'
-    system = tmp_path / 'image-system'
+    base = _win_long_path(tmp_path)
+    source, target, shared = base / 'alice-build', base / 'bob-execution', base / 'host-cache'
+    system = base / 'image-system'
     system.mkdir()
     settings = {field: '1.0' for field in profile.PROFILE_FIELDS}
     settings.update(image_digest='sha256:same-image', python_abi=sysconfig.get_config_var('SOABI'),

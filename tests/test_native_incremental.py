@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -12,13 +13,28 @@ from mindie_coordinator import native_incremental as native
 from mindie_coordinator.build_inputs import VLLM_ASCEND_REINSTALL_PATTERNS, build_input_fingerprints, submodule_content
 
 
+def _win_long_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    raw = os.fspath(path)
+    if raw.startswith("\\\\?\\"):
+        return Path(raw)
+    norm = os.path.abspath(raw)
+    if norm.startswith("\\\\?\\"):
+        return Path(norm)
+    if norm.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + norm.lstrip("\\"))
+    return Path("\\\\?\\" + norm)
+
+
 def blob(data):
     return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
 
 
 @pytest.fixture
 def kernel(tmp_path):
-    root, bundle = tmp_path / 'execution', tmp_path / 'bundle'
+    base = _win_long_path(tmp_path)
+    root, bundle = base / 'execution', base / 'bundle'
     source = 'csrc/moe/add_rms_norm_bias/op_kernel/add_rms_norm_bias.cpp'
     prefix = 'vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_impl/ai_core/tbe'
     installed = prefix + '/custom_transformer_impl/ascendc/add_rms_norm_bias/add_rms_norm_bias.cpp'

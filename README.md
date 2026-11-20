@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.13-blue" alt="Release v0.7.13"></a>
+  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.14-blue" alt="Release v0.7.14"></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI%20%7C%20Python%20SDK-00ADD8" alt="MCP, CLI & SDK">
   <img src="https://img.shields.io/badge/Hardware-Ascend%20NPU-FF6F00" alt="Ascend NPU">
@@ -34,7 +34,7 @@
 - **本地改代码，远端自动隔离同步**：提交任务那一刻自动锁定你本地 Git 工作树（连同未提交的修改和子模块），增量同步到远端你专属的持久化容器（`mindie-<你的用户名>`）里的独立目录中，完全不动你本地的 `HEAD` 和暂存区。
 - **宿主机统一排队分卡，跑完立即释放**：通过部署在宿主机上的零依赖协调脚本统一分配物理 NPU 卡和服务端口（`30000–45999`）。既支持独占多卡，也支持显式指定单张卡跟别人共享调试（`allow_external_busy=True`）；任务结束或停止时自动清理整个进程树并归还 NPU 租约。
 - **编译好的算子与环境智能复用**：只要底层依赖和 C++/Ascend 算子没变、只改了 Python 代码，下次启动秒级复用已验证过的运行环境，省去重复编译和漫长的导入检查。
-- **一套后台，三种用法**：同时提供 **5 个标准 MCP 工具**（给 AI 编程助手用）、**`mindie` 命令行工具**（给终端用）和 **Python `TaskClient` SDK**（给脚本用）。
+- **一套后台，三种用法**：同时提供 **9 个标准 MCP 工具**（给 AI 编程助手用）、**`mindie` 命令行工具**（给终端用）和 **Python `TaskClient` SDK**（给脚本用）。
 
 ```mermaid
 flowchart LR

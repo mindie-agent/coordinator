@@ -492,16 +492,17 @@ class EnvManagerAndMcpIntegrationTests(unittest.TestCase):
             rd_endpoint, "_ENV_RESOLVERS_LOADED", True
         ):
             setup_resolvers()
-            # 1. Antigravity view_file style resolved via coordinator alias
+            # 1. Antigravity read_file style resolved via coordinator alias
             with mock.patch.object(rd_tools, "remote_read", return_value={"ok": True}) as mock_read:
                 rd_tools.call_tool(
-                    "remote_view_file",
+                    "remote_read_file",
                     {
                         "alias": "atlas-a3",
-                        "AbsolutePath": "/vllm-workspace/model.py",
+                        "Path": "/vllm-workspace/model.py",
                         "StartLine": 10,
                         "EndLine": 25,
                     },
+                    profile="agy",
                 )
                 ep = mock_read.call_args.args[0]
                 self.assertEqual((ep.host, ep.port, ep.container), ("10.0.0.88", 22, "mindie-dev-88"))
