@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.13-blue" alt="Release v0.7.13"></a>
+  <a href="https://github.com/mindie-agent/coordinator/releases"><img src="https://img.shields.io/badge/Release-v0.7.14-blue" alt="Release v0.7.14"></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI%20%7C%20Python%20SDK-00ADD8" alt="MCP, CLI & SDK">
   <img src="https://img.shields.io/badge/Hardware-Ascend%20NPU-FF6F00" alt="Ascend NPU">
@@ -34,7 +34,7 @@ When multiple developers and AI agents share remote Ascend NPU servers to build 
 - **Automatic Git Snapshot Sync Without Touching Your Local Branch**: Captures your exact local Git working tree (including uncommitted edits and submodules) at submission time and materializes it into an isolated folder inside your persistent remote container (`mindie-<user>`) — without moving your local `HEAD` or git index.
 - **Fair Host NPU & Port Queueing**: Arbitrates physical NPU cards and service ports (`30000–45999`) through a zero-dependency host module. Supports both exclusive multi-card jobs and explicit single-card sharing (`allow_external_busy=True`), automatically draining child processes and releasing leases when finished.
 - **Instant Native Build & Environment Reuse**: When your C++/Ascend native inputs haven't changed and you only edited Python files, `mindie-coordinator` reuses previously verified build artifacts and import proofs in seconds.
-- **One Daemon, Three Interfaces**: Exposes **5 stdio MCP tools** for AI agents, the **`mindie` CLI** for terminal workflows, and the **Python `TaskClient` SDK** for scripts.
+- **One Daemon, Three Interfaces**: Exposes **9 stdio MCP tools** for AI agents, the **`mindie` CLI** for terminal workflows, and the **Python `TaskClient` SDK** for scripts.
 
 ```mermaid
 flowchart LR

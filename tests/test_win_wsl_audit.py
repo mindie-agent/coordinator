@@ -204,3 +204,86 @@ def test_npu_top_bridge_propagates_timeout_error_and_service_client_keeps_no_win
         client._post("/api/servers/batch", {})
     src = Path(service_client.__file__).read_text(encoding="utf-8")
     assert "CREATE_NO_WINDOW" in src
+
+
+def test_windows_daemon_spawn_requests_job_breakaway_and_falls_back_only_on_winerror_5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "coordinator-nt"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    service_module = service_client._service_module()
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+    base_flags = no_window | new_group
+
+    started = {"ready": False}
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+    next_effects: list[BaseException | None] = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.runtime = None
+
+        def call(self, op: str, **_payload: object) -> dict[str, object]:
+            assert op == "ping"
+            if not started["ready"]:
+                raise FileNotFoundError("daemon not started")
+            return {"runtime": [{"loaded": {"package": "mindie-coordinator", "pid": 4242}}]}
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> mock.Mock:
+        popen_calls.append((list(cmd), dict(kwargs)))
+        effect = next_effects.pop(0) if next_effects else None
+        if effect is not None:
+            raise effect
+        started["ready"] = True
+        return mock.Mock(poll=lambda: None, returncode=None)
+
+    monkeypatch.setattr(service_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(service_client.os, "name", "nt")
+
+    # 1. Breakaway-allowed: first Popen uses CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
+    client = FakeClient()
+    service_client._ensure_daemon_locked(state_dir, client)  # type: ignore[arg-type]
+    assert len(popen_calls) == 1
+    assert popen_calls[0][1]["creationflags"] == (base_flags | breakaway)
+    assert "start_new_session" not in popen_calls[0][1]
+
+    # 2. Outer Job denies breakaway (ERROR_ACCESS_DENIED / winerror == 5): retries once with base_flags
+    started["ready"] = False
+    popen_calls.clear()
+    denied = PermissionError("Access is denied")
+    denied.winerror = 5  # type: ignore[attr-defined]
+    next_effects.extend([denied, None])
+    service_client._ensure_daemon_locked(state_dir, FakeClient())  # type: ignore[arg-type]
+    assert len(popen_calls) == 2
+    assert popen_calls[0][1]["creationflags"] == (base_flags | breakaway)
+    assert popen_calls[1][1]["creationflags"] == base_flags
+    assert (int(popen_calls[1][1]["creationflags"]) & breakaway) == 0  # type: ignore[arg-type]
+
+    # 3. TimeoutError propagates immediately without fallback retry
+    started["ready"] = False
+    popen_calls.clear()
+    next_effects.append(TimeoutError("spawn timeout"))
+    with pytest.raises(TimeoutError, match="spawn timeout"):
+        service_client._ensure_daemon_locked(state_dir, FakeClient())  # type: ignore[arg-type]
+    assert len(popen_calls) == 1
+
+    # 4. Non-winerror=5 OSError (e.g. winerror == 2) propagates immediately without fallback retry
+    started["ready"] = False
+    popen_calls.clear()
+    missing = FileNotFoundError("executable missing")
+    missing.winerror = 2  # type: ignore[attr-defined]
+    next_effects.append(missing)
+    with pytest.raises(FileNotFoundError, match="executable missing"):
+        service_client._ensure_daemon_locked(state_dir, FakeClient())  # type: ignore[arg-type]
+    assert len(popen_calls) == 1
+
+    # 5. POSIX keeps start_new_session=True unchanged
+    started["ready"] = False
+    popen_calls.clear()
+    monkeypatch.setattr(service_client.os, "name", "posix")
+    service_client._ensure_daemon_locked(state_dir, FakeClient())  # type: ignore[arg-type]
+    assert len(popen_calls) == 1
+    assert popen_calls[0][1].get("start_new_session") is True
+    assert "creationflags" not in popen_calls[0][1]

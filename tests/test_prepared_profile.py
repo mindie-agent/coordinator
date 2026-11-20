@@ -66,7 +66,12 @@ class PreparedProfileTests(unittest.TestCase):
             (package / "vllm_ascend_C.so").write_text("extension")
             (vendor / "config.json").write_text("config")
             (root / "external.so").write_text("external")
-            (vendor / "kernel.so").symlink_to(root / "external.so")
+            try:
+                (vendor / "kernel.so").symlink_to(root / "external.so")
+            except TimeoutError:
+                raise
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable on this host")
             with self.assertRaisesRegex(ValueError, "symlink"):
                 installed_native_files(root)
 
@@ -80,7 +85,12 @@ class PreparedProfileTests(unittest.TestCase):
             (vendor / "config.json").write_text("config")
             (vendor / "actual.so").write_text("kernel")
             alias = vendor / "alias.so"
-            alias.symlink_to("actual.so")
+            try:
+                alias.symlink_to("actual.so")
+            except TimeoutError:
+                raise
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable on this host")
             files = installed_native_files(root)
             self.assertFalse(alias.is_symlink())
             self.assertEqual(alias.read_text(), "kernel")
